@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://ui/hangar/hangar_ui.gd" id="1_hangar"]
+
+[node name="Hangar" type="Control"]
+script = ExtResource("1_hangar")

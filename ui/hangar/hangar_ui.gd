@@ -1,0 +1,241 @@
+class_name HangarUI
+extends Control
+## Pre-match deck-building screen (GDD section 6): configure each unit's
+## 8-slot Trigger Holder (4 Main + 4 Sub) against a Trion budget.
+
+var _units: Array[UnitData] = []
+var _current_unit := 0
+
+var _unit_tabs: HBoxContainer
+var _budget_label: Label
+var _budget_bar: ProgressBar
+var _main_col: VBoxContainer
+var _sub_col: VBoxContainer
+var _palette: HBoxContainer
+var _start_button: Button
+
+
+func _ready() -> void:
+	set_anchors_preset(Control.PRESET_FULL_RECT)
+	_build_layout()
+	_load_squad()
+
+
+func _load_squad() -> void:
+	_units = SquadStore.get_squad()
+	for u in _units:
+		u.ensure_slot_arrays()
+	_current_unit = 0
+	_refresh_all()
+
+
+# --- Layout -----------------------------------------------------------------
+
+func _build_layout() -> void:
+	var bg := ColorRect.new()
+	bg.color = Color(0.05, 0.07, 0.11)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(bg)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 48
+	vbox.offset_right = -48
+	vbox.offset_top = 24
+	vbox.offset_bottom = -24
+	vbox.add_theme_constant_override("separation", 12)
+	add_child(vbox)
+
+	var title := Label.new()
+	title.text = "HANGAR — Trigger Holder"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 30)
+	vbox.add_child(title)
+
+	_unit_tabs = HBoxContainer.new()
+	_unit_tabs.alignment = BoxContainer.ALIGNMENT_CENTER
+	_unit_tabs.add_theme_constant_override("separation", 8)
+	vbox.add_child(_unit_tabs)
+
+	var budget_row := HBoxContainer.new()
+	budget_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	budget_row.add_theme_constant_override("separation", 12)
+	vbox.add_child(budget_row)
+
+	_budget_label = Label.new()
+	_budget_label.add_theme_font_size_override("font_size", 18)
+	budget_row.add_child(_budget_label)
+
+	_budget_bar = ProgressBar.new()
+	_budget_bar.custom_minimum_size = Vector2(320, 22)
+	_budget_bar.show_percentage = false
+	budget_row.add_child(_budget_bar)
+
+	var columns := HBoxContainer.new()
+	columns.alignment = BoxContainer.ALIGNMENT_CENTER
+	columns.add_theme_constant_override("separation", 48)
+	columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(columns)
+
+	_main_col = _build_column("Main Slots (Dominant Hand)", columns)
+	_sub_col = _build_column("Sub Slots (Off Hand)", columns)
+
+	var palette_label := Label.new()
+	palette_label.text = "Available Triggers (drag into slots · right-click a slot to clear)"
+	palette_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(palette_label)
+
+	_palette = HBoxContainer.new()
+	_palette.alignment = BoxContainer.ALIGNMENT_CENTER
+	_palette.add_theme_constant_override("separation", 8)
+	vbox.add_child(_palette)
+
+	var bottom := HBoxContainer.new()
+	bottom.alignment = BoxContainer.ALIGNMENT_CENTER
+	bottom.add_theme_constant_override("separation", 16)
+	vbox.add_child(bottom)
+
+	var reset := Button.new()
+	reset.text = "Reset Squad"
+	reset.pressed.connect(_on_reset_pressed)
+	bottom.add_child(reset)
+
+	_start_button = Button.new()
+	_start_button.text = "Start Match"
+	_start_button.custom_minimum_size = Vector2(220, 44)
+	_start_button.pressed.connect(_on_start_pressed)
+	bottom.add_child(_start_button)
+
+
+func _build_column(title_text: String, parent: HBoxContainer) -> VBoxContainer:
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 6)
+	var header := Label.new()
+	header.text = title_text
+	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	header.add_theme_font_size_override("font_size", 18)
+	col.add_child(header)
+	parent.add_child(col)
+	return col
+
+
+# --- Refresh ----------------------------------------------------------------
+
+func _refresh_all() -> void:
+	_refresh_unit_tabs()
+	_refresh_slots()
+	_refresh_palette()
+	_refresh_budget()
+
+
+func _refresh_unit_tabs() -> void:
+	for c in _unit_tabs.get_children():
+		c.queue_free()
+	for i in _units.size():
+		var b := Button.new()
+		b.text = "%d. %s" % [i + 1, _units[i].unit_name]
+		b.toggle_mode = true
+		b.button_pressed = (i == _current_unit)
+		b.pressed.connect(_on_unit_tab.bind(i))
+		_unit_tabs.add_child(b)
+
+
+func _refresh_slots() -> void:
+	_clear_column(_main_col)
+	_clear_column(_sub_col)
+
+	var u := _units[_current_unit]
+	var main_header := Label.new()
+	main_header.text = "Main Slots (Dominant Hand)"
+	main_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	main_header.add_theme_font_size_override("font_size", 18)
+	_main_col.add_child(main_header)
+	var sub_header := Label.new()
+	sub_header.text = "Sub Slots (Off Hand)"
+	sub_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub_header.add_theme_font_size_override("font_size", 18)
+	_sub_col.add_child(sub_header)
+
+	for i in UnitData.MAX_MAIN_SLOTS:
+		var s := HangarSlot.new(false, i)
+		s.dropped.connect(_on_slot_dropped)
+		s.clear_requested.connect(_on_slot_clear)
+		s.set_card(u.get_slot(false, i))
+		_main_col.add_child(s)
+
+	for i in UnitData.MAX_SUB_SLOTS:
+		var s := HangarSlot.new(true, i)
+		s.dropped.connect(_on_slot_dropped)
+		s.clear_requested.connect(_on_slot_clear)
+		s.set_card(u.get_slot(true, i))
+		_sub_col.add_child(s)
+
+
+func _refresh_palette() -> void:
+	for c in _palette.get_children():
+		c.queue_free()
+	for card in TriggerLibrary.all_cards():
+		_palette.add_child(LoadoutCard.new(card))
+
+
+func _refresh_budget() -> void:
+	var u := _units[_current_unit]
+	var total := u.get_total_trion_cost()
+	var cap := u.max_trion_capacity
+	_budget_label.text = "Trion %d / %d" % [total, cap]
+	_budget_bar.max_value = cap
+	_budget_bar.value = total
+	_budget_bar.modulate = Color(1, 0.4, 0.4) if total > cap else Color.WHITE
+
+
+func _clear_column(col: VBoxContainer) -> void:
+	for c in col.get_children():
+		c.queue_free()
+
+
+# --- Interaction ------------------------------------------------------------
+
+func _on_unit_tab(i: int) -> void:
+	if i == _current_unit:
+		return
+	_current_unit = i
+	_refresh_all()
+
+
+func _on_slot_dropped(slot: HangarSlot, data: Dictionary) -> void:
+	var card: TriggerCard = data["card"]
+	var is_move: bool = data.get("from_slot", false)
+	var u := _units[_current_unit]
+
+	if is_move:
+		var src_sub: bool = data["slot_is_sub"]
+		var src_idx: int = data["index"]
+		if src_sub == slot.slot_is_sub and src_idx == slot.index:
+			return
+		u.clear_slot(src_sub, src_idx)
+
+	if u.can_assign_slot(card, slot.slot_is_sub, slot.index):
+		u.set_slot(card, slot.slot_is_sub, slot.index)
+	elif is_move:
+		u.set_slot(card, data["slot_is_sub"], data["index"])  # restore source
+
+	_refresh_slots()
+	_refresh_budget()
+
+
+func _on_slot_clear(slot: HangarSlot) -> void:
+	_units[_current_unit].clear_slot(slot.slot_is_sub, slot.index)
+	_refresh_slots()
+	_refresh_budget()
+
+
+func _on_reset_pressed() -> void:
+	SquadStore.reset_to_defaults()
+	_load_squad()
+
+
+func _on_start_pressed() -> void:
+	for u in _units:
+		u.ensure_slot_arrays()
+	get_tree().change_scene_to_file("res://levels/board/main.tscn")
