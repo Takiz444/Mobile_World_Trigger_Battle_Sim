@@ -13,6 +13,11 @@ var _main_col: VBoxContainer
 var _sub_col: VBoxContainer
 var _palette: HBoxContainer
 var _start_button: Button
+var _server_input: LineEdit
+var _join_input: LineEdit
+var _host_btn: Button
+var _join_btn: Button
+var _net_status: Label
 
 
 func _ready() -> void:
@@ -106,6 +111,43 @@ func _build_layout() -> void:
 	_start_button.custom_minimum_size = Vector2(220, 44)
 	_start_button.pressed.connect(_on_start_pressed)
 	bottom.add_child(_start_button)
+
+	# --- Async multiplayer section ---
+	var mp_label := Label.new()
+	mp_label.text = "— Async Multiplayer —"
+	mp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(mp_label)
+
+	var mp_row := HBoxContainer.new()
+	mp_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	mp_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(mp_row)
+
+	_server_input = LineEdit.new()
+	_server_input.text = MatchSession.server_url
+	_server_input.placeholder_text = "Server URL"
+	_server_input.custom_minimum_size = Vector2(240, 0)
+	mp_row.add_child(_server_input)
+
+	_host_btn = Button.new()
+	_host_btn.text = "Host Online Match"
+	_host_btn.pressed.connect(_on_host_online)
+	mp_row.add_child(_host_btn)
+
+	_join_input = LineEdit.new()
+	_join_input.placeholder_text = "Match ID"
+	_join_input.custom_minimum_size = Vector2(170, 0)
+	mp_row.add_child(_join_input)
+
+	_join_btn = Button.new()
+	_join_btn.text = "Join"
+	_join_btn.pressed.connect(_on_join_online)
+	mp_row.add_child(_join_btn)
+
+	_net_status = Label.new()
+	_net_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_net_status.modulate = Color(1.0, 0.7, 0.5)
+	vbox.add_child(_net_status)
 
 
 func _build_column(title_text: String, parent: HBoxContainer) -> VBoxContainer:
@@ -236,6 +278,59 @@ func _on_reset_pressed() -> void:
 
 
 func _on_start_pressed() -> void:
+	MatchSession.mode = MatchSession.Mode.LOCAL
+	_start_match_scene()
+
+
+func _on_host_online() -> void:
+	_net_status.text = ""
+	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.server_url = _server_input.text.strip_edges()
+	MatchSession.squad = SquadStore.get_squad().duplicate()
+	MatchSession.seed = 12345
+
+	var backend := HttpBackend.new()
+	add_child(backend)
+	backend.server_url = MatchSession.server_url
+	var res := await backend.create_match(MatchSession.seed, PlanCodec.encode_squad(MatchSession.squad))
+	backend.queue_free()
+
+	if not res.get("success", false):
+		_net_status.text = "Host failed: %s" % str(res.get("error", "?"))
+		return
+	MatchSession.match_id = str(res["body"].get("match_id", ""))
+	MatchSession.team = 0
+	_net_status.text = "Match created: %s" % MatchSession.match_id
+	_start_match_scene()
+
+
+func _on_join_online() -> void:
+	_net_status.text = ""
+	var id := _join_input.text.strip_edges()
+	if id == "":
+		_net_status.text = "Enter a match ID to join."
+		return
+
+	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.server_url = _server_input.text.strip_edges()
+	MatchSession.squad = SquadStore.get_squad().duplicate()
+
+	var backend := HttpBackend.new()
+	add_child(backend)
+	backend.server_url = MatchSession.server_url
+	var res := await backend.join_match(id, PlanCodec.encode_squad(MatchSession.squad))
+	backend.queue_free()
+
+	if not res.get("success", false):
+		_net_status.text = "Join failed: %s" % str(res.get("error", "?"))
+		return
+	MatchSession.match_id = id
+	MatchSession.team = 1
+	_net_status.text = "Joined match %s" % id
+	_start_match_scene()
+
+
+func _start_match_scene() -> void:
 	for u in _units:
 		u.ensure_slot_arrays()
 	get_tree().change_scene_to_file("res://levels/board/main.tscn")

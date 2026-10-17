@@ -11,14 +11,19 @@ See `Project Docs/GDDV1.pdf` for the full design document.
 ```
 /project.godot
 /common/           # Shared resources, math, and data definitions
-    /hex_grid/     # Hexagonal grid math (axial coords, pathfinding)
+    /hex_grid/     # Hexagonal grid math (axial coords, pathfinding, mesh)
     /data/         # Core Resource/RefCounted definitions
+    /combat/       # Deterministic tick engine + shared match runner
+    /net/          # JSON codec, HTTP client, HTTP server
 /entities/         # Units, actors (future)
 /ui/
-    /timeline/      # 6-tick timeline ribbon + drag-and-drop planning UI
-    /hangar/        # pre-match deck-builder (Trigger Holder + Trion budget)
+    /timeline/     # 6-tick timeline ribbon + drag-and-drop planning UI
+    /event_log/    # On-screen combat log panel
+    /hangar/       # pre-match deck-builder (Trigger Holder + Trion budget)
 /levels/
-    /board/        # 3D tabletop diorama (hex board + camera)
+    /board/        # 3D tabletop diorama (hex board + camera + controller)
+/server/           # Headless REST backend (async multiplayer)
+/test/             # Headless smoke / networking tests
 /addons/           # Third-party plugins
 ```
 
@@ -27,56 +32,86 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 ## Implemented So Far
 
 ### Hex Grid Math — `common/hex_grid/hex_coord.gd`
-Static `HexCoord` utility:
-- Axial ⇄ cube coordinate conversion (`Vector2i` = q, r)
-- Neighbors, distance, ring, spiral, and line drawing
-- Pointy-top axial ⇄ 3D world (XZ plane) mapping
-- Deterministic A* pathfinding with a `Callable` walkability check
+- Axial ⇄ cube conversion, neighbors/ring/line, 3D (XZ) mapping, deterministic A*.
 
 ### Data Definitions — `common/data/`
-- `trigger_card.gd` — `TriggerCard` (Trion equip cost, AT cost, power, card type)
-- `unit_data.gd` — `UnitData` (stats + 8-slot Trigger Holder, Trion budget + slot-placement validation)
-- `tick_action.gd` — `TickAction` (per-tick Main/Sub card bundle, Full Guard detection)
-- `turn_plan.gd` — `TurnPlan` (6-tick timelines, AT economy, Mental Load, Full Guard, melee Penchant)
-- `trigger_library.gd` — `TriggerLibrary` (13-card catalog + sample units)
+- `trigger_card.gd`, `unit_data.gd` (8-slot Trigger Holder + Trion budget),
+  `tick_action.gd`, `turn_plan.gd` (6-tick AT economy), `trigger_library.gd`
+  (13-card catalog + `get_card(name)` for network serialization).
 
-### Global State — `common/squad_store.gd`
-- `SquadStore` — static player squad (survives the Hangar → Battle scene change)
+### Global State — `common/squad_store.gd` / `common/match_session.gd`
+- `SquadStore` — static player squad (survives Hangar → Battle).
+- `MatchSession` — static online config (mode, server URL, match id, team).
 
 ### Combat Resolution — `common/combat/`
-- `unit_state.gd` — `UnitState` (runtime HP, hex, facing, stealth, per-tick shield state)
-- `match_state.gd` — `MatchState` (two squads, cover, spider wires, seeded RNG)
-- `combat_event.gd` — `CombatEvent` (resolution log entry for replay)
-- `tick_engine.gd` — `TickEngine` (deterministic 6-tick pipeline: State → Movement/Traps → Defense → Attack → Resolution, with per-tick `resolve_tick()` for replay)
+- `unit_state.gd`, `match_state.gd`, `combat_event.gd`
+- `tick_engine.gd` — deterministic 6-tick pipeline (resumable per-tick).
+- `match_runner.gd` — shared squad placement, turn resolution, winner detection,
+  and the GDD 3.1 "Stand Ground + Shield" fallback plan. Used by both the local
+  client and the headless server.
 
-### Hex Mesh — `common/hex_grid/hex_mesh.gd`
-- `HexMesh` — procedural pointy-top hex-prism `ArrayMesh` + convex collision shape
+### Networking — `common/net/`
+- `plan_codec.gd` — JSON (de)serialization for squads, plans, and results
+  (cards travel by name against the shared catalog).
+- `http_backend.gd` — awaitable Godot HTTP client (create/join/submit/get).
+- `http_server.gd` — minimal HTTP/1.1 JSON server over `TCPServer`.
 
-### Board Diorama — `levels/board/`
-- `hex_board.gd` — `HexBoard` (procedural hex tiles, mouse hover/selection raycasting, hex ⇄ world helpers)
-- `board_camera.gd` — `BoardCamera` (orthographic orbit/pan/zoom, isometric default)
-- `board_units.gd` — `BoardUnits` (team-colored unit markers + facing nose + HP labels)
-- `match_controller.gd` — `MatchController` (places 4v4 squads, board-click targeting, enemy AI, Submit → resolve → per-tick replay)
-- `main.gd` + `main.tscn` — prototype root scene (environment, lights, board, camera, UI, match)
+### Headless Backend — `server/server.gd`
+- REST API: `GET /health`, `POST /match/create`, `POST /match/{id}/join`,
+  `POST /match/{id}/submit`, `GET /match/{id}`.
+- Server-authoritative deterministic resolution via `MatchRunner`; in-memory
+  match store; 60s turn-timeout auto-fill (GDD 3.1).
 
-### Timeline UI — `ui/timeline/`
-- `timeline_ui.gd` — `TimelineUI` (unit tabs, 6-tick ribbon, card hand, AT meter, Submit All)
-- `timeline_slot.gd` — `TimelineSlot` (Main/Sub drop target + drag source, right-click to clear)
-- `action_card.gd` — `ActionCard` (draggable hand card)
+### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
+- Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
+- `board_units.gd` — team-colored markers with tweened movement/facing,
+  damage flash, and bail-out animations.
+- `match_controller.gd` — local (vs AI) and online (async) match orchestration,
+  multi-turn lifecycle, win/loss overlay, and replay animation.
 
-### Hangar — `ui/hangar/`
-- `hangar_ui.gd` — `HangarUI` (unit tabs, 4 Main + 4 Sub slots, Trion budget bar, card palette, Start Match)
-- `hangar_slot.gd` — `HangarSlot` (loadout slot: drop/move/clear)
-- `loadout_card.gd` — `LoadoutCard` (draggable catalog card showing Trion cost)
+### UI — `ui/timeline/`, `ui/event_log/`, `ui/hangar/`
+- Timeline: unit tabs, 6-tick Main/Sub ribbon, draggable card hand, AT meter.
+- Event log: color-coded, auto-scrolling combat log.
+- Hangar: Trigger Holder deck-builder with Trion budget + async multiplayer
+  host/join controls.
 
-**Run it:** open the project in Godot and press F5 (main scene is the Hangar).
+## Run It
+
+**Local play:** open the project in Godot and press F5 (main scene is the Hangar).
 
 **Flow:**
-1. **Hangar** — configure each unit's Trigger Holder (drag cards into slots, watch the Trion budget), then press **Start Match**.
-2. **Battle** — click a tick slot → click a hex to target it → drag action cards into slots → **Submit All** to watch the 6-tick replay.
+1. **Hangar** — configure each unit's Trigger Holder, then **Start Match**
+   (local vs AI) or **Host Online Match** / **Join** (async multiplayer).
+2. **Battle** — click a tick slot → click a hex to target it → drag cards into
+   slots → **Submit All** to watch the animated replay in the combat log.
+3. Turns advance until one squad bails out entirely; a victory/defeat overlay
+   offers Rematch or Return to Hangar.
+
+## Run the Async Backend (Phase 3)
+
+```bash
+godot --headless --path . res://server/server.tscn
+# optional: TT_PORT=9090 to change the port
+```
+
+Then in two game clients, point the Hangar's **Server URL** at the server:
+one player **Hosts** (copies the match ID), the other **Joins** with that ID.
+Each turn both players submit; when both plans are locked in (or the timer
+expires), the server resolves deterministically and both clients replay it.
+
+## Tests (headless)
+
+```bash
+godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
+godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
+godot --headless --path . res://test/online_test.tscn  # full online client flow
+```
+
+Each prints `PASS`/`FAIL` and exits non-zero on failure.
 
 ## Next Up
 
-- Smoother replay: tween unit movement, on-screen event log panel
-- Multi-turn match lifecycle + opponent AI improvements
-- Backend / async multiplayer (GDD Phase 3)
+- Persistence: replace the in-memory match store with a database (users,
+  loadouts, match history).
+- Auth, matchmaking, and rating.
+- Radar/stealth presentation, cover props, and mobile touch controls (Phase 4).

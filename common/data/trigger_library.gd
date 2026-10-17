@@ -47,6 +47,15 @@ static func sample_cards() -> Dictionary:
 	}
 
 
+## Resolves a card by name (used by network serialization). Returns null for
+## unknown names.
+static func get_card(card_name: String) -> TriggerCard:
+	if card_name == "Move":
+		return get_move_card()
+	var c: TriggerCard = sample_cards().get(card_name)
+	return c
+
+
 ## Full trigger catalog (the Hangar's available-cards palette).
 static func all_cards() -> Array[TriggerCard]:
 	var result: Array[TriggerCard] = []
