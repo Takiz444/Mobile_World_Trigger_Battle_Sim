@@ -11,7 +11,7 @@ var _budget_label: Label
 var _budget_bar: ProgressBar
 var _main_col: VBoxContainer
 var _sub_col: VBoxContainer
-var _palette: GridContainer
+var _palette: HBoxContainer
 var _start_button: Button
 var _server_input: LineEdit
 var _join_input: LineEdit
@@ -43,20 +43,14 @@ func _build_layout() -> void:
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 
-	var scroll := ScrollContainer.new()
-	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scroll.offset_left = 32
-	scroll.offset_right = -32
-	scroll.offset_top = 16
-	scroll.offset_bottom = -16
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	add_child(scroll)
-
 	var vbox := VBoxContainer.new()
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	vbox.add_theme_constant_override("separation", 10)
-	scroll.add_child(vbox)
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 48
+	vbox.offset_right = -48
+	vbox.offset_top = 24
+	vbox.offset_bottom = -24
+	vbox.add_theme_constant_override("separation", 12)
+	add_child(vbox)
 
 	var title := Label.new()
 	title.text = "HANGAR — Trigger Holder"
@@ -86,7 +80,7 @@ func _build_layout() -> void:
 	var columns := HBoxContainer.new()
 	columns.alignment = BoxContainer.ALIGNMENT_CENTER
 	columns.add_theme_constant_override("separation", 48)
-	columns.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(columns)
 
 	_main_col = _build_column("Main Slots (Dominant Hand)", columns)
@@ -97,12 +91,17 @@ func _build_layout() -> void:
 	palette_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(palette_label)
 
-	_palette = GridContainer.new()
-	_palette.columns = 5
+	var palette_scroll := ScrollContainer.new()
+	palette_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	palette_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	palette_scroll.custom_minimum_size = Vector2(0, 64)
+	vbox.add_child(palette_scroll)
+
+	_palette = HBoxContainer.new()
+	_palette.alignment = BoxContainer.ALIGNMENT_CENTER
 	_palette.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_palette.add_theme_constant_override("h_separation", 8)
-	_palette.add_theme_constant_override("v_separation", 8)
-	vbox.add_child(_palette)
+	_palette.add_theme_constant_override("separation", 8)
+	palette_scroll.add_child(_palette)
 
 	var bottom := HBoxContainer.new()
 	bottom.alignment = BoxContainer.ALIGNMENT_CENTER
