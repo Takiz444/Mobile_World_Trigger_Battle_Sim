@@ -1,0 +1,89 @@
+class_name EventLogUI
+extends PanelContainer
+## On-screen combat log panel. Receives CombatEvents during replay and renders
+## them color-coded by phase, auto-scrolling to the newest entry.
+
+const MAX_ENTRIES := 80
+
+var _title: Label
+var _log: RichTextLabel
+var _entries: Array[String] = []
+
+
+func _ready() -> void:
+	# Right edge of the screen, between the top bar and the bottom timeline.
+	set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	offset_left = -380.0
+	offset_right = -12.0
+	offset_top = 52.0
+	offset_bottom = -262.0
+
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.04, 0.06, 0.1, 0.88)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(10)
+	sb.border_color = Color(0.3, 0.45, 0.65, 0.6)
+	sb.set_border_width_all(1)
+	add_theme_stylebox_override("panel", sb)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	add_child(vbox)
+
+	_title = Label.new()
+	_title.text = "Turn 1 — Combat Log"
+	_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_title.add_theme_font_size_override("font_size", 16)
+	vbox.add_child(_title)
+
+	_log = RichTextLabel.new()
+	_log.bbcode_enabled = true
+	_log.scroll_active = true
+	_log.scroll_following = true
+	_log.selection_enabled = true
+	_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_log.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_log.add_theme_font_size_override("normal_font_size", 13)
+	vbox.add_child(_log)
+
+
+func set_turn(n: int) -> void:
+	_title.text = "Turn %d — Combat Log" % n
+
+
+func clear() -> void:
+	_entries.clear()
+	_log.clear()
+
+
+func add_event(ev: CombatEvent) -> void:
+	add_message(ev.summary(), _phase_color(ev.phase))
+
+
+func add_message(text: String, color: Color = Color(0.9, 0.92, 0.95)) -> void:
+	_entries.append("[color=#%s]%s[/color]" % [color.to_html(false), text.xml_escape()])
+	if _entries.size() > MAX_ENTRIES:
+		_entries.pop_front()
+	_render()
+
+
+func _render() -> void:
+	_log.clear()
+	for line in _entries:
+		_log.append_text(line + "\n")
+
+
+func _phase_color(phase: int) -> Color:
+	match phase:
+		CombatEvent.Phase.STATE:
+			return Color(0.45, 0.85, 1.0)
+		CombatEvent.Phase.MOVEMENT:
+			return Color(0.5, 0.95, 0.6)
+		CombatEvent.Phase.DEFENSE:
+			return Color(1.0, 0.85, 0.4)
+		CombatEvent.Phase.ATTACK:
+			return Color(1.0, 0.6, 0.35)
+		CombatEvent.Phase.RESOLUTION:
+			return Color(1.0, 0.45, 0.45)
+		_:
+			return Color(0.9, 0.92, 0.95)

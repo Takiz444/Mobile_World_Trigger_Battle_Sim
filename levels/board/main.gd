@@ -7,6 +7,8 @@ const HEX_SIZE := 1.0
 
 var _board: HexBoard
 var _timeline: TimelineUI
+var _event_log: EventLogUI
+var _ui_layer: CanvasLayer
 
 
 func _ready() -> void:
@@ -64,6 +66,7 @@ func _setup_ui() -> void:
 	var layer := CanvasLayer.new()
 	layer.name = "UILayer"
 	add_child(layer)
+	_ui_layer = layer
 
 	var timeline := TimelineUI.new()
 	timeline.name = "TimelineUI"
@@ -71,9 +74,15 @@ func _setup_ui() -> void:
 	timeline.setup(SquadStore.get_squad())
 	_timeline = timeline
 
+	var event_log := EventLogUI.new()
+	event_log.name = "EventLogUI"
+	layer.add_child(event_log)
+	event_log.set_turn(1)
+	_event_log = event_log
+
 
 func _setup_match() -> void:
 	var controller := MatchController.new()
 	controller.name = "MatchController"
 	add_child(controller)
-	controller.setup(_board, _timeline)
+	controller.setup(_board, _timeline, _event_log, _ui_layer)

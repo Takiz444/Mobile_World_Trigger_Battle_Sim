@@ -13,6 +13,7 @@ var _units: Array[UnitData] = []
 var _plan: TurnPlan
 var _current_unit := 0
 var _selected_slot: TimelineSlot
+var _locked := false
 
 var _unit_tabs: HBoxContainer
 var _timeline_row: HBoxContainer
@@ -176,7 +177,7 @@ func _refresh_at() -> void:
 	_at_label.text = "AT %d / %d" % [spent, pool]
 	_at_bar.max_value = pool
 	_at_bar.value = spent
-	_submit_button.disabled = not _plan.is_all_valid()
+	_submit_button.disabled = _locked or not _plan.is_all_valid()
 
 
 # --- Interaction ------------------------------------------------------------
@@ -212,6 +213,20 @@ func get_plan() -> TurnPlan:
 
 func get_units() -> Array[UnitData]:
 	return _units
+
+
+func set_locked(locked: bool) -> void:
+	_locked = locked
+	_refresh_at()
+
+
+## Resets the turn plan for the next turn (AT does not carry over per GDD 5.1).
+func begin_new_turn() -> void:
+	_plan = TurnPlan.new(_units)
+	_locked = false
+	_refresh_timeline_view()
+	_refresh_hand()
+	_refresh_at()
 
 
 func _on_slot_dropped(slot: TimelineSlot, data: Dictionary) -> void:
