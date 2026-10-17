@@ -223,6 +223,7 @@ func _poll_for_result() -> Dictionary:
 func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
 	_event_log.clear()
 	_board.clear_highlights()
+	_units_view.set_selected(null)
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
 	await get_tree().create_timer(0.4).timeout
 
@@ -286,6 +287,9 @@ func _on_unit_selected(i: int) -> void:
 
 func _update_targeting() -> void:
 	_board.highlight_hexes(_compute_highlight_hexes(_timeline.get_selected_target_info()))
+	var idx := _timeline.get_current_unit()
+	if idx >= 0 and idx < _player_states.size():
+		_units_view.set_selected(_player_states[idx])
 
 
 ## Returns the hexes valid for the currently selected timeline slot's card.

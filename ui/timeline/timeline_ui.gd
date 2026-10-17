@@ -228,6 +228,10 @@ func get_units() -> Array[UnitData]:
 	return _units
 
 
+func get_current_unit() -> int:
+	return _current_unit
+
+
 ## Info about the currently selected tick slot, used by the board to compute
 ## valid move/attack hexes. Empty Dictionary when nothing is selected.
 func get_selected_target_info() -> Dictionary:
@@ -275,6 +279,7 @@ func _on_slot_dropped(slot: TimelineSlot, data: Dictionary) -> void:
 		if is_move:
 			_plan.assign(data["unit"], data["tick"], data["slot"], card)  # restore source
 
+	_selected_slot = slot
 	_refresh_timeline_cards()
 	_refresh_at()
 	targeting_changed.emit()
