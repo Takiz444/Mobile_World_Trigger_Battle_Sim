@@ -9,6 +9,7 @@ var _board: HexBoard
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _ui_layer: CanvasLayer
+var _camera: BoardCamera
 
 
 func _ready() -> void:
@@ -60,6 +61,7 @@ func _setup_board() -> void:
 	cam.target = Vector3.ZERO
 	cam.start_size = 16.0
 	add_child(cam)
+	_camera = cam
 
 
 func _setup_ui() -> void:
@@ -85,4 +87,4 @@ func _setup_match() -> void:
 	var controller := MatchController.new()
 	controller.name = "MatchController"
 	add_child(controller)
-	controller.setup(_board, _timeline, _event_log, _ui_layer)
+	controller.setup(_board, _timeline, _event_log, _ui_layer, _camera)

@@ -23,7 +23,35 @@ static func build_match(
 		p1.append(UnitState.new(enemy_data[i], 1, Vector2i(-3 + i * 2, 2), 2))
 	ms.setup_team(0, p0)
 	ms.setup_team(1, p1)
+	_generate_cover(ms)
 	return ms
+
+
+## Generates deterministic cover in the mid-field band between the two squads.
+## Cover hexes drive the engine's line-of-sight blocking and damage mitigation.
+static func _generate_cover(ms: MatchState) -> void:
+	var rng := ms.rng
+	var occupied := {}
+	for u in ms.all_units():
+		occupied[u.hex] = true
+	var candidates: Array[Vector2i] = []
+	for hex in HexCoord.spiral(Vector2i.ZERO, 5):
+		if hex.y < -1 or hex.y > 1:
+			continue
+		if occupied.has(hex):
+			continue
+		candidates.append(hex)
+	_shuffle(candidates, rng)
+	for i in mini(8, candidates.size()):
+		ms.cover[candidates[i]] = 2 if rng.randf() < 0.4 else 1
+
+
+static func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
+	for i in range(arr.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp: Variant = arr[i]
+		arr[i] = arr[j]
+		arr[j] = tmp
 
 
 ## Resolves a full 6-tick turn deterministically.

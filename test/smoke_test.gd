@@ -42,6 +42,8 @@ func _run() -> void:
 
 	_check(_controller._ms.all_units().size() == 8, "8 units placed on board")
 	_check(not _controller._overlay.visible, "overlay hidden at match start")
+	_check(_controller._ms.cover.size() > 0, "cover generated on board")
+	_controller._update_targeting()
 
 	for turn in range(3):
 		if _controller._overlay.visible:

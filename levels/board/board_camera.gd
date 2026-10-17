@@ -80,3 +80,10 @@ func _update_transform() -> void:
 	)
 	global_position = target + dir * orbit_distance
 	look_at(target, Vector3.UP)
+
+
+## Re-centers the orbit target onto a world position (used when the player
+## selects a unit).
+func recenter(pos: Vector3) -> void:
+	target = Vector3(pos.x, 0.0, pos.z)
+	_update_transform()

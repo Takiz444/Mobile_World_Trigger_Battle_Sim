@@ -8,6 +8,9 @@ extends Control
 
 signal unit_selected(unit_index: int)
 signal plan_submitted
+## Emitted whenever the selected timeline slot (or its card) changes, so the
+## board can refresh valid-target highlights.
+signal targeting_changed
 
 var _units: Array[UnitData] = []
 var _plan: TurnPlan
@@ -149,6 +152,7 @@ func _refresh_timeline_view() -> void:
 		_current_slots.append(tick_slots)
 		_timeline_row.add_child(col)
 	_refresh_timeline_cards()
+	targeting_changed.emit()
 
 
 func _refresh_timeline_cards() -> void:
@@ -196,6 +200,7 @@ func _on_unit_tab(i: int) -> void:
 func _on_slot_selected(slot: TimelineSlot) -> void:
 	_selected_slot = slot
 	_refresh_timeline_cards()
+	targeting_changed.emit()
 
 
 ## Sets the target/destination hex for the currently selected tick slot.
@@ -213,6 +218,21 @@ func get_plan() -> TurnPlan:
 
 func get_units() -> Array[UnitData]:
 	return _units
+
+
+## Info about the currently selected tick slot, used by the board to compute
+## valid move/attack hexes. Empty Dictionary when nothing is selected.
+func get_selected_target_info() -> Dictionary:
+	if _selected_slot == null:
+		return {}
+	var ta: TickAction = _plan.get_tick(_selected_slot.unit_index, _selected_slot.tick_index)
+	var card: TriggerCard = ta.sub_card if _selected_slot.slot_id == TurnPlan.SUB_SLOT else ta.main_card
+	return {
+		"unit": _selected_slot.unit_index,
+		"tick": _selected_slot.tick_index,
+		"slot": _selected_slot.slot_id,
+		"card": card,
+	}
 
 
 func set_locked(locked: bool) -> void:
@@ -249,12 +269,14 @@ func _on_slot_dropped(slot: TimelineSlot, data: Dictionary) -> void:
 
 	_refresh_timeline_cards()
 	_refresh_at()
+	targeting_changed.emit()
 
 
 func _on_slot_clear(slot: TimelineSlot) -> void:
 	if _plan.clear(slot.unit_index, slot.tick_index, slot.slot_id):
 		_refresh_timeline_cards()
 		_refresh_at()
+		targeting_changed.emit()
 
 
 func _on_submit_pressed() -> void:

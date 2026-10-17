@@ -17,6 +17,7 @@ var _board: HexBoard
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _units_view: BoardUnits
+var _camera: BoardCamera
 var _engine := TickEngine.new()
 
 var _player_states: Array[UnitState] = []
@@ -43,10 +44,11 @@ var _rematch_btn: Button
 var _hangar_btn: Button
 
 
-func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer) -> void:
+func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
 	_board = board
 	_timeline = timeline
 	_event_log = event_log
+	_camera = camera
 
 	_units_view = BoardUnits.new()
 	_units_view.name = "BoardUnits"
@@ -56,6 +58,8 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 
 	_board.tile_selected.connect(_on_tile_selected)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
+	_timeline.unit_selected.connect(_on_unit_selected)
+	_timeline.targeting_changed.connect(_update_targeting)
 
 	_online = MatchSession.mode == MatchSession.Mode.ONLINE
 	if _online:
@@ -69,6 +73,7 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 ## Resets to a fresh local match (also used by the Rematch button).
 func _start_match() -> void:
 	_build_squads()
+	_board.clear_highlights()
 	_turn = 1
 	_overlay.visible = false
 	_btn_row.visible = true
@@ -91,6 +96,8 @@ func _build_squads() -> void:
 	_player_states = _ms.teams[0]
 	_enemy_states = _ms.teams[1]
 	_units_view.setup(_ms.all_units(), _board.hex_size)
+	_board.set_cover(_ms.cover)
+	_board.set_wires(_ms.wires)
 
 
 func _setup_online() -> void:
@@ -129,6 +136,8 @@ func _setup_online() -> void:
 	_player_states = _ms.teams[_team]
 	_enemy_states = _ms.teams[1 - _team]
 	_units_view.setup(_ms.all_units(), _board.hex_size)
+	_board.set_cover(_ms.cover)
+	_board.set_wires(_ms.wires)
 
 	# The timeline plans only the local team's units.
 	_timeline.setup(_data_teams[_team])
@@ -213,12 +222,14 @@ func _poll_for_result() -> Dictionary:
 ## Resolves + animates a full 6-tick turn and returns the winner (-1 if none).
 func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
 	_event_log.clear()
+	_board.clear_highlights()
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
 	await get_tree().create_timer(0.4).timeout
 
 	for tick in TurnPlan.TICKS_PER_TURN:
 		var snapshots := _snapshot_units()
 		var events := _engine.resolve_tick(_ms, player_plan, enemy_plan, tick)
+		_board.set_wires(_ms.wires)
 		for ev in events:
 			_event_log.add_event(ev)
 		_units_view.update_labels()
@@ -263,6 +274,50 @@ func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> 
 				_units_view.play_bail(ev.target)
 			else:
 				_units_view.flash_hit(ev.target)
+
+
+# --- Targeting / Camera -----------------------------------------------------
+
+func _on_unit_selected(i: int) -> void:
+	if _camera == null or i < 0 or i >= _player_states.size():
+		return
+	_camera.recenter(_board.hex_to_world(_player_states[i].hex))
+
+
+func _update_targeting() -> void:
+	_board.highlight_hexes(_compute_highlight_hexes(_timeline.get_selected_target_info()))
+
+
+## Returns the hexes valid for the currently selected timeline slot's card.
+func _compute_highlight_hexes(info: Dictionary) -> Array[Vector2i]:
+	if info.is_empty():
+		return []
+	var unit_index: int = info.get("unit", -1)
+	var card: TriggerCard = info.get("card")
+	if card == null or unit_index < 0 or unit_index >= _player_states.size():
+		return []
+
+	var u: UnitState = _player_states[unit_index]
+	var result: Array[Vector2i] = []
+
+	if card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper":
+		for n in HexCoord.neighbors(u.hex):
+			if _board.has_tile(n) and _ms.get_unit_at(n) == null:
+				result.append(n)
+	elif card.card_type == TriggerCard.CardType.MELEE:
+		for e in _enemy_states:
+			if not e.is_bailed and HexCoord.distance(u.hex, e.hex) == 1:
+				result.append(e.hex)
+	elif card.card_type == TriggerCard.CardType.RANGED:
+		for e in _enemy_states:
+			if not e.is_bailed and HexCoord.distance(u.hex, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
+				result.append(e.hex)
+	elif card.card_name == "Spider":
+		for hex in HexCoord.spiral(u.hex, 3):
+			if _board.has_tile(hex):
+				result.append(hex)
+
+	return result
 
 
 # --- Match-Over / Waiting Overlay ------------------------------------------
@@ -343,6 +398,7 @@ func _show_match_over(winner: int) -> void:
 	_btn_row.visible = true
 	_overlay.visible = true
 	_timeline.set_locked(true)
+	_board.clear_highlights()
 	_event_log.add_message(
 		"Match over — %s!" % ("Victory" if winner == 0 else "Defeat"),
 		Color(0.4, 0.95, 0.5) if winner == 0 else Color(1.0, 0.4, 0.4))

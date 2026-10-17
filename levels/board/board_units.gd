@@ -39,6 +39,9 @@ func update_labels() -> void:
 		label.text = str(u.trion_hp)
 		if not u.is_bailed:
 			_markers[u].visible = true
+		var mat: StandardMaterial3D = _body_materials.get(u)
+		if mat != null:
+			mat.albedo_color = _body_color_for(u)
 
 
 ## Hard-syncs every marker to the unit's current hex/facing/HP. Used at turn
@@ -89,7 +92,7 @@ func flash_hit(u: UnitState) -> void:
 	var mat: StandardMaterial3D = _body_materials.get(u)
 	if root == null or mat == null:
 		return
-	var base: Color = _body_colors.get(u, Color(1, 1, 1))
+	var base: Color = _body_color_for(u)
 	var tw := root.create_tween()
 	tw.tween_property(mat, "albedo_color", Color(1.0, 0.18, 0.18), 0.1)
 	tw.tween_property(mat, "albedo_color", base, 0.28)
@@ -156,6 +159,12 @@ func _nose_offset(facing: int) -> Vector3:
 	return Vector3(fwd.x * 0.55, 0.0, fwd.z * 0.55)
 
 
+## Team color with stealth applied (semi-transparent while Bagworm is active).
+func _body_color_for(u: UnitState) -> Color:
+	var base: Color = _body_colors.get(u, Color(1, 1, 1))
+	return Color(base.r, base.g, base.b, 0.35 if u.stealth_active else 1.0)
+
+
 func _kill_tween(dict: Dictionary, key: Variant) -> void:
 	var tw: Tween = dict.get(key)
 	if tw != null:
@@ -172,6 +181,7 @@ func _facing_vector(facing: int) -> Vector3:
 
 func _make_material(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_color = color
 	mat.metallic = 0.0
 	mat.roughness = 0.45
