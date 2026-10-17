@@ -11,12 +11,8 @@ var _entries: Array[String] = []
 
 
 func _ready() -> void:
-	# Right edge of the screen, between the top bar and the bottom timeline.
-	set_anchors_preset(Control.PRESET_RIGHT_WIDE)
-	offset_left = -380.0
-	offset_right = -12.0
-	offset_top = 52.0
-	offset_bottom = -262.0
+	_fit_viewport()
+	get_viewport().size_changed.connect(_fit_viewport)
 
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.04, 0.06, 0.1, 0.88)
@@ -45,6 +41,14 @@ func _ready() -> void:
 	_log.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_log.add_theme_font_size_override("normal_font_size", 13)
 	vbox.add_child(_log)
+
+
+## Sizes the panel against the viewport (right edge, between top bar and the
+## bottom timeline), since it lives directly under a CanvasLayer.
+func _fit_viewport() -> void:
+	var vs := get_viewport().get_visible_rect().size
+	position = Vector2(vs.x - 368.0 - 12.0, 52.0)
+	size = Vector2(368.0, maxf(0.0, vs.y - 52.0 - 262.0))
 
 
 func set_turn(n: int) -> void:

@@ -29,9 +29,17 @@ var _current_slots: Array = []  # [tick][slot] -> TimelineSlot
 
 
 func _ready() -> void:
-	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fit_viewport()
+	get_viewport().size_changed.connect(_fit_viewport)
 	_build_layout()
+
+
+## This Control lives directly under a CanvasLayer, so anchors are not resolved
+## against a parent Control — size it explicitly from the viewport.
+func _fit_viewport() -> void:
+	position = Vector2.ZERO
+	size = get_viewport().get_visible_rect().size
 
 
 func setup(units: Array[UnitData]) -> void:

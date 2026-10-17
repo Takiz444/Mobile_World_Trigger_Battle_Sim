@@ -325,9 +325,10 @@ func _compute_highlight_hexes(info: Dictionary) -> Array[Vector2i]:
 func _build_overlay(ui_layer: CanvasLayer) -> void:
 	_overlay = Control.new()
 	_overlay.name = "MatchOverlay"
-	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	_overlay.visible = false
+	_fit_overlay()
+	get_viewport().size_changed.connect(_fit_overlay)
 
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.6)
@@ -380,6 +381,13 @@ func _build_overlay(ui_layer: CanvasLayer) -> void:
 	_btn_row.add_child(_hangar_btn)
 
 	ui_layer.add_child(_overlay)
+
+
+func _fit_overlay() -> void:
+	if _overlay == null:
+		return
+	_overlay.position = Vector2.ZERO
+	_overlay.size = get_viewport().get_visible_rect().size
 
 
 func _show_waiting(text: String) -> void:
