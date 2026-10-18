@@ -21,3 +21,29 @@ enum CardType { MOVE, MELEE, RANGED, SHIELD, UTILITY, STEALTH }
 
 ## Classification for synergy / penchant resolution.
 @export var card_type: CardType = CardType.UTILITY
+
+
+## Human-readable summary for tooltips.
+func describe() -> String:
+	var dual := " (sub)" if is_dual_slot_compatible else ""
+	return "%s%s\n%s\nAT %d · Power %d · Trion %d" % [
+		card_name, dual, _type_name(card_type),
+		action_at_cost, power, trion_equip_cost,
+	]
+
+
+static func _type_name(t: int) -> String:
+	match t:
+		CardType.MOVE:
+			return "Move"
+		CardType.MELEE:
+			return "Melee"
+		CardType.RANGED:
+			return "Ranged"
+		CardType.SHIELD:
+			return "Shield"
+		CardType.UTILITY:
+			return "Utility"
+		CardType.STEALTH:
+			return "Stealth"
+	return "?"

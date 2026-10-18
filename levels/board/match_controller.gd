@@ -28,6 +28,7 @@ var _ms: MatchState
 var _enemy_plan: TurnPlan
 var _resolving := false
 var _turn := 1
+var _hovered_hex: Vector2i = HexBoard.INVALID_HEX
 
 # Online mode
 var _online := false
@@ -42,6 +43,7 @@ var _turn_info: Label
 var _btn_row: HBoxContainer
 var _rematch_btn: Button
 var _hangar_btn: Button
+var _prediction_label: Label
 
 
 func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
@@ -54,9 +56,11 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_units_view.name = "BoardUnits"
 	_board.add_child(_units_view)
 
+	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
 
 	_board.tile_selected.connect(_on_tile_selected)
+	_board.tile_hovered.connect(_on_tile_hovered)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
 	_timeline.unit_selected.connect(_on_unit_selected)
 	_timeline.targeting_changed.connect(_update_targeting)
@@ -74,6 +78,9 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 func _start_match() -> void:
 	_build_squads()
 	_board.clear_highlights()
+	_units_view.clear_ghost()
+	if _prediction_label != null:
+		_prediction_label.visible = false
 	_turn = 1
 	_overlay.visible = false
 	_btn_row.visible = true
@@ -155,6 +162,11 @@ func _on_tile_selected(hex: Vector2i) -> void:
 	_timeline.set_target_for_selected_slot(hex)
 
 
+func _on_tile_hovered(hex: Vector2i) -> void:
+	_hovered_hex = hex
+	_update_targeting()
+
+
 # --- Submit / Resolve -------------------------------------------------------
 
 func _on_plan_submitted() -> void:
@@ -223,7 +235,10 @@ func _poll_for_result() -> Dictionary:
 func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
 	_event_log.clear()
 	_board.clear_highlights()
+	_units_view.clear_ghost()
 	_units_view.set_selected(null)
+	if _prediction_label != null:
+		_prediction_label.visible = false
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
 	await get_tree().create_timer(0.4).timeout
 
@@ -286,14 +301,81 @@ func _on_unit_selected(i: int) -> void:
 
 
 func _update_targeting() -> void:
-	_board.highlight_hexes(_compute_highlight_hexes(_timeline.get_selected_target_info()))
+	var info := _timeline.get_selected_target_info()
+	_board.highlight_hexes(_compute_range_hexes(info))
+	_board.highlight_effects(_compute_effect_hexes(info))
+	_update_ghost(info)
+	_update_prediction(info)
 	var idx := _timeline.get_current_unit()
 	if idx >= 0 and idx < _player_states.size():
 		_units_view.set_selected(_player_states[idx])
 
 
-## Returns the hexes valid for the currently selected timeline slot's card.
-func _compute_highlight_hexes(info: Dictionary) -> Array[Vector2i]:
+## Live hit-chance / damage readout for the hovered (or locked) target of the
+## selected offensive card.
+func _update_prediction(info: Dictionary) -> void:
+	if _prediction_label == null:
+		return
+	if info.is_empty():
+		_prediction_label.visible = false
+		return
+
+	var unit_index: int = info.get("unit", -1)
+	var card: TriggerCard = info.get("card")
+	if card == null or unit_index < 0 or unit_index >= _player_states.size():
+		_prediction_label.visible = false
+		return
+	if card.card_type != TriggerCard.CardType.MELEE and card.card_type != TriggerCard.CardType.RANGED:
+		_prediction_label.visible = false
+		return
+
+	var tick: int = info.get("tick", -1)
+	var origin := _projected_hex(unit_index, tick)
+	var attacker: UnitState = _player_states[unit_index]
+
+	var target_hex := _target_hex_for(info)
+	if target_hex == HexBoard.INVALID_HEX or not _board.has_tile(target_hex):
+		target_hex = _hovered_hex
+	if target_hex == HexBoard.INVALID_HEX or not _board.has_tile(target_hex):
+		_prediction_label.visible = false
+		return
+
+	var target := _ms.get_unit_at(target_hex)
+	if target == null:
+		_prediction_label.visible = false
+		return
+
+	var p := _engine.preview_attack(_ms, attacker, origin, card, target)
+	_prediction_label.text = _format_prediction(card, attacker, target, p)
+	_prediction_label.visible = true
+
+
+func _format_prediction(card: TriggerCard, attacker: UnitState, target: UnitState, p: Dictionary) -> String:
+	var cname := card.card_name
+	var tname := target.display_name()
+	if target.team == attacker.team:
+		_prediction_label.add_theme_color_override("font_color", Color(0.95, 0.85, 0.4))
+		return "%s → %s — friendly" % [cname, tname]
+	if not p["range_ok"]:
+		_prediction_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
+		return "%s → %s — out of range" % [cname, tname]
+	if p["blocked"]:
+		_prediction_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
+		return "%s → %s — blocked by full cover" % [cname, tname]
+
+	var dmg := int(p["power"])
+	var note := ""
+	if p["half_cover"]:
+		dmg = roundi(float(p["power"]) * 0.5)
+		note = " · ½ cover"
+	var hit := roundi(float(p["hit_chance"]) * 100.0)
+	_prediction_label.add_theme_color_override("font_color", Color(0.5, 1.0, 0.55))
+	return "%s → %s — %d%% hit · %d dmg%s" % [cname, tname, hit, dmg, note]
+
+
+## Green tiles the player may click for the selected slot's card. Only
+## movement destinations live here; attack/trap areas use effect highlights.
+func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
 	if info.is_empty():
 		return []
 	var unit_index: int = info.get("unit", -1)
@@ -301,27 +383,156 @@ func _compute_highlight_hexes(info: Dictionary) -> Array[Vector2i]:
 	if card == null or unit_index < 0 or unit_index >= _player_states.size():
 		return []
 
-	var u: UnitState = _player_states[unit_index]
+	var tick: int = info.get("tick", -1)
 	var result: Array[Vector2i] = []
 
 	if card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper":
-		for n in HexCoord.neighbors(u.hex):
+		var origin := _projected_hex(unit_index, tick - 1)
+		for n in HexCoord.neighbors(origin):
 			if _board.has_tile(n) and _ms.get_unit_at(n) == null:
 				result.append(n)
-	elif card.card_type == TriggerCard.CardType.MELEE:
+
+	return result
+
+
+## Orange tiles the selected slot's card affects: attack targets, Spider wire
+## area, or the unit's own hex for self-buffs (Shield / Bagworm). Origins use
+## the unit's projected position (after this tick's move, per the engine order).
+func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
+	if info.is_empty():
+		return []
+	var unit_index: int = info.get("unit", -1)
+	var card: TriggerCard = info.get("card")
+	if card == null or unit_index < 0 or unit_index >= _player_states.size():
+		return []
+
+	var tick: int = info.get("tick", -1)
+	var origin := _projected_hex(unit_index, tick)
+	var result: Array[Vector2i] = []
+
+	if card.card_type == TriggerCard.CardType.MELEE:
 		for e in _enemy_states:
-			if not e.is_bailed and HexCoord.distance(u.hex, e.hex) == 1:
+			if not e.is_bailed and HexCoord.distance(origin, e.hex) == 1:
 				result.append(e.hex)
 	elif card.card_type == TriggerCard.CardType.RANGED:
 		for e in _enemy_states:
-			if not e.is_bailed and HexCoord.distance(u.hex, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
+			if not e.is_bailed and HexCoord.distance(origin, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
 				result.append(e.hex)
 	elif card.card_name == "Spider":
-		for hex in HexCoord.spiral(u.hex, 3):
+		for hex in HexCoord.spiral(origin, 3):
 			if _board.has_tile(hex):
 				result.append(hex)
+	elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
+		result.append(origin)
 
 	return result
+
+
+## Shows a translucent "ghost" of the selected unit's position for the current
+## slot. For Move cards it previews the destination (locked target, then the
+## hovered tile, then the projected origin). For every other card it keeps
+## showing where the unit will be when that action fires, so attacks/abilities
+## read from the correct projected position.
+func _update_ghost(info: Dictionary) -> void:
+	var u := _selected_unit(info)
+	if u == null:
+		_units_view.clear_ghost()
+		return
+
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	var card: TriggerCard = info.get("card")
+	var is_move := card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper")
+
+	if is_move:
+		var origin := _projected_hex(unit_index, tick - 1)
+		var target := _target_hex_for(info)
+		if target != HexBoard.INVALID_HEX and _board.has_tile(target):
+			_units_view.show_ghost(u, target)
+			return
+		if _hovered_hex != HexBoard.INVALID_HEX and _is_valid_move_dest(origin, _hovered_hex):
+			_units_view.show_ghost(u, _hovered_hex)
+			return
+		if origin != u.hex:
+			_units_view.show_ghost(u, origin)
+			return
+		_units_view.clear_ghost()
+		return
+
+	# Non-move (attack / shield / utility / empty): keep the ghost at the
+	# unit's projected position so the player can see where the action happens.
+	var pos := _projected_hex(unit_index, tick)
+	if pos != u.hex:
+		_units_view.show_ghost(u, pos)
+	else:
+		_units_view.clear_ghost()
+
+
+func _selected_unit(info: Dictionary) -> UnitState:
+	if info.is_empty():
+		return null
+	var unit_index: int = info.get("unit", -1)
+	if unit_index < 0 or unit_index >= _player_states.size():
+		return null
+	return _player_states[unit_index]
+
+
+func _target_hex_for(info: Dictionary) -> Vector2i:
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	if unit_index < 0 or tick < 0:
+		return HexBoard.INVALID_HEX
+	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
+	if ta != null and ta.has_target:
+		return ta.target_hex
+	return HexBoard.INVALID_HEX
+
+
+func _is_valid_move_dest(origin: Vector2i, hex: Vector2i) -> bool:
+	if not _board.has_tile(hex):
+		return false
+	if _ms.get_unit_at(hex) != null:
+		return false
+	return HexCoord.distance(origin, hex) == 1
+
+
+## Where a unit will be after resolving all Move cards in ticks 0..through_tick
+## (inclusive). through_tick < 0 means "no moves yet" (returns its current hex).
+## Matches the engine's sequential per-tick movement for optimistic previews.
+func _projected_hex(unit_index: int, through_tick: int) -> Vector2i:
+	var u: UnitState = _player_states[unit_index]
+	var hex := u.hex
+	var plan := _timeline.get_plan()
+	for t in range(through_tick + 1):
+		var ta: TickAction = plan.get_tick(unit_index, t)
+		var card: TriggerCard = ta.main_card
+		if card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper") and ta.has_target:
+			if HexCoord.distance(hex, ta.target_hex) == 1 and _ms.get_unit_at(ta.target_hex) == null:
+				hex = ta.target_hex
+	return hex
+
+
+# --- Prediction Readout -----------------------------------------------------
+
+func _build_prediction_label(ui_layer: CanvasLayer) -> void:
+	_prediction_label = Label.new()
+	_prediction_label.name = "PredictionLabel"
+	_prediction_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_prediction_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_prediction_label.add_theme_font_size_override("font_size", 16)
+	_prediction_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_prediction_label.visible = false
+	ui_layer.add_child(_prediction_label)
+	_fit_prediction_label()
+	get_viewport().size_changed.connect(_fit_prediction_label)
+
+
+func _fit_prediction_label() -> void:
+	if _prediction_label == null:
+		return
+	var vs := get_viewport().get_visible_rect().size
+	_prediction_label.position = Vector2(0, 48)
+	_prediction_label.size = Vector2(vs.x, 34)
 
 
 # --- Match-Over / Waiting Overlay ------------------------------------------
@@ -411,6 +622,9 @@ func _show_match_over(winner: int) -> void:
 	_overlay.visible = true
 	_timeline.set_locked(true)
 	_board.clear_highlights()
+	_units_view.clear_ghost()
+	if _prediction_label != null:
+		_prediction_label.visible = false
 	_event_log.add_message(
 		"Match over — %s!" % ("Victory" if winner == 0 else "Defeat"),
 		Color(0.4, 0.95, 0.5) if winner == 0 else Color(1.0, 0.4, 0.4))

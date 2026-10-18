@@ -218,6 +218,7 @@ func set_target_for_selected_slot(hex: Vector2i) -> void:
 		return
 	_plan.set_target(_selected_slot.unit_index, _selected_slot.tick_index, hex)
 	_refresh_timeline_cards()
+	targeting_changed.emit()
 
 
 func get_plan() -> TurnPlan:

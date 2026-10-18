@@ -15,6 +15,8 @@ var _body_colors: Dictionary = {}    # UnitState -> Color
 var _rings: Dictionary = {}          # UnitState -> MeshInstance3D
 var _move_tweens: Dictionary = {}    # UnitState -> Tween
 var _face_tweens: Dictionary = {}    # UnitState -> Tween
+var _ghost: Node3D = null            # translucent movement-destination preview
+var _ghost_body: MeshInstance3D = null
 
 
 ## Clears existing markers and spawns one per unit.
@@ -30,6 +32,8 @@ func setup(units: Array[UnitState], hex_size: float) -> void:
 	_rings.clear()
 	_move_tweens.clear()
 	_face_tweens.clear()
+	_ghost = null
+	_ghost_body = null
 	for u in units:
 		_spawn_marker(u)
 
@@ -117,6 +121,63 @@ func play_bail(u: UnitState) -> void:
 	tw.tween_property(root, "scale", Vector3(0.01, 0.01, 0.01), 0.35) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func() -> void: root.visible = false)
+
+
+# --- Ghost Preview ----------------------------------------------------------
+
+## Shows a translucent "ghost" of `u` at `hex` (movement destination preview).
+func show_ghost(u: UnitState, hex: Vector2i) -> void:
+	if _ghost == null:
+		_ghost = _build_ghost()
+	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
+	var mat: StandardMaterial3D = _ghost_body.material_override
+	mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.35)
+	mat.emission = team_color
+	_ghost.position = HexCoord.axial_to_world(hex, _hex_size)
+	_ghost.visible = true
+
+
+func clear_ghost() -> void:
+	if _ghost != null:
+		_ghost.visible = false
+
+
+func _build_ghost() -> Node3D:
+	var root := Node3D.new()
+	root.name = "GhostPreview"
+
+	var ring := MeshInstance3D.new()
+	ring.name = "GhostRing"
+	var ring_cyl := CylinderMesh.new()
+	ring_cyl.top_radius = 0.56
+	ring_cyl.bottom_radius = 0.56
+	ring_cyl.height = 0.06
+	ring.mesh = ring_cyl
+	ring.material_override = _make_emissive(Color(1.0, 0.9, 0.3), 1.2)
+	ring.position = Vector3(0, 0.2, 0)
+	root.add_child(ring)
+
+	var body := MeshInstance3D.new()
+	body.name = "GhostBody"
+	var box := BoxMesh.new()
+	box.size = Vector3(0.8, 0.8, 0.8)
+	body.mesh = box
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1, 1, 1, 0.35)
+	mat.metallic = 0.0
+	mat.roughness = 0.35
+	mat.emission_enabled = true
+	mat.emission = Color(1, 1, 1)
+	mat.emission_energy_multiplier = 1.1
+	body.material_override = mat
+	body.position = Vector3(0, BODY_Y, 0)
+	root.add_child(body)
+	_ghost_body = body
+
+	add_child(root)
+	root.visible = false
+	return root
 
 
 # --- Construction -----------------------------------------------------------

@@ -8,6 +8,7 @@ var card: TriggerCard
 
 func _init(c: TriggerCard) -> void:
 	card = c
+	tooltip_text = c.describe()
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	custom_minimum_size = Vector2(108, 52)
 

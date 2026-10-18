@@ -38,6 +38,34 @@ func resolve_tick(ms: MatchState, plan0: TurnPlan, plan1: TurnPlan, tick: int) -
 	return events
 
 
+## Non-mutating preview of an attack's outcome for the planning UI.
+## `attacker_hex` lets callers pass a projected position (movement happens
+## before attacks within a tick). Returns hit chance (0..1), base power, and
+## range/cover flags.
+func preview_attack(ms: MatchState, attacker: UnitState, attacker_hex: Vector2i, card: TriggerCard, target: UnitState) -> Dictionary:
+	var out := { "range_ok": false, "blocked": false, "half_cover": false, "hit_chance": 0.0, "power": 0 }
+	if card == null or target == null:
+		return out
+
+	var dist := HexCoord.distance(attacker_hex, target.hex)
+	out["power"] = attacker.unit_data.attack_rating + card.power
+
+	if card.card_type == TriggerCard.CardType.MELEE:
+		out["range_ok"] = dist == 1
+	else:
+		out["range_ok"] = dist <= DEFAULT_RANGED_RANGE
+		if out["range_ok"] and card.card_name != "Viper":
+			out["blocked"] = _line_blocked_by_full_cover(ms, attacker_hex, target.hex)
+		out["half_cover"] = _has_half_cover(ms, attacker_hex, target.hex)
+
+	var base := BASE_MELEE_HIT if card.card_type == TriggerCard.CardType.MELEE else BASE_RANGED_HIT
+	var evasion := target.unit_data.mobility_rating * EVASION_PER_MOBILITY
+	if _on_wire(ms, target.hex):
+		evasion += WIRE_EVADE_BONUS
+	out["hit_chance"] = clampf(base - evasion, 0.05, 0.98)
+	return out
+
+
 # --- Tick Pipeline ----------------------------------------------------------
 
 func _resolve_tick(ms: MatchState, plans: Array, tick: int, events: Array[CombatEvent]) -> void:

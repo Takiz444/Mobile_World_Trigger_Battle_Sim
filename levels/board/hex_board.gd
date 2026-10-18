@@ -20,6 +20,7 @@ signal tile_selected(hex: Vector2i)
 @export var hover_color: Color = Color(0.25, 0.85, 1.0, 0.95)
 @export var selected_color: Color = Color(1.0, 0.82, 0.2, 1.0)
 @export var highlight_color: Color = Color(0.3, 1.0, 0.5, 0.95)
+@export var effect_color: Color = Color(1.0, 0.5, 0.15, 0.95)
 @export var wire_color: Color = Color(1.0, 0.6, 0.2, 0.95)
 
 var _mesh: ArrayMesh
@@ -28,6 +29,7 @@ var _base_material: StandardMaterial3D
 var _hover_material: StandardMaterial3D
 var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
+var _effect_material: StandardMaterial3D
 var _wire_material: StandardMaterial3D
 
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
@@ -38,7 +40,8 @@ var _hovered: Vector2i = INVALID_HEX
 var _has_hover := false
 var _selected: Vector2i = INVALID_HEX
 var _has_selection := false
-var _highlighted: Dictionary = {}  # Vector2i -> true
+var _highlighted: Dictionary = {}  # Vector2i -> true (range / valid destinations)
+var _effect_hexes: Dictionary = {} # Vector2i -> true (action effect area)
 var _wire_hexes: Dictionary = {}   # Vector2i -> true
 
 
@@ -49,6 +52,7 @@ func _ready() -> void:
 	_hover_material = _make_material(hover_color)
 	_selected_material = _make_material(selected_color)
 	_highlight_material = _make_material(highlight_color)
+	_effect_material = _make_material(effect_color)
 	_wire_material = _make_material(wire_color)
 	_build_board()
 
@@ -133,8 +137,8 @@ func clear_selection() -> void:
 		_apply(old)
 
 
-## Highlights a set of hexes (e.g. valid move/attack targets). Clears the
-## previous highlight set first.
+## Highlights a set of hexes (e.g. valid move destinations). Clears the
+## previous range-highlight set first.
 func highlight_hexes(hexes: Array) -> void:
 	var old_hexes: Array = _highlighted.keys()
 	_highlighted.clear()
@@ -151,8 +155,27 @@ func highlight_hexes(hexes: Array) -> void:
 		_apply(h)
 
 
+## Highlights the tiles an action affects (attack targets, trap area, self
+## effects). Rendered in a distinct color layered above the range highlight.
+func highlight_effects(hexes: Array) -> void:
+	var old_hexes: Array = _effect_hexes.keys()
+	_effect_hexes.clear()
+	for h in hexes:
+		if _tiles.has(h):
+			_effect_hexes[h] = true
+
+	var affected := {}
+	for h in old_hexes:
+		affected[h] = true
+	for h in hexes:
+		affected[h] = true
+	for h in affected.keys():
+		_apply(h)
+
+
 func clear_highlights() -> void:
 	highlight_hexes([])
+	highlight_effects([])
 
 
 ## Sets the hexes carrying spider wires (visual tint only; the engine tracks
@@ -208,7 +231,7 @@ func _update_hover() -> void:
 		_apply(old)
 	if valid:
 		_apply(hex)
-		tile_hovered.emit(hex)
+	tile_hovered.emit(hex if valid else INVALID_HEX)
 
 
 func _apply(hex: Vector2i) -> void:
@@ -224,6 +247,8 @@ func _resolve_material(hex: Vector2i) -> Material:
 		return _hover_material
 	if _highlighted.has(hex):
 		return _highlight_material
+	if _effect_hexes.has(hex):
+		return _effect_material
 	if _wire_hexes.has(hex):
 		return _wire_material
 	return _base_material

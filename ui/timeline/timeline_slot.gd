@@ -37,6 +37,7 @@ func _init(p_unit: int, p_tick: int, p_slot: int) -> void:
 
 func set_card(c: TriggerCard) -> void:
 	card = c
+	tooltip_text = c.describe() if c != null else ""
 	refresh()
 
 
