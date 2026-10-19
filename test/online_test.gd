@@ -15,6 +15,7 @@ func _ready() -> void:
 
 func _run() -> void:
 	var server := MatchServer.new()
+	server.persist = false
 	add_child(server)
 	await get_tree().create_timer(0.5).timeout
 
@@ -70,11 +71,17 @@ func _run() -> void:
 	await controller._on_plan_submitted()
 	_check(controller._turn == 2, "online turn advanced after resolution")
 
-	# Client replay must agree with the server's authoritative snapshot.
-	var info := await b0.get_match(match_id)
-	var state: Variant = info["body"].get("state")
-	_check(state is Dictionary and PlanCodec.state_matches(controller._ms, state),
-		"client state matches server after replay")
+	# Client's own units must match the server's authoritative view.
+	var info := await b0.get_match(match_id, str(created["body"].get("token", "")))
+	var units: Array = info["body"].get("view", {}).get("units", [])
+	var synced := units.size() == 8
+	for i in 4:
+		if not synced:
+			break
+		var u: UnitState = controller._ms.teams[0][i]
+		var hex: Array = units[i].get("hex", [])
+		synced = hex.size() == 2 and Vector2i(int(hex[0]), int(hex[1])) == u.hex
+	_check(synced, "client units match server view after replay")
 
 	print("ONLINE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)

@@ -19,6 +19,14 @@ func _ready() -> void:
 	_test_elevation_contest()
 	_test_elevation_rules()
 	_test_ranged_at_elevated_target()
+	_test_split_targets()
+	_test_bagworm_cost()
+	_test_bagworm_toggle()
+	_test_building_blocks_shot()
+	_test_line_of_sight()
+	_test_fog_states()
+	_test_city_map()
+	_test_server_persistence()
 	_test_squad_validation()
 	_test_plan_validation()
 	_test_state_snapshot()
@@ -94,7 +102,7 @@ func _test_grasshopper_sub() -> void:
 	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(4, 0), 0]])
 	var p0 := _plan(ms, 0)
 	var ok := p0.assign(0, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Grasshopper"))
-	p0.set_target(0, 0, Vector2i(0, 1))
+	p0.set_target(0, 0, Vector2i(0, 1), 0, TurnPlan.SUB_SLOT)
 	TickEngine.new().resolve_tick(ms, p0, _plan(ms, 1), 0)
 	_check(ok and ms.teams[0][0].hex == Vector2i(0, 1), "Grasshopper in sub slot moves the unit")
 
@@ -144,6 +152,128 @@ func _test_ranged_at_elevated_target() -> void:
 	engine.always_hit = true
 	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
 	_check(ms.teams[1][0].trion_hp == 90, "ranged attack reaches a unit on an upper floor")
+
+
+func _test_split_targets() -> void:
+	# Main moves one way while Sub (Viper) shoots a different hex, same tick.
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
+	var p0 := _plan(ms, 0)
+	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
+	p0.set_target(0, 0, Vector2i(-1, 0), 0, TurnPlan.MAIN_SLOT)
+	var ok := p0.assign(0, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Viper"))
+	p0.set_target(0, 0, Vector2i(0, 3), 0, TurnPlan.SUB_SLOT)
+	var engine := TickEngine.new()
+	engine.always_hit = true
+	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
+	_check(ok and ms.teams[0][0].hex == Vector2i(-1, 0) and ms.teams[1][0].trion_hp < 100,
+		"Main and Sub slots aim at different targets")
+
+	var round_trip := PlanCodec.decode_plan(PlanCodec.encode_plan(p0), p0.units)
+	var ta := round_trip.get_tick(0, 0)
+	_check(ta.slot_target(TurnPlan.SUB_SLOT) == Vector2i(0, 3) and ta.slot_target(TurnPlan.MAIN_SLOT) == Vector2i(-1, 0),
+		"per-slot targets survive JSON encoding")
+
+
+func _test_bagworm_cost() -> void:
+	var units := TriggerLibrary.sample_units()
+	var plan := TurnPlan.new(units)
+	var bag := TriggerLibrary.get_card("Bagworm")
+	for t in 3:
+		plan.assign(0, t, TurnPlan.MAIN_SLOT, bag)
+	_check(plan.get_at_spent(0) == bag.action_at_cost, "Bagworm costs 1 AT per turn, not per tick")
+
+
+func _test_bagworm_toggle() -> void:
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(6, 0), 0]])
+	var p0 := _plan(ms, 0)
+	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Bagworm"))
+	var engine := TickEngine.new()
+	for t in 4:
+		engine.resolve_tick(ms, p0, _plan(ms, 1), t)
+	_check(ms.teams[0][0].stealth_active, "Bagworm stays on for the rest of the turn")
+	engine.resolve_tick(ms, _plan(ms, 0), _plan(ms, 1), 0)
+	_check(not ms.teams[0][0].stealth_active, "Bagworm drops at the next turn unless maintained")
+
+
+func _test_building_blocks_shot() -> void:
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
+	ms.buildings[Vector2i(0, 1)] = 3
+	var p0 := _plan(ms, 0)
+	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
+	p0.set_target(0, 0, Vector2i(0, 3))
+	var engine := TickEngine.new()
+	engine.always_hit = true
+	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
+	_check(ms.teams[1][0].trion_hp == 100, "a building between shooter and target blocks the shot")
+
+
+func _test_line_of_sight() -> void:
+	var ms := MatchState.new(1)
+	ms.buildings[Vector2i(0, 1)] = 2
+	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 3), 0), "building blocks ground-level sight")
+	_check(Visibility.has_los(ms, Vector2i(0, 0), 3, Vector2i(0, 3), 0), "a viewer above the building sees over it")
+	ms.cover[Vector2i(0, 2)] = 2
+	ms.buildings.clear()
+	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 3), 0), "full cover blocks ground-level sight")
+
+
+func _test_fog_states() -> void:
+	# Viewer at (0,0) faces E (+q). Enemies: ahead in the cone, behind it far
+	# away, and a Bagworm user nearby.
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(5, 0), 3], [1, Vector2i(-5, 0), 0], [1, Vector2i(3, 0), 0]])
+	ms.teams[1][2].stealth_active = true
+	var states := Visibility.enemy_states(ms, 0)
+	_check(int(states[ms.teams[1][0]]) == Visibility.State.SIGHT, "enemy in the vision cone is in direct sight")
+	_check(int(states[ms.teams[1][1]]) == Visibility.State.RADAR, "enemy behind the viewer shows only on radar")
+	_check(int(states[ms.teams[1][2]]) == Visibility.State.SIGHT, "Bagworm user within 3 hexes is revealed")
+	ms.teams[1][2].hex = Vector2i(6, -3)
+	states = Visibility.enemy_states(ms, 0)
+	_check(int(states[ms.teams[1][2]]) == Visibility.State.HIDDEN, "distant Bagworm user is removed from radar")
+
+	var view := Visibility.encode_view(ms, 0, 5)
+	var behind: Dictionary = view["units"][2]
+	_check(int(behind["vis"]) == Visibility.State.RADAR and not behind.has("hp") and behind.has("ping"),
+		"radar entries carry a ping but no identity or HP")
+	var ping := Vector2i(int(behind["ping"][0]), int(behind["ping"][1]))
+	var off := HexCoord.distance(ping, Vector2i(-5, 0))
+	_check(off >= 1 and off <= 2, "radar ping is offset 1-2 hexes from the true position")
+
+
+func _test_city_map() -> void:
+	var map := MapData.city()
+	_check(map.tiles.size() == MapData.COLS * MapData.ROWS, "city map is %dx%d hexes" % [MapData.COLS, MapData.ROWS])
+	_check(map.spawns[0].size() == 4 and map.spawns[1].size() == 4, "four spawn hexes per team")
+	var spawns_clear := true
+	for team in 2:
+		for hex in map.spawns[team]:
+			if map.buildings.has(hex) or map.cover.has(hex):
+				spawns_clear = false
+	_check(spawns_clear, "spawns are on open street")
+	var floors := [0, 0]
+	for hex in map.buildings:
+		floors[0 if hex.y >= MapData.ROWS / 2 else 1] += int(map.buildings[hex])
+	_check(floors[0] == floors[1] and floors[0] > 0, "both halves have identical building mass (fair map)")
+
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units())
+	_check(not ms.has_tile(Vector2i(500, 500)) and not TickEngine.is_valid_move(ms, ms.teams[0][0].hex, 0, Vector2i(500, 500), 0),
+		"moves off the map are rejected")
+
+
+func _test_server_persistence() -> void:
+	var server := MatchServer.new()
+	server.persist = false
+	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
+	var created := server._create_match({ "squad": squad, "seed": 99 })
+	var id := str(created["body"]["match_id"])
+	server._join_match(id, { "squad": squad })
+	var m: Dictionary = server._matches[id]
+	(m["ms"] as MatchState).teams[0][0].trion_hp = 61
+	var stored: Variant = JSON.parse_string(JSON.stringify(server._serialize(m)))
+	var restored := server._deserialize(stored)
+	var ms: MatchState = restored["ms"]
+	_check(ms != null and ms.teams[0][0].trion_hp == 61 and restored["tokens"] == m["tokens"] and int(restored["turn"]) == 1,
+		"server match survives save/load (state, tokens, turn)")
+	server.free()
 
 
 # --- Validation -------------------------------------------------------------

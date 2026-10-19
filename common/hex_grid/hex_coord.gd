@@ -14,6 +14,9 @@ const SQRT3 := 1.7320508075688772
 
 ## World-space height of one building floor (used for unit elevation).
 const FLOOR_HEIGHT := 1.0
+## World-space Y of the top face of a board tile (tiles are centered on y=0).
+## Units, props, and buildings stand on this surface.
+const GROUND_Y := 0.175
 
 ## Cube-space neighbor directions, indexed 0..5 (E, SE, SW, W, NW, NE).
 const CUBE_DIRECTIONS: Array[Vector3i] = [

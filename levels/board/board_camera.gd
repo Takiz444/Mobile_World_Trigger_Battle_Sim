@@ -15,11 +15,17 @@ extends Camera3D
 @export var pan_sensitivity := 0.0012     # fraction of ortho size per pixel
 @export var rotate_sensitivity := 0.01    # radians per pixel
 @export var orbit_distance := 60.0        # camera-to-target distance (fixed)
+## Where the orbit target should appear relative to the viewport center, in
+## pixels (negative = left / up). Lets the board center sit in the area not
+## covered by UI panels.
+@export var screen_offset_px := Vector2.ZERO
 
 const ZOOM_STEP := 0.1
 
 var _panning := false
 var _orbiting := false
+var _bounds := AABB()
+var _has_bounds := false
 
 
 func _ready() -> void:
@@ -52,6 +58,15 @@ func _unhandled_input(event: InputEvent) -> void:
 ## direction +1 = zoom in (smaller ortho size), -1 = zoom out.
 func _zoom(direction: int) -> void:
 	size = clampf(size * pow(1.0 + ZOOM_STEP, -direction), min_size, max_size)
+	_update_transform()
+
+
+## Keeps the orbit target inside the board so the camera can't drift off
+## the map.
+func set_bounds(bounds: AABB) -> void:
+	_bounds = bounds
+	_has_bounds = true
+	_update_transform()
 
 
 func _pan_pixels(rel: Vector2) -> void:
@@ -73,6 +88,13 @@ func _orbit(rel: Vector2) -> void:
 
 
 func _update_transform() -> void:
+	if _has_bounds:
+		target.x = clampf(target.x, _bounds.position.x, _bounds.end.x)
+		target.z = clampf(target.z, _bounds.position.z, _bounds.end.z)
+	if is_inside_tree():
+		var world_per_px := size / maxf(1.0, get_viewport().get_visible_rect().size.y)
+		h_offset = -screen_offset_px.x * world_per_px
+		v_offset = screen_offset_px.y * world_per_px
 	var dir := Vector3(
 		sin(yaw) * cos(pitch),
 		sin(pitch),

@@ -169,8 +169,8 @@ func _refresh_timeline_cards() -> void:
 		for slot in 2:
 			var s: TimelineSlot = _current_slots[tick][slot]
 			s.set_card(_plan.get_card(_current_unit, tick, slot))
-			if ta.has_target:
-				s.set_target(ta.target_hex, ta.target_floor)
+			if ta.slot_has_target(slot):
+				s.set_target(ta.slot_target(slot), ta.slot_target_floor(slot))
 			else:
 				s.clear_target()
 			s.set_selected(s == _selected_slot)
@@ -212,11 +212,12 @@ func _on_slot_selected(slot: TimelineSlot) -> void:
 
 
 ## Sets the target/destination hex (and optional floor) for the currently
-## selected tick slot. Called when the player clicks a hex on the 3D board.
+## selected tick slot (Main and Sub aim independently). Called when the
+## player clicks a hex on the 3D board.
 func set_target_for_selected_slot(hex: Vector2i, floor: int = 0) -> void:
 	if _selected_slot == null:
 		return
-	_plan.set_target(_selected_slot.unit_index, _selected_slot.tick_index, hex, floor)
+	_plan.set_target(_selected_slot.unit_index, _selected_slot.tick_index, hex, floor, _selected_slot.slot_id)
 	_refresh_timeline_cards()
 	targeting_changed.emit()
 

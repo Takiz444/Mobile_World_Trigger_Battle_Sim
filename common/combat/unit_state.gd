@@ -11,6 +11,11 @@ var trion_hp: int
 var is_bailed: bool = false
 var stealth_active: bool = false   # Bagworm
 
+# Client-side fog of war (never read by the engine): how the local player
+# currently perceives this unit, and its radar ghost position.
+var fog: int = Visibility.State.SIGHT
+var ping_hex: Vector2i
+
 # Per-tick defensive state, reset by the engine each tick.
 var shield_active: bool = false
 var full_guard: bool = false

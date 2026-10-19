@@ -78,6 +78,8 @@ static func encode_plan(plan: TurnPlan) -> Dictionary:
 				"sub": ta.sub_card.card_name if ta.sub_card != null else null,
 				"target": [ta.target_hex.x, ta.target_hex.y] if ta.has_target else null,
 				"target_floor": ta.target_floor,
+				"sub_target": [ta.sub_target_hex.x, ta.sub_target_hex.y] if ta.sub_has_target else null,
+				"sub_target_floor": ta.sub_target_floor,
 			})
 		units.append(ticks)
 	return { "units": units }
@@ -100,9 +102,11 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 				plan.assign(u, t, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card(str(main_name)))
 			if sub_name != null:
 				plan.assign(u, t, TurnPlan.SUB_SLOT, TriggerLibrary.get_card(str(sub_name)))
-			var target: Variant = tdata.get("target")
-			if target != null:
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get("target_floor", 0)))
+			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
+				var prefix := "sub_" if slot == TurnPlan.SUB_SLOT else ""
+				var target: Variant = tdata.get(prefix + "target")
+				if target != null:
+					plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get(prefix + "target_floor", 0)), slot)
 	return plan
 
 
@@ -200,14 +204,17 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictio
 					return { "plan": null, "error": "unit %d tick %d: '%s' not equipped" % [u, t, str(card_name)] }
 				if not plan.assign(u, t, slot, TriggerLibrary.get_card(str(card_name))):
 					return { "plan": null, "error": "unit %d tick %d: '%s' breaks slot or AT rules" % [u, t, str(card_name)] }
-			var target: Variant = tdata.get("target")
-			if target != null:
+			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
+				var prefix := "sub_" if slot == TurnPlan.SUB_SLOT else ""
+				var target: Variant = tdata.get(prefix + "target")
+				if target == null:
+					continue
 				if not (target is Array) or target.size() != 2 or not _is_number(target[0]) or not _is_number(target[1]):
 					return { "plan": null, "error": "unit %d tick %d: malformed target" % [u, t] }
-				var target_floor: Variant = tdata.get("target_floor", 0)
+				var target_floor: Variant = tdata.get(prefix + "target_floor", 0)
 				if not _is_number(target_floor) or int(target_floor) < 0:
 					return { "plan": null, "error": "unit %d tick %d: malformed target floor" % [u, t] }
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor))
+				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor), slot)
 	return { "plan": plan, "error": "" }
 
 

@@ -47,5 +47,10 @@ func submit_plan(match_id: String, token: String, turn: int, plan: Dictionary) -
 	return await request("POST", "/match/%s/submit" % match_id, { "token": token, "turn": turn, "plan": plan })
 
 
-func get_match(match_id: String) -> Dictionary:
-	return await request("GET", "/match/%s" % match_id)
+## With a player token the response includes that team's fogged view,
+## replay frames, and own plans; without one only public match info.
+func get_match(match_id: String, token: String = "") -> Dictionary:
+	var path := "/match/%s" % match_id
+	if token != "":
+		path += "?token=%s" % token.uri_encode()
+	return await request("GET", path)

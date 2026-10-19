@@ -12,6 +12,9 @@ const MOVE_DURATION := 0.35
 const TICK_PAUSE := 0.25
 const POLL_INTERVAL := 1.0
 const MATCH_SEED := 12345
+## Where hidden enemies are parked in the client's MatchState (online mode),
+## so occupancy checks can't leak their real position.
+const OFFBOARD := Vector2i(100000, 100000)
 
 var _board: HexBoard
 var _timeline: TimelineUI
@@ -103,10 +106,28 @@ func _build_squads() -> void:
 	_ms = MatchRunner.build_match(player_data, _enemy_data, MATCH_SEED)
 	_player_states = _ms.teams[0]
 	_enemy_states = _ms.teams[1]
+	_build_board_view()
+	_refresh_fog_local(_view_salt())
+
+
+## Builds the map, props, and unit markers for _ms and frames the camera on
+## the local squad.
+func _build_board_view() -> void:
+	_board.set_map(_ms.tiles)
 	_units_view.setup(_ms.all_units(), _board.hex_size)
 	_board.set_cover(_ms.cover)
 	_board.set_buildings(_ms.buildings)
 	_board.set_wires(_ms.wires)
+	if _camera != null:
+		_camera.set_bounds(_board.get_bounds())
+		# Frame the squad with the battlefield ahead of it: aim 40% of the way
+		# from the squad's center toward the middle of the map.
+		var squad := Vector3.ZERO
+		for u in _player_states:
+			squad += _board.hex_to_world(u.hex)
+		squad /= maxf(1.0, _player_states.size())
+		var bounds := _board.get_bounds()
+		_camera.recenter(squad.lerp(bounds.get_center(), 0.4))
 
 
 func _setup_online() -> void:
@@ -119,7 +140,7 @@ func _setup_online() -> void:
 	add_child(_backend)
 
 	_show_waiting("Connecting to server…")
-	var info := await _backend.get_match(_match_id)
+	var info := await _backend.get_match(_match_id, _token)
 	if not info.get("success", false):
 		_show_waiting("Could not reach server:\n%s" % str(info.get("error", "?")))
 		return
@@ -131,7 +152,7 @@ func _setup_online() -> void:
 		_show_waiting("Waiting for opponent to join…\nMatch ID: %s" % _match_id)
 		while true:
 			await get_tree().create_timer(POLL_INTERVAL).timeout
-			var poll := await _backend.get_match(_match_id)
+			var poll := await _backend.get_match(_match_id, _token)
 			if poll.get("success", false) and bool(poll["body"].get("ready", false)):
 				body = poll["body"]
 				break
@@ -143,17 +164,15 @@ func _setup_online() -> void:
 	_data_teams = [squad0, squad1]
 
 	_ms = MatchRunner.build_match(squad0, squad1, seed)
-	# Resume from the server's authoritative state (positions, HP, wires, RNG)
-	# so a reconnect mid-match starts in sync.
-	var state: Variant = body.get("state")
-	if state is Dictionary:
-		PlanCodec.apply_state(_ms, state)
 	_player_states = _ms.teams[_team]
 	_enemy_states = _ms.teams[1 - _team]
-	_units_view.setup(_ms.all_units(), _board.hex_size)
-	_board.set_cover(_ms.cover)
-	_board.set_buildings(_ms.buildings)
-	_board.set_wires(_ms.wires)
+	# The server only sends what our team can see (fog of war); start from
+	# that view, which also resyncs a reconnect mid-match.
+	var view: Variant = body.get("view")
+	if view is Dictionary:
+		_apply_view(view)
+	_build_board_view()
+	_refresh_fog_overlay()
 
 	# The timeline plans only the local team's units.
 	_timeline.setup(_data_teams[_team])
@@ -259,7 +278,7 @@ func _submit_online() -> void:
 func _poll_for_result() -> Dictionary:
 	for _i in 300:  # up to ~5 minutes
 		await get_tree().create_timer(POLL_INTERVAL).timeout
-		var resp := await _backend.get_match(_match_id)
+		var resp := await _backend.get_match(_match_id, _token)
 		if not resp.get("success", false):
 			return {}
 		var b: Dictionary = resp["body"]
@@ -281,35 +300,102 @@ func _catch_up(body: Dictionary) -> int:
 			continue
 		_turn = int(result["turn"])
 		_event_log.set_turn(_turn)
-		winner = await _replay_result(result)
-		if winner != -1:
+		winner = await _replay_frames(result.get("frames", []))
+		if int(result.get("winner", -1)) != -1:
+			winner = int(result["winner"])
 			break
 	return winner
 
 
-func _replay_result(result: Dictionary) -> int:
-	var plans: Array = result.get("plans", [])
-	if plans.size() < 2:
-		_event_log.add_message("Server returned an incomplete result.", Color(1.0, 0.5, 0.4))
-		return MatchRunner.winner(_ms)
-	var p0 := PlanCodec.decode_plan(plans[0], _data_teams[0])
-	var p1 := PlanCodec.decode_plan(plans[1], _data_teams[1])
-	var winner := await _replay_turn(p0, p1)
-
-	# The server is authoritative: if our local replay diverged, adopt its state.
-	var state: Variant = result.get("state")
-	if state is Dictionary and not PlanCodec.state_matches(_ms, state):
-		push_warning("Client replay diverged from server on turn %d; resyncing." % _turn)
-		_event_log.add_message("Resynced with server state.", Color(1.0, 0.8, 0.4))
-		PlanCodec.apply_state(_ms, state)
-		_units_view.refresh()
+## Online replay: the server sends one fog-filtered frame per tick (our view
+## of the board + the events we may see). We animate between frames instead
+## of re-simulating, since the client never learns hidden enemy actions.
+func _replay_frames(frames: Array) -> int:
+	_begin_replay()
+	await get_tree().create_timer(0.4).timeout
+	for frame in frames:
+		var snapshots := _snapshot_units()
+		_apply_view(frame.get("view", {}))
 		_board.set_wires(_ms.wires)
-		winner = MatchRunner.winner(_ms)
-	return winner
+		var events: Array = frame.get("events", [])
+		for ev in events:
+			_event_log.add_event_dict(ev)
+		_refresh_fog_overlay()
+		_units_view.update_labels()
+		_animate_frame(snapshots, events)
+		await get_tree().create_timer(MOVE_DURATION + TICK_PAUSE).timeout
+	return MatchRunner.winner(_ms)
 
 
-## Resolves + animates a full 6-tick turn and returns the winner (-1 if none).
+## Applies a server view (Visibility.encode_view) to the client MatchState.
+## Unseen enemies are parked OFFBOARD; RADAR ones keep only a ping position.
+func _apply_view(view: Dictionary) -> void:
+	var units := _ms.all_units()
+	var rows: Array = view.get("units", [])
+	for i in mini(units.size(), rows.size()):
+		var u: UnitState = units[i]
+		var row: Dictionary = rows[i]
+		u.fog = int(row.get("vis", Visibility.State.SIGHT))
+		match u.fog:
+			Visibility.State.SIGHT:
+				var hex: Array = row.get("hex", [u.hex.x, u.hex.y])
+				u.hex = Vector2i(int(hex[0]), int(hex[1]))
+				u.floor = int(row.get("floor", 0))
+				u.facing = int(row.get("facing", u.facing))
+				u.trion_hp = int(row.get("hp", u.trion_hp))
+				u.is_bailed = bool(row.get("bailed", false))
+				u.stealth_active = bool(row.get("stealth", false))
+			Visibility.State.RADAR:
+				var ping: Array = row.get("ping", [0, 0])
+				u.ping_hex = Vector2i(int(ping[0]), int(ping[1]))
+				u.hex = OFFBOARD
+			_:
+				u.hex = OFFBOARD
+	_ms.wires.clear()
+	for w in view.get("wires", []):
+		_ms.wires[Vector2i(int(w[0]), int(w[1]))] = true
+
+
+func _animate_frame(snapshots: Dictionary, events: Array) -> void:
+	_animate_moves(snapshots)
+	var by_name := {}
+	for u in _ms.all_units():
+		by_name[u.display_name()] = u
+	for ev in events:
+		if int(ev.get("phase", -1)) != CombatEvent.Phase.RESOLUTION or int(ev.get("damage", 0)) <= 0:
+			continue
+		var target: UnitState = by_name.get(str(ev.get("target", "")))
+		if target == null:
+			continue
+		if target.is_bailed:
+			_units_view.play_bail(target)
+		else:
+			_units_view.flash_hit(target)
+
+
+## Local mode: resolves + animates a full 6-tick turn and returns the winner
+## (-1 if none). The engine sees everything, but the board and the combat log
+## only show what the player's team can see (fog of war).
 func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
+	_begin_replay()
+	await get_tree().create_timer(0.4).timeout
+
+	for tick in TurnPlan.TICKS_PER_TURN:
+		var snapshots := _snapshot_units()
+		var events := _engine.resolve_tick(_ms, player_plan, enemy_plan, tick)
+		_board.set_wires(_ms.wires)
+		var states := _refresh_fog_local(_turn * 10 + tick)
+		for ev in events:
+			if Visibility.event_visible(ev, _team, states):
+				_event_log.add_event(ev)
+		_units_view.update_labels()
+		_animate_transitions(snapshots, events)
+		await get_tree().create_timer(MOVE_DURATION + TICK_PAUSE).timeout
+
+	return MatchRunner.winner(_ms)
+
+
+func _begin_replay() -> void:
 	_event_log.clear()
 	_board.clear_highlights()
 	_units_view.clear_ghost()
@@ -317,19 +403,46 @@ func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
-	await get_tree().create_timer(0.4).timeout
 
-	for tick in TurnPlan.TICKS_PER_TURN:
-		var snapshots := _snapshot_units()
-		var events := _engine.resolve_tick(_ms, player_plan, enemy_plan, tick)
-		_board.set_wires(_ms.wires)
-		for ev in events:
-			_event_log.add_event(ev)
-		_units_view.update_labels()
-		_animate_transitions(snapshots, events)
-		await get_tree().create_timer(MOVE_DURATION + TICK_PAUSE).timeout
 
-	return MatchRunner.winner(_ms)
+# --- Fog of War -------------------------------------------------------------
+
+## Radar salt for the planning view; equals the last replay tick's salt
+## (turn * 10 + 5) of the previous turn so pings don't jump.
+func _view_salt() -> int:
+	return _turn * 10 - 5
+
+
+## Local mode: recomputes what our team sees from the full MatchState.
+## Returns the enemy visibility states (for event filtering).
+func _refresh_fog_local(salt: int) -> Dictionary:
+	var states := Visibility.enemy_states(_ms, _team)
+	var index := 0
+	for u in _ms.all_units():
+		if u.team != _team:
+			u.fog = int(states[u])
+			if u.fog == Visibility.State.RADAR:
+				u.ping_hex = Visibility.radar_ping(_ms, u, index, salt)
+		index += 1
+	_refresh_fog_overlay()
+	return states
+
+
+func _refresh_fog_overlay() -> void:
+	_board.set_fog(Visibility.visible_hexes(_ms, _team))
+	_units_view.apply_fog()
+
+
+## Enemy units the player is allowed to know about right now.
+func _is_known(u: UnitState) -> bool:
+	return u.team == _team or u.fog == Visibility.State.SIGHT
+
+
+## Occupancy check that ignores enemies hidden by fog (so the planning UI
+## can't leak their position).
+func _known_unit_at(hex: Vector2i, floor: int) -> UnitState:
+	var u := _ms.get_unit_at(hex, floor)
+	return u if u != null and _is_known(u) else null
 
 
 func _after_resolution(winner: int) -> void:
@@ -338,6 +451,8 @@ func _after_resolution(winner: int) -> void:
 		_resolving = false
 		return
 	_turn += 1
+	if not _online:
+		_refresh_fog_local(_view_salt())
 	_event_log.set_turn(_turn)
 	_event_log.add_message("Turn %d — plan your next move." % _turn, Color(0.6, 0.9, 0.6))
 	_timeline.set_locked(false)
@@ -348,19 +463,28 @@ func _after_resolution(winner: int) -> void:
 func _snapshot_units() -> Dictionary:
 	var snap := {}
 	for u in _ms.all_units():
-		snap[u] = { "hex": u.hex, "facing": u.facing, "floor": u.floor }
+		snap[u] = { "hex": u.hex, "facing": u.facing, "floor": u.floor, "fog": u.fog }
 	return snap
 
 
-func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> void:
+## Tweens units that moved. Units that just came out of the fog snap into
+## place instead of sliding in from their last known (or parked) position.
+func _animate_moves(snapshots: Dictionary) -> void:
 	for u in _ms.all_units():
 		var old: Dictionary = snapshots.get(u, {})
 		if old.is_empty():
+			continue
+		if int(old["fog"]) != Visibility.State.SIGHT or old["hex"] == OFFBOARD:
+			_units_view.snap(u)
 			continue
 		if old["hex"] != u.hex or old["floor"] != u.floor:
 			_units_view.tween_to(u, _board.hex_to_world_at(u.hex, u.floor), MOVE_DURATION)
 		if old["facing"] != u.facing:
 			_units_view.tween_facing(u, u.facing, MOVE_DURATION)
+
+
+func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> void:
+	_animate_moves(snapshots)
 	for ev in events:
 		if ev.phase == CombatEvent.Phase.RESOLUTION and ev.damage > 0 and ev.target != null:
 			if ev.target.is_bailed:
@@ -419,7 +543,7 @@ func _update_prediction(info: Dictionary) -> void:
 		return
 
 	var target := _ms.get_unit_at_any_floor(target_hex)
-	if target == null:
+	if target == null or not _is_known(target):
 		_prediction_label.visible = false
 		return
 
@@ -469,21 +593,21 @@ func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
 		var origin_floor := _projected_floor(unit_index, tick - 1)
 		# Horizontal: adjacent hexes on the same floor.
 		for n in HexCoord.neighbors(origin):
-			if _board.has_tile(n) and _ms.floor_legal(n, origin_floor) and _ms.get_unit_at(n, origin_floor) == null:
+			if _board.has_tile(n) and _ms.floor_legal(n, origin_floor) and _known_unit_at(n, origin_floor) == null:
 				result.append(n)
 		# Vertical: climb / descend one floor within the same building.
-		if _ms.floor_legal(origin, origin_floor + 1) and _ms.get_unit_at(origin, origin_floor + 1) == null:
+		if _ms.floor_legal(origin, origin_floor + 1) and _known_unit_at(origin, origin_floor + 1) == null:
 			result.append(origin)
-		if origin_floor >= 2 and _ms.get_unit_at(origin, origin_floor - 1) == null:
+		if origin_floor >= 2 and _known_unit_at(origin, origin_floor - 1) == null:
 			result.append(origin)
 		# Enter a building from the ground, or exit it back to the ground.
 		if origin_floor == 0:
 			for n in HexCoord.neighbors(origin):
-				if _board.has_tile(n) and _ms.building_floors(n) >= 1 and _ms.get_unit_at(n, 1) == null:
+				if _board.has_tile(n) and _ms.building_floors(n) >= 1 and _known_unit_at(n, 1) == null:
 					result.append(n)
 		elif origin_floor == 1:
 			for n in HexCoord.neighbors(origin):
-				if _board.has_tile(n) and _ms.floor_legal(n, 0) and _ms.get_unit_at(n, 0) == null:
+				if _board.has_tile(n) and _ms.floor_legal(n, 0) and _known_unit_at(n, 0) == null:
 					result.append(n)
 
 	return result
@@ -507,11 +631,11 @@ func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
 
 	if card.card_type == TriggerCard.CardType.MELEE:
 		for e in _enemy_states:
-			if not e.is_bailed and HexCoord.distance(origin, e.hex) == 1 and e.floor == origin_floor:
+			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) == 1 and e.floor == origin_floor:
 				result.append(e.hex)
 	elif card.card_type == TriggerCard.CardType.RANGED:
 		for e in _enemy_states:
-			if not e.is_bailed and HexCoord.distance(origin, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
+			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
 				result.append(e.hex)
 	elif card.card_name == "Spider":
 		for hex in HexCoord.spiral(origin, 3):
@@ -581,8 +705,9 @@ func _target_hex_for(info: Dictionary) -> Vector2i:
 	if unit_index < 0 or tick < 0:
 		return HexBoard.INVALID_HEX
 	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
-	if ta != null and ta.has_target:
-		return ta.target_hex
+	var slot: int = info.get("slot", TurnPlan.MAIN_SLOT)
+	if ta != null and ta.slot_has_target(slot):
+		return ta.slot_target(slot)
 	return HexBoard.INVALID_HEX
 
 
@@ -592,8 +717,9 @@ func _target_floor_for(info: Dictionary) -> int:
 	if unit_index < 0 or tick < 0:
 		return 0
 	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
-	if ta != null and ta.has_target:
-		return ta.target_floor
+	var slot: int = info.get("slot", TurnPlan.MAIN_SLOT)
+	if ta != null and ta.slot_has_target(slot):
+		return ta.slot_target_floor(slot)
 	return 0
 
 
@@ -602,7 +728,7 @@ func _is_valid_move_dest(origin: Vector2i, origin_floor: int, hex: Vector2i, flo
 		return false
 	if not _ms.floor_legal(hex, floor):
 		return false
-	if _ms.get_unit_at(hex, floor) != null:
+	if _known_unit_at(hex, floor) != null:
 		return false
 	return TickEngine.is_valid_move(_ms, origin, origin_floor, hex, floor)
 
@@ -617,10 +743,13 @@ func _projected_pos(unit_index: int, through_tick: int) -> Dictionary:
 	var plan := _timeline.get_plan()
 	for t in range(through_tick + 1):
 		var ta: TickAction = plan.get_tick(unit_index, t)
-		if (TickEngine.is_move_card(ta.main_card) or TickEngine.is_move_card(ta.sub_card)) and ta.has_target:
-			if TickEngine.is_valid_move(_ms, hex, floor, ta.target_hex, ta.target_floor) and _ms.get_unit_at(ta.target_hex, ta.target_floor) == null:
-				hex = ta.target_hex
-				floor = ta.target_floor
+		var slot := TickEngine.move_slot(ta)
+		if slot != -1 and ta.slot_has_target(slot):
+			var to_hex := ta.slot_target(slot)
+			var to_floor := ta.slot_target_floor(slot)
+			if TickEngine.is_valid_move(_ms, hex, floor, to_hex, to_floor) and _known_unit_at(to_hex, to_floor) == null:
+				hex = to_hex
+				floor = to_floor
 	return { "hex": hex, "floor": floor }
 
 
@@ -752,15 +881,19 @@ func _show_match_over(winner: int) -> void:
 
 
 # --- Enemy AI (local mode only) --------------------------------------------
+# The AI plays fair under fog of war: it only attacks player units its team
+# can see, closes in on radar contacts, and paths around buildings.
 
 ## Rebuilds the enemy plan for the current turn from the enemy loadout.
 func _build_enemy_plan() -> void:
 	_enemy_plan = TurnPlan.new(_enemy_data)
+	var seen := Visibility.enemy_states(_ms, 1)
 	for i in _enemy_data.size():
-		_plan_enemy_unit(i)
+		if not _enemy_states[i].is_bailed:
+			_plan_enemy_unit(i, seen)
 
 
-func _plan_enemy_unit(i: int) -> void:
+func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
 	var u := _enemy_states[i]
 	var actions := _enemy_plan.get_available_actions(i)
 	var melee: TriggerCard = null
@@ -777,28 +910,36 @@ func _plan_enemy_unit(i: int) -> void:
 		elif move_card == null and a.card_type == TriggerCard.CardType.MOVE:
 			move_card = a
 
-	var low_hp := u.trion_hp <= u.unit_data.base_trion_hp * 0.35
+	var low_hp := u.trion_hp <= u.unit_data.base_trion_hp * 0.2
+	var pos := u.hex  # projected position as the plan's moves accumulate
+	var floor := u.floor
 
 	for tick in TurnPlan.TICKS_PER_TURN:
-		var target := _pick_target(u)
-
 		# Panic defense: bunker up when nearly bailed.
-		if low_hp and u.trion_hp <= u.unit_data.base_trion_hp * 0.2 and shield != null:
-			if _try_full_guard(i, tick, shield):
+		if low_hp and shield != null and _try_full_guard(i, tick, shield):
+			continue
+
+		var target := _pick_target(pos, seen, true)
+		if target != null:
+			var dist := HexCoord.distance(pos, target.hex)
+			var weapon: TriggerCard = null
+			if melee != null and dist == 1 and target.floor == floor:
+				weapon = melee
+			elif ranged != null and dist <= TickEngine.DEFAULT_RANGED_RANGE \
+					and (ranged.card_name == "Viper" or Visibility.has_los(_ms, pos, floor, target.hex, target.floor)):
+				weapon = ranged
+			if weapon != null and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, weapon):
+				_enemy_plan.set_target(i, tick, target.hex)
 				continue
 
-		if target != null:
-			var dist := HexCoord.distance(u.hex, target.hex)
-			var weapon := melee if (dist == 1 and target.floor == u.floor) else (ranged if dist <= TickEngine.DEFAULT_RANGED_RANGE else null)
-			if weapon != null and _line_clear(u, target, weapon):
-				if _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, weapon):
-					_enemy_plan.set_target(i, tick, target.hex)
-					continue
-			if move_card != null and dist > 1:
-				var step := _best_step_toward(u, target)
-				if step != u.hex and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, move_card):
-					_enemy_plan.set_target(i, tick, step)
-					continue
+		# Advance on a seen enemy, else on the nearest radar contact.
+		var goal := target if target != null else _pick_target(pos, seen, false)
+		if goal != null and move_card != null and floor == 0 and HexCoord.distance(pos, goal.hex) > 1:
+			var step := _next_step(pos, goal.hex)
+			if step != pos and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, move_card):
+				_enemy_plan.set_target(i, tick, step)
+				pos = step
+				continue
 
 		# Fallback: raise shield (more AT lets later ticks do other things).
 		if shield != null:
@@ -814,48 +955,42 @@ func _try_full_guard(i: int, tick: int, shield: TriggerCard) -> bool:
 	return true
 
 
-## Focus-fires the weakest player unit; ties broken by proximity.
-func _pick_target(from: UnitState) -> UnitState:
+## Focus-fires the weakest player unit in sight (ties broken by proximity).
+## With `sight_only` false, also considers radar contacts (approximate
+## positions the AI may advance toward but not shoot at).
+func _pick_target(from: Vector2i, seen: Dictionary, sight_only: bool) -> UnitState:
 	var best: UnitState = null
 	var best_score := 0x7FFFFFFF
 	for p in _player_states:
 		if p.is_bailed:
 			continue
-		var score := p.trion_hp * 1000 + HexCoord.distance(from.hex, p.hex)
+		var state := int(seen.get(p, Visibility.State.HIDDEN))
+		if state == Visibility.State.HIDDEN or (sight_only and state != Visibility.State.SIGHT):
+			continue
+		var score := p.trion_hp * 1000 + HexCoord.distance(from, p.hex)
+		if not sight_only:
+			score = HexCoord.distance(from, p.hex)
 		if score < best_score:
 			best_score = score
 			best = p
 	return best
 
 
-## One-hex step toward `target`, choosing the neighbor that most reduces
-## distance while skipping off-board or occupied hexes.
-func _best_step_toward(u: UnitState, target: UnitState) -> Vector2i:
-	var best := u.hex
-	var best_d := HexCoord.distance(u.hex, target.hex)
-	for n in HexCoord.neighbors(u.hex):
-		if not _board.has_tile(n):
-			continue
-		if not _ms.floor_legal(n, 0):
-			continue
-		if _ms.get_unit_at(n, 0) != null:
-			continue
-		var d := HexCoord.distance(n, target.hex)
-		if d < best_d:
-			best_d = d
-			best = n
-	return best
-
-
-## Whether a ranged shot is clear of full cover (Viper curves around cover).
-func _line_clear(u: UnitState, target: UnitState, weapon: TriggerCard) -> bool:
-	if weapon.card_type != TriggerCard.CardType.RANGED:
-		return true
-	if weapon.card_name == "Viper":
-		return true
-	for hex in HexCoord.line(u.hex, target.hex):
-		if hex == u.hex or hex == target.hex:
-			continue
-		if int(_ms.cover.get(hex, 0)) >= 2:
-			return false
-	return true
+## Next street hex on the shortest ground path toward `goal` (A* around
+## buildings). Falls back to a greedy step when no path exists.
+func _next_step(from: Vector2i, goal: Vector2i) -> Vector2i:
+	var walkable := func(h: Vector2i) -> bool:
+		return _board.has_tile(h) and (h == goal or _ms.floor_legal(h, 0))
+	var path := HexCoord.find_path(from, goal, walkable, 40)
+	var step := from
+	if path.size() >= 2:
+		step = path[1]
+	else:
+		var best_d := HexCoord.distance(from, goal)
+		for n in HexCoord.neighbors(from):
+			if walkable.call(n) and HexCoord.distance(n, goal) < best_d:
+				best_d = HexCoord.distance(n, goal)
+				step = n
+	if step == goal or not _ms.floor_legal(step, 0) or _ms.get_unit_at(step, 0) != null:
+		return from
+	return step

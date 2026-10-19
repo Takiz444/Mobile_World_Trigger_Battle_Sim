@@ -14,19 +14,22 @@ signal tile_selected(hex: Vector2i)
 
 @export var board_radius: int = 5
 @export var hex_size: float = 1.0
-@export var tile_height: float = 0.35
+@export var tile_height: float = HexCoord.GROUND_Y * 2.0
 
-@export var tile_color: Color = Color(0.12, 0.42, 0.8, 0.85)
-@export var hover_color: Color = Color(0.25, 0.85, 1.0, 0.95)
-@export var selected_color: Color = Color(1.0, 0.82, 0.2, 1.0)
-@export var highlight_color: Color = Color(0.3, 1.0, 0.5, 0.95)
-@export var effect_color: Color = Color(1.0, 0.5, 0.15, 0.95)
-@export var wire_color: Color = Color(1.0, 0.6, 0.2, 0.95)
-@export var building_color: Color = Color(0.52, 0.53, 0.58)
+# Neutral slate streets so both team colors (blue / red) read clearly.
+@export var tile_color: Color = Color(0.2, 0.235, 0.29)
+@export var fog_color: Color = Color(0.11, 0.12, 0.15)
+@export var hover_color: Color = Color(0.25, 0.85, 1.0)
+@export var selected_color: Color = Color(1.0, 0.82, 0.2)
+@export var highlight_color: Color = Color(0.3, 1.0, 0.5)
+@export var effect_color: Color = Color(1.0, 0.5, 0.15)
+@export var wire_color: Color = Color(1.0, 0.6, 0.2)
+@export var building_color: Color = Color(0.62, 0.7, 0.82, 0.42)
 
 var _mesh: ArrayMesh
 var _shape: ConvexPolygonShape3D
 var _base_material: StandardMaterial3D
+var _fog_material: StandardMaterial3D
 var _hover_material: StandardMaterial3D
 var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
@@ -37,7 +40,10 @@ var _building_material: StandardMaterial3D
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
 var _tile_meshes: Dictionary = {}  # Vector2i -> MeshInstance3D
 var _cover_props: Dictionary = {}  # Vector2i -> MeshInstance3D
-var _buildings: Dictionary = {}    # Vector2i -> MeshInstance3D
+var _buildings: Dictionary = {}    # Vector2i -> Node3D (stacked floor slabs)
+var _floor_mesh: ArrayMesh
+var _fog_enabled := false
+var _visible_hexes: Dictionary = {} # Vector2i -> true (inside friendly sight)
 
 var _hovered: Vector2i = INVALID_HEX
 var _has_hover := false
@@ -52,6 +58,7 @@ func _ready() -> void:
 	_mesh = HexMesh.build(hex_size, tile_height)
 	_shape = HexMesh.build_convex_shape(hex_size, tile_height)
 	_base_material = _make_material(tile_color)
+	_fog_material = _make_material(fog_color)
 	_hover_material = _make_material(hover_color)
 	_selected_material = _make_material(selected_color)
 	_highlight_material = _make_material(highlight_color)
@@ -77,6 +84,34 @@ func _unhandled_input(event: InputEvent) -> void:
 func _build_board() -> void:
 	for hex in HexCoord.spiral(Vector2i.ZERO, board_radius):
 		_spawn_tile(hex)
+
+
+## Replaces the board with the given tile set (the match map).
+func set_map(tiles: Dictionary) -> void:
+	for body in _tiles.values():
+		body.queue_free()
+	_tiles.clear()
+	_tile_meshes.clear()
+	_highlighted.clear()
+	_effect_hexes.clear()
+	_has_hover = false
+	_has_selection = false
+	for hex in tiles.keys():
+		_spawn_tile(hex)
+
+
+## World-space bounds of the board (for camera clamping).
+func get_bounds() -> AABB:
+	var box := AABB()
+	var first := true
+	for hex in _tiles.keys():
+		var p := hex_to_world(hex)
+		if first:
+			box = AABB(p, Vector3.ZERO)
+			first = false
+		else:
+			box = box.expand(p)
+	return box
 
 
 func _spawn_tile(hex: Vector2i) -> void:
@@ -110,10 +145,10 @@ func hex_to_world(hex: Vector2i) -> Vector3:
 	return HexCoord.axial_to_world(hex, hex_size)
 
 
-## World position of `hex` elevated to `floor` (0 = ground).
+## World position of `hex` elevated to `floor` (0 = standing on the tile).
 func hex_to_world_at(hex: Vector2i, floor: int = 0) -> Vector3:
 	var p := HexCoord.axial_to_world(hex, hex_size)
-	p.y = floor * HexCoord.FLOOR_HEIGHT
+	p.y = HexCoord.GROUND_Y + floor * HexCoord.FLOOR_HEIGHT
 	return p
 
 
@@ -222,19 +257,24 @@ func set_buildings(buildings: Dictionary) -> void:
 		_buildings[hex] = _spawn_building(hex, int(buildings[hex]))
 
 
-func _spawn_building(hex: Vector2i, floors: int) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	mi.name = "Building_%d_%d" % [hex.x, hex.y]
-	var box := BoxMesh.new()
-	var h := floors * HexCoord.FLOOR_HEIGHT
-	box.size = Vector3(1.4, h, 1.4)
-	mi.mesh = box
-	mi.material_override = _building_material
-	var pos := HexCoord.axial_to_world(hex, hex_size)
-	pos.y = h * 0.5
-	mi.position = pos
-	add_child(mi)
-	return mi
+## A building is a stack of translucent hex "floor slabs" (hologram style), so
+## units standing on interior floors stay visible. A unit on floor f stands on
+## top of slab f-1; floor == floors is the roof.
+func _spawn_building(hex: Vector2i, floors: int) -> Node3D:
+	if _floor_mesh == null:
+		_floor_mesh = HexMesh.build(hex_size * 0.97, HexCoord.FLOOR_HEIGHT * 0.9)
+	var root := Node3D.new()
+	root.name = "Building_%d_%d" % [hex.x, hex.y]
+	root.position = HexCoord.axial_to_world(hex, hex_size)
+	for f in floors:
+		var mi := MeshInstance3D.new()
+		mi.name = "Floor%d" % (f + 1)
+		mi.mesh = _floor_mesh
+		mi.material_override = _building_material
+		mi.position.y = HexCoord.GROUND_Y + (f + 0.45) * HexCoord.FLOOR_HEIGHT
+		root.add_child(mi)
+	add_child(root)
+	return root
 
 
 func _spawn_cover_prop(hex: Vector2i, level: int) -> MeshInstance3D:
@@ -286,7 +326,18 @@ func _resolve_material(hex: Vector2i) -> Material:
 		return _effect_material
 	if _wire_hexes.has(hex):
 		return _wire_material
+	if _fog_enabled and not _visible_hexes.has(hex):
+		return _fog_material
 	return _base_material
+
+
+## Fog of war overlay: tiles outside `seen` (hexes some friendly unit can
+## see) are darkened.
+func set_fog(seen: Dictionary) -> void:
+	_fog_enabled = true
+	_visible_hexes = seen.duplicate()
+	for hex in _tiles.keys():
+		_apply(hex)
 
 
 func _set_tile_material(hex: Vector2i, mat: Material) -> void:
@@ -297,7 +348,6 @@ func _set_tile_material(hex: Vector2i, mat: Material) -> void:
 
 func _make_material(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_color = color
 	mat.metallic = 0.0
 	mat.roughness = 0.55
@@ -318,9 +368,13 @@ func _make_prop_material(level: int) -> StandardMaterial3D:
 
 func _make_building_material() -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_color = building_color
 	mat.metallic = 0.0
-	mat.roughness = 0.85
+	mat.roughness = 0.6
+	mat.emission_enabled = true
+	mat.emission = Color(building_color.r, building_color.g, building_color.b)
+	mat.emission_energy_multiplier = 0.15
 	return mat
 
 

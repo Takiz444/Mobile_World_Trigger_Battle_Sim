@@ -55,7 +55,7 @@ func preview_attack(ms: MatchState, attacker: UnitState, attacker_hex: Vector2i,
 	else:
 		out["range_ok"] = dist <= DEFAULT_RANGED_RANGE
 		if out["range_ok"] and card.card_name != "Viper":
-			out["blocked"] = _line_blocked_by_full_cover(ms, attacker_hex, target.hex)
+			out["blocked"] = not Visibility.has_los(ms, attacker_hex, attacker_floor, target.hex, target.floor)
 		out["half_cover"] = _has_half_cover(ms, attacker_hex, target.hex)
 
 	var base := BASE_MELEE_HIT if card.card_type == TriggerCard.CardType.MELEE else BASE_RANGED_HIT
@@ -91,13 +91,18 @@ func _iter_active(ms: MatchState, plans: Array, tick: int) -> Array:
 
 # --- 1. State & Priority ----------------------------------------------------
 
+## Bagworm is a toggle maintained per turn (GDD 5.2): stealth drops at the
+## start of each turn, and a Bagworm card switches it ON from that tick until
+## the turn ends or the unit attacks.
 func _state_phase(ms: MatchState, plans: Array, tick: int, events: Array[CombatEvent]) -> void:
 	for row in _iter_active(ms, plans, tick):
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
+		if tick == 0:
+			u.stealth_active = false
 		var has_bagworm := _card_is(ta.main_card, TriggerCard.CardType.STEALTH) or _card_is(ta.sub_card, TriggerCard.CardType.STEALTH)
-		u.stealth_active = has_bagworm
-		if has_bagworm:
+		if has_bagworm and not u.stealth_active:
+			u.stealth_active = true
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.STATE, "%s activates Bagworm (stealth)" % u.display_name(), u))
 
 
@@ -108,30 +113,41 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 	for row in _iter_active(ms, plans, tick):
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
-		if _is_spider(ta.main_card) and ta.has_target:
-			_deploy_wire(ms, u, ta.target_hex, tick, events)
-		if _is_spider(ta.sub_card) and ta.has_target:
-			_deploy_wire(ms, u, ta.target_hex, tick, events)
+		for slot in [TickAction.MAIN, TickAction.SUB]:
+			if _is_spider(ta.slot_card(slot)) and ta.slot_has_target(slot):
+				_deploy_wire(ms, u, ta.slot_target(slot), tick, events)
 
 	# Then position shifts (movement), resolved simultaneously.
 	var intents: Array = []  # [UnitState, target cell Vector3i(q, r, floor)]
 	for row in _iter_active(ms, plans, tick):
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
-		if not ta.has_target or not (is_move_card(ta.main_card) or is_move_card(ta.sub_card)):
+		var slot := move_slot(ta)
+		if slot == -1 or not ta.slot_has_target(slot):
 			continue
-		if ta.target_hex == u.hex and ta.target_floor == u.floor:
+		var to_hex := ta.slot_target(slot)
+		var to_floor := ta.slot_target_floor(slot)
+		if to_hex == u.hex and to_floor == u.floor:
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s holds position" % u.display_name(), u))
-		elif not is_valid_move(ms, u.hex, u.floor, ta.target_hex, ta.target_floor):
-			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (%s f%d unreachable)" % [u.display_name(), str(ta.target_hex), ta.target_floor], u))
+		elif not is_valid_move(ms, u.hex, u.floor, to_hex, to_floor):
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (%s f%d unreachable)" % [u.display_name(), str(to_hex), to_floor], u))
 		else:
-			intents.append([u, _cell(ta.target_hex, ta.target_floor)])
+			intents.append([u, _cell(to_hex, to_floor)])
 	_resolve_moves(ms, intents, tick, events)
 
 
 func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
 	ms.wires[target] = true
 	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s deploys Spider wire at %s" % [u.display_name(), str(target)], u))
+
+
+## Which slot carries this tick's movement card (Main first), or -1.
+static func move_slot(ta: TickAction) -> int:
+	if is_move_card(ta.main_card):
+		return TickAction.MAIN
+	if is_move_card(ta.sub_card):
+		return TickAction.SUB
+	return -1
 
 
 ## A board position including elevation: (q, r, floor).
@@ -250,10 +266,10 @@ func _attack_phase(ms: MatchState, plans: Array, tick: int, events: Array[Combat
 	for row in attacker_rows:
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
-		if _is_offensive(ta.main_card) and ta.has_target:
-			_resolve_attack(ms, u, ta.main_card, ta.target_hex, tick, events, pending)
-		if _is_offensive(ta.sub_card) and ta.has_target:
-			_resolve_attack(ms, u, ta.sub_card, ta.target_hex, tick, events, pending)
+		for slot in [TickAction.MAIN, TickAction.SUB]:
+			var card := ta.slot_card(slot)
+			if _is_offensive(card) and ta.slot_has_target(slot):
+				_resolve_attack(ms, u, card, ta.slot_target(slot), tick, events, pending)
 
 	return pending
 
@@ -298,8 +314,8 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 		if dist > DEFAULT_RANGED_RANGE:
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s ranged out of range on %s" % [attacker.display_name(), target.display_name()], attacker, target))
 			return
-		if card.card_name != "Viper" and _line_blocked_by_full_cover(ms, attacker.hex, target.hex):
-			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s shot blocked by full cover" % attacker.display_name(), attacker, target))
+		if card.card_name != "Viper" and not Visibility.has_los(ms, attacker.hex, attacker.floor, target.hex, target.floor):
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s shot blocked (no line of sight)" % attacker.display_name(), attacker, target))
 			return
 
 	# Hit / evasion roll.
@@ -395,15 +411,6 @@ func _is_spider(card: TriggerCard) -> bool:
 
 func _on_wire(ms: MatchState, hex: Vector2i) -> bool:
 	return ms.wires.has(hex)
-
-
-func _line_blocked_by_full_cover(ms: MatchState, a: Vector2i, b: Vector2i) -> bool:
-	for hex in HexCoord.line(a, b):
-		if hex == a or hex == b:
-			continue
-		if int(ms.cover.get(hex, 0)) >= 2:
-			return true
-	return false
 
 
 func _has_half_cover(ms: MatchState, a: Vector2i, b: Vector2i) -> bool:

@@ -7,6 +7,7 @@ var teams: Array = []            # teams[team] -> Array[UnitState]
 var wires: Dictionary = {}       # Vector2i -> true
 var cover: Dictionary = {}       # Vector2i -> int (0 none, 1 half, 2 full)
 var buildings: Dictionary = {}   # Vector2i -> int floors (1..4)
+var tiles: Dictionary = {}       # Vector2i -> true (board extent; empty = unbounded)
 var rng: RandomNumberGenerator
 
 
@@ -51,6 +52,12 @@ func get_unit_at_any_floor(hex: Vector2i, team: int = -1) -> UnitState:
 	return null
 
 
+## Whether `hex` is on the board. An empty tile set means "no bounds" (used
+## by small unit-test boards).
+func has_tile(hex: Vector2i) -> bool:
+	return tiles.is_empty() or tiles.has(hex)
+
+
 ## Number of elevated floors of the building at `hex` (0 = no building).
 func building_floors(hex: Vector2i) -> int:
 	return int(buildings.get(hex, 0))
@@ -59,6 +66,8 @@ func building_floors(hex: Vector2i) -> int:
 ## Whether a unit may stand at `floor` of `hex`. Floor 0 (ground) is only
 ## legal on open hexes; floors > 0 require a building tall enough.
 func floor_legal(hex: Vector2i, floor: int) -> bool:
+	if not has_tile(hex):
+		return false
 	if floor == 0:
 		return building_floors(hex) == 0
 	return building_floors(hex) >= floor

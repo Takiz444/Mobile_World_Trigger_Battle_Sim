@@ -59,7 +59,14 @@ func _setup_board() -> void:
 	var cam := BoardCamera.new()
 	cam.name = "BoardCamera"
 	cam.target = Vector3.ZERO
-	cam.start_size = 16.0
+	cam.start_size = 24.0
+	# Look straight up the map (from team 0's side) so the squads face each
+	# other vertically, like the reference map sheet.
+	cam.yaw = 0.0
+	cam.pitch = deg_to_rad(50.0)
+	# Center the board in the area left free by the UI: the combat log covers
+	# ~380 px on the right, the top bar 44 px, the timeline ~250 px at the bottom.
+	cam.screen_offset_px = Vector2(-190.0, -103.0)
 	add_child(cam)
 	_camera = cam
 
