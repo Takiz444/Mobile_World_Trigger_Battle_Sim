@@ -77,6 +77,7 @@ static func encode_plan(plan: TurnPlan) -> Dictionary:
 				"main": ta.main_card.card_name if ta.main_card != null else null,
 				"sub": ta.sub_card.card_name if ta.sub_card != null else null,
 				"target": [ta.target_hex.x, ta.target_hex.y] if ta.has_target else null,
+				"target_floor": ta.target_floor,
 			})
 		units.append(ticks)
 	return { "units": units }
@@ -101,7 +102,7 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 				plan.assign(u, t, TurnPlan.SUB_SLOT, TriggerLibrary.get_card(str(sub_name)))
 			var target: Variant = tdata.get("target")
 			if target != null:
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])))
+				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get("target_floor", 0)))
 	return plan
 
 

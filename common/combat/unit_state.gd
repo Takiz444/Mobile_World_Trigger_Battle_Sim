@@ -5,6 +5,7 @@ extends RefCounted
 var unit_data: UnitData
 var team: int
 var hex: Vector2i
+var floor: int = 0         # 0 = ground; >0 = elevated floor of a building
 var facing: int            # 0..5 direction index
 var trion_hp: int
 var is_bailed: bool = false

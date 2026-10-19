@@ -23,8 +23,28 @@ static func build_match(
 		p1.append(UnitState.new(enemy_data[i], 1, Vector2i(-3 + i * 2, 2), 2))
 	ms.setup_team(0, p0)
 	ms.setup_team(1, p1)
+	_generate_buildings(ms)
 	_generate_cover(ms)
 	return ms
+
+
+## Scatters deterministic 1..4-floor buildings across the mid-field band,
+## avoiding unit spawn hexes. Buildings drive the engine's elevation rules.
+static func _generate_buildings(ms: MatchState) -> void:
+	var rng := ms.rng
+	var occupied := {}
+	for u in ms.all_units():
+		occupied[u.hex] = true
+	var candidates: Array[Vector2i] = []
+	for hex in HexCoord.spiral(Vector2i.ZERO, 5):
+		if hex.y < -1 or hex.y > 1:
+			continue
+		if occupied.has(hex):
+			continue
+		candidates.append(hex)
+	_shuffle(candidates, rng)
+	for i in mini(6, candidates.size()):
+		ms.buildings[candidates[i]] = rng.randi_range(1, 4)
 
 
 ## Generates deterministic cover in the mid-field band between the two squads.
@@ -39,6 +59,8 @@ static func _generate_cover(ms: MatchState) -> void:
 		if hex.y < -1 or hex.y > 1:
 			continue
 		if occupied.has(hex):
+			continue
+		if ms.buildings.has(hex):
 			continue
 		candidates.append(hex)
 	_shuffle(candidates, rng)

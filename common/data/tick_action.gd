@@ -10,6 +10,7 @@ var tick_index: int = 0          # 1..6
 var main_card: TriggerCard
 var sub_card: TriggerCard
 var target_hex: Vector2i         # Axial (q, r) destination / target
+var target_floor: int = 0        # destination floor (movement only)
 var has_target: bool = false
 
 

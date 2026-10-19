@@ -22,6 +22,7 @@ signal tile_selected(hex: Vector2i)
 @export var highlight_color: Color = Color(0.3, 1.0, 0.5, 0.95)
 @export var effect_color: Color = Color(1.0, 0.5, 0.15, 0.95)
 @export var wire_color: Color = Color(1.0, 0.6, 0.2, 0.95)
+@export var building_color: Color = Color(0.52, 0.53, 0.58)
 
 var _mesh: ArrayMesh
 var _shape: ConvexPolygonShape3D
@@ -31,10 +32,12 @@ var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
 var _effect_material: StandardMaterial3D
 var _wire_material: StandardMaterial3D
+var _building_material: StandardMaterial3D
 
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
 var _tile_meshes: Dictionary = {}  # Vector2i -> MeshInstance3D
 var _cover_props: Dictionary = {}  # Vector2i -> MeshInstance3D
+var _buildings: Dictionary = {}    # Vector2i -> MeshInstance3D
 
 var _hovered: Vector2i = INVALID_HEX
 var _has_hover := false
@@ -54,6 +57,7 @@ func _ready() -> void:
 	_highlight_material = _make_material(highlight_color)
 	_effect_material = _make_material(effect_color)
 	_wire_material = _make_material(wire_color)
+	_building_material = _make_building_material()
 	_build_board()
 
 
@@ -104,6 +108,13 @@ func _spawn_tile(hex: Vector2i) -> void:
 
 func hex_to_world(hex: Vector2i) -> Vector3:
 	return HexCoord.axial_to_world(hex, hex_size)
+
+
+## World position of `hex` elevated to `floor` (0 = ground).
+func hex_to_world_at(hex: Vector2i, floor: int = 0) -> Vector3:
+	var p := HexCoord.axial_to_world(hex, hex_size)
+	p.y = floor * HexCoord.FLOOR_HEIGHT
+	return p
 
 
 func world_to_hex(pos: Vector3) -> Vector2i:
@@ -202,6 +213,30 @@ func set_cover(cover: Dictionary) -> void:
 		_cover_props[hex] = _spawn_cover_prop(hex, int(cover[hex]))
 
 
+## Spawns/refreshes 1..4-floor gray building blocks.
+func set_buildings(buildings: Dictionary) -> void:
+	for b in _buildings.values():
+		b.queue_free()
+	_buildings.clear()
+	for hex in buildings.keys():
+		_buildings[hex] = _spawn_building(hex, int(buildings[hex]))
+
+
+func _spawn_building(hex: Vector2i, floors: int) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = "Building_%d_%d" % [hex.x, hex.y]
+	var box := BoxMesh.new()
+	var h := floors * HexCoord.FLOOR_HEIGHT
+	box.size = Vector3(1.4, h, 1.4)
+	mi.mesh = box
+	mi.material_override = _building_material
+	var pos := HexCoord.axial_to_world(hex, hex_size)
+	pos.y = h * 0.5
+	mi.position = pos
+	add_child(mi)
+	return mi
+
+
 func _spawn_cover_prop(hex: Vector2i, level: int) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = "Cover_%d_%d" % [hex.x, hex.y]
@@ -278,6 +313,14 @@ func _make_prop_material(level: int) -> StandardMaterial3D:
 	mat.albedo_color = Color(0.55, 0.5, 0.42) if level == 1 else Color(0.32, 0.3, 0.26)
 	mat.metallic = 0.0
 	mat.roughness = 0.8
+	return mat
+
+
+func _make_building_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = building_color
+	mat.metallic = 0.0
+	mat.roughness = 0.85
 	return mat
 
 

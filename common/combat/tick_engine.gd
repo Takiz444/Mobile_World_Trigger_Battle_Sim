@@ -42,7 +42,7 @@ func resolve_tick(ms: MatchState, plan0: TurnPlan, plan1: TurnPlan, tick: int) -
 ## `attacker_hex` lets callers pass a projected position (movement happens
 ## before attacks within a tick). Returns hit chance (0..1), base power, and
 ## range/cover flags.
-func preview_attack(ms: MatchState, attacker: UnitState, attacker_hex: Vector2i, card: TriggerCard, target: UnitState) -> Dictionary:
+func preview_attack(ms: MatchState, attacker: UnitState, attacker_hex: Vector2i, card: TriggerCard, target: UnitState, attacker_floor: int = 0) -> Dictionary:
 	var out := { "range_ok": false, "blocked": false, "half_cover": false, "hit_chance": 0.0, "power": 0 }
 	if card == null or target == null:
 		return out
@@ -51,7 +51,7 @@ func preview_attack(ms: MatchState, attacker: UnitState, attacker_hex: Vector2i,
 	out["power"] = attacker.unit_data.attack_rating + card.power
 
 	if card.card_type == TriggerCard.CardType.MELEE:
-		out["range_ok"] = dist == 1
+		out["range_ok"] = dist == 1 and target.floor == attacker_floor
 	else:
 		out["range_ok"] = dist <= DEFAULT_RANGED_RANGE
 		if out["range_ok"] and card.card_name != "Viper":
@@ -118,7 +118,7 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
 		if _is_move(ta.main_card) and ta.has_target:
-			_move_unit(ms, u, ta.target_hex, tick, events)
+			_move_unit(ms, u, ta, tick, events)
 
 
 func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
@@ -126,22 +126,48 @@ func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, eve
 	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s deploys Spider wire at %s" % [u.display_name(), str(target)], u))
 
 
-func _move_unit(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
-	if target == u.hex:
+func _move_unit(ms: MatchState, u: UnitState, ta: TickAction, tick: int, events: Array[CombatEvent]) -> void:
+	var target: Vector2i = ta.target_hex
+	var target_floor: int = ta.target_floor
+	if target == u.hex and target_floor == u.floor:
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s holds position" % u.display_name(), u))
 		return
-	var dist := HexCoord.distance(u.hex, target)
-	if dist != 1:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (target %s not adjacent)" % [u.display_name(), str(target)], u))
-		return
-	if ms.get_unit_at(target) != null:
+	if ms.get_unit_at(target, target_floor) != null:
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move blocked (hex occupied)" % u.display_name(), u))
+		return
+	if not TickEngine.is_valid_move(ms, u.hex, u.floor, target, target_floor):
+		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (%s f%d unreachable)" % [u.display_name(), str(target), target_floor], u))
 		return
 	var dir := HexCoord.direction_to(u.hex, target)
 	u.hex = target
+	u.floor = target_floor
 	if dir != -1:
 		u.facing = dir
-	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s moves to %s" % [u.display_name(), str(target)], u))
+	var where := "ground" if target_floor == 0 else "floor %d" % target_floor
+	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s moves to %s (%s)" % [u.display_name(), str(target), where], u))
+
+
+## Whether (from_hex, from_floor) -> (to_hex, to_floor) is a legal single
+## move action: one hex horizontally (same floor), one floor vertically (same
+## building), or entering/exiting a building (ground <-> floor 1). Occupancy
+## is checked by the caller.
+static func is_valid_move(ms: MatchState, from_hex: Vector2i, from_floor: int, to_hex: Vector2i, to_floor: int) -> bool:
+	if to_floor < 0:
+		return false
+	var d_hex := HexCoord.distance(from_hex, to_hex)
+	var d_floor := absi(to_floor - from_floor)
+	if d_hex == 0:
+		# Vertical move within the same building (up or down one floor).
+		return d_floor == 1 and ms.floor_legal(to_hex, to_floor)
+	if d_hex == 1:
+		if d_floor == 0:
+			# Horizontal move on the same floor (ground or equal-height roofs).
+			return ms.floor_legal(to_hex, to_floor)
+		if d_floor == 1:
+			# Enter a building (ground -> floor 1) or exit it (floor 1 -> ground).
+			return (from_floor == 0 and to_floor == 1 and ms.building_floors(to_hex) >= 1) \
+				or (from_floor == 1 and to_floor == 0 and ms.building_floors(from_hex) >= 1)
+	return false
 
 
 # --- 3. Defense -------------------------------------------------------------
@@ -198,7 +224,7 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 		attacker.stealth_active = false
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s reveals itself attacking" % attacker.display_name(), attacker))
 
-	var target := ms.get_unit_at(target_hex)
+	var target := ms.get_unit_at_any_floor(target_hex)
 	if target == null:
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s attacks %s but no target present" % [attacker.display_name(), str(target_hex)], attacker))
 		return
@@ -215,7 +241,7 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 
 	# Range check.
 	if card.card_type == TriggerCard.CardType.MELEE:
-		if dist != 1:
+		if dist != 1 or target.floor != attacker.floor:
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s melee out of range on %s" % [attacker.display_name(), target.display_name()], attacker, target))
 			return
 	else:

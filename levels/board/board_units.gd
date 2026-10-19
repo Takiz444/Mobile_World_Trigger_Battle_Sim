@@ -1,8 +1,10 @@
 class_name BoardUnits
 extends Node3D
-## Visualizes UnitState markers on the hex board: team-colored emissive boxes
-## on pedestals, a facing "nose", a selection ring, and floating name/HP labels.
-## Bailed units are hidden. Provides tween helpers for the replay controller.
+## Visualizes UnitState markers on the hex board: team-colored emissive
+## humanoid "Trion body" figures, a facing indicator, a selection ring, and
+## floating name/HP labels. Bailed units are hidden. Units are elevated by
+## floor * HexCoord.FLOOR_HEIGHT when standing on a building. Provides tween
+## helpers for the replay controller.
 
 const BODY_Y := 0.875
 
@@ -57,7 +59,7 @@ func refresh() -> void:
 		_kill_tween(_face_tweens, u)
 		var root: Node3D = _markers[u]
 		root.scale = Vector3.ONE
-		root.position = HexCoord.axial_to_world(u.hex, _hex_size)
+		root.position = _world_pos(u)
 		root.visible = not u.is_bailed
 		var label: Label3D = _hp_labels[u]
 		label.text = str(u.trion_hp)
@@ -126,14 +128,16 @@ func play_bail(u: UnitState) -> void:
 # --- Ghost Preview ----------------------------------------------------------
 
 ## Shows a translucent "ghost" of `u` at `hex` (movement destination preview).
-func show_ghost(u: UnitState, hex: Vector2i) -> void:
+func show_ghost(u: UnitState, hex: Vector2i, floor: int = 0) -> void:
 	if _ghost == null:
 		_ghost = _build_ghost()
 	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
 	var mat: StandardMaterial3D = _ghost_body.material_override
 	mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.35)
 	mat.emission = team_color
-	_ghost.position = HexCoord.axial_to_world(hex, _hex_size)
+	var p := HexCoord.axial_to_world(hex, _hex_size)
+	p.y = floor * HexCoord.FLOOR_HEIGHT
+	_ghost.position = p
 	_ghost.visible = true
 
 
@@ -185,7 +189,7 @@ func _build_ghost() -> Node3D:
 func _spawn_marker(u: UnitState) -> void:
 	var root := Node3D.new()
 	root.name = "Unit_" + u.display_name()
-	root.position = HexCoord.axial_to_world(u.hex, _hex_size)
+	root.position = _world_pos(u)
 
 	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
 
@@ -202,34 +206,44 @@ func _spawn_marker(u: UnitState) -> void:
 	ring.visible = false
 	root.add_child(ring)
 
-	# Pedestal grounds the unit and lifts it off the tile.
-	var pedestal := MeshInstance3D.new()
-	pedestal.name = "Pedestal"
-	var pcyl := CylinderMesh.new()
-	pcyl.top_radius = 0.42
-	pcyl.bottom_radius = 0.52
-	pcyl.height = 0.3
-	pedestal.mesh = pcyl
-	pedestal.material_override = _make_material(Color(0.14, 0.16, 0.22))
-	pedestal.position = Vector3(0, 0.325, 0)
-	root.add_child(pedestal)
+	# Trion body material (shared by head, torso, arms, and legs so that
+	# stealth alpha and damage flashes affect the whole figure).
+	var body_mat := _make_emissive(team_color, 1.1)
 
-	# Body (team-colored, emissive).
-	var body := MeshInstance3D.new()
-	body.name = "Body"
-	var box := BoxMesh.new()
-	box.size = Vector3(0.8, 0.8, 0.8)
-	body.mesh = box
-	body.material_override = _make_emissive(team_color, 1.1)
-	body.position = Vector3(0, BODY_Y, 0)
-	root.add_child(body)
+	root.add_child(_make_box("LegL", Vector3(0.16, 0.45, 0.16), Vector3(-0.13, 0.225, 0), body_mat))
+	root.add_child(_make_box("LegR", Vector3(0.16, 0.45, 0.16), Vector3(0.13, 0.225, 0), body_mat))
+	root.add_child(_make_box("Torso", Vector3(0.5, 0.55, 0.32), Vector3(0, 0.725, 0), body_mat))
+	root.add_child(_make_box("ArmL", Vector3(0.14, 0.5, 0.14), Vector3(-0.32, 0.65, 0), body_mat))
+	root.add_child(_make_box("ArmR", Vector3(0.14, 0.5, 0.14), Vector3(0.32, 0.65, 0), body_mat))
+
+	# Head.
+	var head := MeshInstance3D.new()
+	head.name = "Head"
+	var head_sphere := SphereMesh.new()
+	head_sphere.radius = 0.16
+	head_sphere.height = 0.32
+	head.mesh = head_sphere
+	head.material_override = body_mat
+	head.position = Vector3(0, 1.2, 0)
+	root.add_child(head)
+
+	# Glowing chest core.
+	var core := MeshInstance3D.new()
+	core.name = "Core"
+	var core_sphere := SphereMesh.new()
+	core_sphere.radius = 0.08
+	core_sphere.height = 0.16
+	core.mesh = core_sphere
+	core.material_override = _make_emissive(Color(1.0, 0.95, 0.85), 1.6)
+	core.position = Vector3(0, 0.74, 0.2)
+	root.add_child(core)
 
 	# Facing indicator ("nose") in the unit's facing direction.
 	var nose := MeshInstance3D.new()
 	nose.name = "Nose"
 	var sphere := SphereMesh.new()
-	sphere.radius = 0.16
-	sphere.height = 0.32
+	sphere.radius = 0.09
+	sphere.height = 0.18
 	nose.mesh = sphere
 	nose.material_override = _make_emissive(Color(0.95, 0.95, 1.0), 0.9)
 	nose.position = _nose_offset(u.facing)
@@ -238,7 +252,7 @@ func _spawn_marker(u: UnitState) -> void:
 	# Name + HP labels (always face the camera).
 	var name_label := Label3D.new()
 	name_label.text = u.display_name()
-	name_label.position = Vector3(0, 2.15, 0)
+	name_label.position = Vector3(0, 1.85, 0)
 	name_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	name_label.no_depth_test = true
 	name_label.pixel_size = 0.016
@@ -247,7 +261,7 @@ func _spawn_marker(u: UnitState) -> void:
 
 	var label := Label3D.new()
 	label.text = str(u.trion_hp)
-	label.position = Vector3(0, 1.6, 0)
+	label.position = Vector3(0, 1.5, 0)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.no_depth_test = true
 	label.pixel_size = 0.024
@@ -257,14 +271,33 @@ func _spawn_marker(u: UnitState) -> void:
 	_markers[u] = root
 	_hp_labels[u] = label
 	_nose_nodes[u] = nose
-	_body_materials[u] = body.material_override
+	_body_materials[u] = body_mat
 	_body_colors[u] = team_color
 	_rings[u] = ring
 
 
+## Small helper for the humanoid's box-shaped body parts.
+func _make_box(part_name: String, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = part_name
+	var box := BoxMesh.new()
+	box.size = size
+	mi.mesh = box
+	mi.material_override = mat
+	mi.position = pos
+	return mi
+
+
+## World position of a unit including its floor elevation.
+func _world_pos(u: UnitState) -> Vector3:
+	var p := HexCoord.axial_to_world(u.hex, _hex_size)
+	p.y = u.floor * HexCoord.FLOOR_HEIGHT
+	return p
+
+
 func _nose_offset(facing: int) -> Vector3:
 	var fwd := _facing_vector(facing)
-	return Vector3(fwd.x * 0.6, BODY_Y, fwd.z * 0.6)
+	return Vector3(fwd.x * 0.24, 1.2, fwd.z * 0.24)
 
 
 ## Team color with stealth applied (semi-transparent while Bagworm is active).

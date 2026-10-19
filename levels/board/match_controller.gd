@@ -104,6 +104,7 @@ func _build_squads() -> void:
 	_enemy_states = _ms.teams[1]
 	_units_view.setup(_ms.all_units(), _board.hex_size)
 	_board.set_cover(_ms.cover)
+	_board.set_buildings(_ms.buildings)
 	_board.set_wires(_ms.wires)
 
 
@@ -144,6 +145,7 @@ func _setup_online() -> void:
 	_enemy_states = _ms.teams[1 - _team]
 	_units_view.setup(_ms.all_units(), _board.hex_size)
 	_board.set_cover(_ms.cover)
+	_board.set_buildings(_ms.buildings)
 	_board.set_wires(_ms.wires)
 
 	# The timeline plans only the local team's units.
@@ -159,7 +161,41 @@ func _setup_online() -> void:
 
 
 func _on_tile_selected(hex: Vector2i) -> void:
-	_timeline.set_target_for_selected_slot(hex)
+	_timeline.set_target_for_selected_slot(hex, _target_floor_for_click(hex))
+
+
+## Picks the destination floor for a clicked hex. Movement cards may climb or
+## descend within the unit's own hex (toggle up/down on repeated clicks);
+## every other card targets by hex only (floor 0).
+func _target_floor_for_click(hex: Vector2i) -> int:
+	var info := _timeline.get_selected_target_info()
+	if info.is_empty():
+		return 0
+	var card: TriggerCard = info.get("card")
+	if card == null or (card.card_type != TriggerCard.CardType.MOVE and card.card_name != "Grasshopper"):
+		return 0
+
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	var origin := _projected_hex(unit_index, tick - 1)
+	var origin_floor := _projected_floor(unit_index, tick - 1)
+
+	if hex == origin:
+		# Vertical move within the same building: prefer up, toggle to down on repeat.
+		var existing := _target_floor_for(info)
+		if _target_hex_for(info) == origin and existing == origin_floor + 1 and _ms.floor_legal(origin, origin_floor - 1):
+			return origin_floor - 1
+		if _ms.floor_legal(origin, origin_floor + 1):
+			return origin_floor + 1
+		if origin_floor >= 2:
+			return origin_floor - 1
+		return origin_floor
+	# Enter a building from the ground, or exit it back to the ground.
+	if origin_floor == 0 and _ms.building_floors(hex) >= 1:
+		return 1
+	if origin_floor == 1 and _ms.floor_legal(hex, 0):
+		return 0
+	return origin_floor  # horizontal move stays on the same floor
 
 
 func _on_tile_hovered(hex: Vector2i) -> void:
@@ -271,7 +307,7 @@ func _after_resolution(winner: int) -> void:
 func _snapshot_units() -> Dictionary:
 	var snap := {}
 	for u in _ms.all_units():
-		snap[u] = { "hex": u.hex, "facing": u.facing }
+		snap[u] = { "hex": u.hex, "facing": u.facing, "floor": u.floor }
 	return snap
 
 
@@ -280,8 +316,8 @@ func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> 
 		var old: Dictionary = snapshots.get(u, {})
 		if old.is_empty():
 			continue
-		if old["hex"] != u.hex:
-			_units_view.tween_to(u, _board.hex_to_world(u.hex), MOVE_DURATION)
+		if old["hex"] != u.hex or old["floor"] != u.floor:
+			_units_view.tween_to(u, _board.hex_to_world_at(u.hex, u.floor), MOVE_DURATION)
 		if old["facing"] != u.facing:
 			_units_view.tween_facing(u, u.facing, MOVE_DURATION)
 	for ev in events:
@@ -331,6 +367,7 @@ func _update_prediction(info: Dictionary) -> void:
 
 	var tick: int = info.get("tick", -1)
 	var origin := _projected_hex(unit_index, tick)
+	var origin_floor := _projected_floor(unit_index, tick)
 	var attacker: UnitState = _player_states[unit_index]
 
 	var target_hex := _target_hex_for(info)
@@ -340,12 +377,12 @@ func _update_prediction(info: Dictionary) -> void:
 		_prediction_label.visible = false
 		return
 
-	var target := _ms.get_unit_at(target_hex)
+	var target := _ms.get_unit_at_any_floor(target_hex)
 	if target == null:
 		_prediction_label.visible = false
 		return
 
-	var p := _engine.preview_attack(_ms, attacker, origin, card, target)
+	var p := _engine.preview_attack(_ms, attacker, origin, card, target, origin_floor)
 	_prediction_label.text = _format_prediction(card, attacker, target, p)
 	_prediction_label.visible = true
 
@@ -388,9 +425,25 @@ func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
 
 	if card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper":
 		var origin := _projected_hex(unit_index, tick - 1)
+		var origin_floor := _projected_floor(unit_index, tick - 1)
+		# Horizontal: adjacent hexes on the same floor.
 		for n in HexCoord.neighbors(origin):
-			if _board.has_tile(n) and _ms.get_unit_at(n) == null:
+			if _board.has_tile(n) and _ms.floor_legal(n, origin_floor) and _ms.get_unit_at(n, origin_floor) == null:
 				result.append(n)
+		# Vertical: climb / descend one floor within the same building.
+		if _ms.floor_legal(origin, origin_floor + 1) and _ms.get_unit_at(origin, origin_floor + 1) == null:
+			result.append(origin)
+		if origin_floor >= 2 and _ms.get_unit_at(origin, origin_floor - 1) == null:
+			result.append(origin)
+		# Enter a building from the ground, or exit it back to the ground.
+		if origin_floor == 0:
+			for n in HexCoord.neighbors(origin):
+				if _board.has_tile(n) and _ms.building_floors(n) >= 1 and _ms.get_unit_at(n, 1) == null:
+					result.append(n)
+		elif origin_floor == 1:
+			for n in HexCoord.neighbors(origin):
+				if _board.has_tile(n) and _ms.floor_legal(n, 0) and _ms.get_unit_at(n, 0) == null:
+					result.append(n)
 
 	return result
 
@@ -408,11 +461,12 @@ func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
 
 	var tick: int = info.get("tick", -1)
 	var origin := _projected_hex(unit_index, tick)
+	var origin_floor := _projected_floor(unit_index, tick)
 	var result: Array[Vector2i] = []
 
 	if card.card_type == TriggerCard.CardType.MELEE:
 		for e in _enemy_states:
-			if not e.is_bailed and HexCoord.distance(origin, e.hex) == 1:
+			if not e.is_bailed and HexCoord.distance(origin, e.hex) == 1 and e.floor == origin_floor:
 				result.append(e.hex)
 	elif card.card_type == TriggerCard.CardType.RANGED:
 		for e in _enemy_states:
@@ -446,15 +500,17 @@ func _update_ghost(info: Dictionary) -> void:
 
 	if is_move:
 		var origin := _projected_hex(unit_index, tick - 1)
+		var origin_floor := _projected_floor(unit_index, tick - 1)
 		var target := _target_hex_for(info)
+		var target_floor := _target_floor_for(info)
 		if target != HexBoard.INVALID_HEX and _board.has_tile(target):
-			_units_view.show_ghost(u, target)
+			_units_view.show_ghost(u, target, target_floor)
 			return
-		if _hovered_hex != HexBoard.INVALID_HEX and _is_valid_move_dest(origin, _hovered_hex):
-			_units_view.show_ghost(u, _hovered_hex)
+		if _hovered_hex != HexBoard.INVALID_HEX and _is_valid_move_dest(origin, origin_floor, _hovered_hex, origin_floor):
+			_units_view.show_ghost(u, _hovered_hex, origin_floor)
 			return
-		if origin != u.hex:
-			_units_view.show_ghost(u, origin)
+		if origin != u.hex or origin_floor != u.floor:
+			_units_view.show_ghost(u, origin, origin_floor)
 			return
 		_units_view.clear_ghost()
 		return
@@ -462,8 +518,9 @@ func _update_ghost(info: Dictionary) -> void:
 	# Non-move (attack / shield / utility / empty): keep the ghost at the
 	# unit's projected position so the player can see where the action happens.
 	var pos := _projected_hex(unit_index, tick)
-	if pos != u.hex:
-		_units_view.show_ghost(u, pos)
+	var pos_floor := _projected_floor(unit_index, tick)
+	if pos != u.hex or pos_floor != u.floor:
+		_units_view.show_ghost(u, pos, pos_floor)
 	else:
 		_units_view.clear_ghost()
 
@@ -488,28 +545,51 @@ func _target_hex_for(info: Dictionary) -> Vector2i:
 	return HexBoard.INVALID_HEX
 
 
-func _is_valid_move_dest(origin: Vector2i, hex: Vector2i) -> bool:
+func _target_floor_for(info: Dictionary) -> int:
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	if unit_index < 0 or tick < 0:
+		return 0
+	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
+	if ta != null and ta.has_target:
+		return ta.target_floor
+	return 0
+
+
+func _is_valid_move_dest(origin: Vector2i, origin_floor: int, hex: Vector2i, floor: int) -> bool:
 	if not _board.has_tile(hex):
 		return false
-	if _ms.get_unit_at(hex) != null:
+	if not _ms.floor_legal(hex, floor):
 		return false
-	return HexCoord.distance(origin, hex) == 1
+	if _ms.get_unit_at(hex, floor) != null:
+		return false
+	return TickEngine.is_valid_move(_ms, origin, origin_floor, hex, floor)
 
 
 ## Where a unit will be after resolving all Move cards in ticks 0..through_tick
-## (inclusive). through_tick < 0 means "no moves yet" (returns its current hex).
-## Matches the engine's sequential per-tick movement for optimistic previews.
-func _projected_hex(unit_index: int, through_tick: int) -> Vector2i:
+## (inclusive). through_tick < 0 means "no moves yet" (returns its current
+## position). Matches the engine's sequential per-tick movement for previews.
+func _projected_pos(unit_index: int, through_tick: int) -> Dictionary:
 	var u: UnitState = _player_states[unit_index]
 	var hex := u.hex
+	var floor := u.floor
 	var plan := _timeline.get_plan()
 	for t in range(through_tick + 1):
 		var ta: TickAction = plan.get_tick(unit_index, t)
 		var card: TriggerCard = ta.main_card
 		if card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper") and ta.has_target:
-			if HexCoord.distance(hex, ta.target_hex) == 1 and _ms.get_unit_at(ta.target_hex) == null:
+			if TickEngine.is_valid_move(_ms, hex, floor, ta.target_hex, ta.target_floor) and _ms.get_unit_at(ta.target_hex, ta.target_floor) == null:
 				hex = ta.target_hex
-	return hex
+				floor = ta.target_floor
+	return { "hex": hex, "floor": floor }
+
+
+func _projected_hex(unit_index: int, through_tick: int) -> Vector2i:
+	return _projected_pos(unit_index, through_tick)["hex"]
+
+
+func _projected_floor(unit_index: int, through_tick: int) -> int:
+	return _projected_pos(unit_index, through_tick)["floor"]
 
 
 # --- Prediction Readout -----------------------------------------------------
@@ -668,7 +748,7 @@ func _plan_enemy_unit(i: int) -> void:
 
 		if target != null:
 			var dist := HexCoord.distance(u.hex, target.hex)
-			var weapon := melee if dist == 1 else (ranged if dist <= TickEngine.DEFAULT_RANGED_RANGE else null)
+			var weapon := melee if (dist == 1 and target.floor == u.floor) else (ranged if dist <= TickEngine.DEFAULT_RANGED_RANGE else null)
 			if weapon != null and _line_clear(u, target, weapon):
 				if _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, weapon):
 					_enemy_plan.set_target(i, tick, target.hex)
@@ -715,7 +795,9 @@ func _best_step_toward(u: UnitState, target: UnitState) -> Vector2i:
 	for n in HexCoord.neighbors(u.hex):
 		if not _board.has_tile(n):
 			continue
-		if _ms.get_unit_at(n) != null:
+		if not _ms.floor_legal(n, 0):
+			continue
+		if _ms.get_unit_at(n, 0) != null:
 			continue
 		var d := HexCoord.distance(n, target.hex)
 		if d < best_d:

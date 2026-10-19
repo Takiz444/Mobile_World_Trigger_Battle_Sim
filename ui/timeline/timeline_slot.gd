@@ -14,6 +14,7 @@ var slot_id: int
 var card: TriggerCard
 var is_selected: bool = false
 var target_hex: Vector2i = Vector2i.ZERO
+var target_floor: int = 0
 var has_target: bool = false
 
 var _label: Label
@@ -41,8 +42,9 @@ func set_card(c: TriggerCard) -> void:
 	refresh()
 
 
-func set_target_hex(h: Vector2i) -> void:
+func set_target(h: Vector2i, floor: int = 0) -> void:
 	target_hex = h
+	target_floor = floor
 	has_target = true
 	refresh()
 
@@ -62,6 +64,8 @@ func refresh() -> void:
 		_label.text = card.card_name
 		if has_target:
 			_label.text += " →%d,%d" % [target_hex.x, target_hex.y]
+			if target_floor > 0:
+				_label.text += "·f%d" % target_floor
 	else:
 		_label.text = "--"
 	var sb := StyleBoxFlat.new()
