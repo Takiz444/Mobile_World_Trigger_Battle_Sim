@@ -28,7 +28,10 @@ func request(method: String, path: String, body: Dictionary = {}) -> Dictionary:
 		return { "success": false, "error": "HTTP error %d" % result }
 	var parsed: Variant = JSON.parse_string(resp_body.get_string_from_utf8())
 	var body_out: Dictionary = parsed if parsed is Dictionary else {}
-	return { "success": code >= 200 and code < 300, "status": code, "body": body_out }
+	var out := { "success": code >= 200 and code < 300, "status": code, "body": body_out }
+	if not out["success"]:
+		out["error"] = str(body_out.get("error", "HTTP %d" % code))
+	return out
 
 
 func create_match(seed: int, squad: Array) -> Dictionary:
@@ -39,8 +42,9 @@ func join_match(match_id: String, squad: Array) -> Dictionary:
 	return await request("POST", "/match/%s/join" % match_id, { "squad": squad })
 
 
-func submit_plan(match_id: String, team: int, plan: Dictionary) -> Dictionary:
-	return await request("POST", "/match/%s/submit" % match_id, { "team": team, "plan": plan })
+## `token` is the secret returned by create/join; it identifies the team.
+func submit_plan(match_id: String, token: String, turn: int, plan: Dictionary) -> Dictionary:
+	return await request("POST", "/match/%s/submit" % match_id, { "token": token, "turn": turn, "plan": plan })
 
 
 func get_match(match_id: String) -> Dictionary:

@@ -113,12 +113,21 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 		if _is_spider(ta.sub_card) and ta.has_target:
 			_deploy_wire(ms, u, ta.target_hex, tick, events)
 
-	# Then hex position shifts (movement).
+	# Then hex position shifts (movement), resolved simultaneously.
+	var intents: Array = []  # [UnitState, target Vector2i]
 	for row in _iter_active(ms, plans, tick):
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
-		if _is_move(ta.main_card) and ta.has_target:
-			_move_unit(ms, u, ta.target_hex, tick, events)
+		if not ta.has_target or not (is_move_card(ta.main_card) or is_move_card(ta.sub_card)):
+			continue
+		var target := ta.target_hex
+		if target == u.hex:
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s holds position" % u.display_name(), u))
+		elif HexCoord.distance(u.hex, target) != 1:
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (target %s not adjacent)" % [u.display_name(), str(target)], u))
+		else:
+			intents.append([u, target])
+	_resolve_moves(ms, intents, tick, events)
 
 
 func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
@@ -126,22 +135,56 @@ func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, eve
 	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s deploys Spider wire at %s" % [u.display_name(), str(target)], u))
 
 
-func _move_unit(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
-	if target == u.hex:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s holds position" % u.display_name(), u))
-		return
-	var dist := HexCoord.distance(u.hex, target)
-	if dist != 1:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move skipped (target %s not adjacent)" % [u.display_name(), str(target)], u))
-		return
-	if ms.get_unit_at(target) != null:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move blocked (hex occupied)" % u.display_name(), u))
-		return
-	var dir := HexCoord.direction_to(u.hex, target)
-	u.hex = target
-	if dir != -1:
-		u.facing = dir
-	events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s moves to %s" % [u.display_name(), str(target)], u))
+## Applies all adjacent-hex moves at once so neither team gets priority:
+##   - two or more units entering the same hex all bounce,
+##   - two units swapping hexes both bounce (no passing through each other),
+##   - a unit entering a hex whose occupant stays put is blocked (cascading).
+## Rotations of 3+ units vacating each other's hexes are allowed.
+func _resolve_moves(ms: MatchState, intents: Array, tick: int, events: Array[CombatEvent]) -> void:
+	var target_count := {}
+	for it in intents:
+		target_count[it[1]] = int(target_count.get(it[1], 0)) + 1
+
+	var pending: Array = []
+	for it in intents:
+		var u: UnitState = it[0]
+		var target: Vector2i = it[1]
+		if int(target_count[target]) > 1:
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move bounced (contested hex %s)" % [u.display_name(), str(target)], u))
+			continue
+		var swapped := false
+		for other in intents:
+			if other[0] != u and other[1] == u.hex and (other[0] as UnitState).hex == target:
+				swapped = true
+				break
+		if swapped:
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move bounced (collision)" % u.display_name(), u))
+			continue
+		pending.append(it)
+
+	# Drop moves into hexes whose occupant is not itself successfully leaving.
+	var changed := true
+	while changed:
+		changed = false
+		var movers := {}
+		for it in pending:
+			movers[it[0]] = true
+		for i in range(pending.size() - 1, -1, -1):
+			var u: UnitState = pending[i][0]
+			var occupant := ms.get_unit_at(pending[i][1])
+			if occupant != null and not movers.has(occupant):
+				events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s move blocked (hex occupied)" % u.display_name(), u))
+				pending.remove_at(i)
+				changed = true
+
+	for it in pending:
+		var u: UnitState = it[0]
+		var target: Vector2i = it[1]
+		var dir := HexCoord.direction_to(u.hex, target)
+		u.hex = target
+		if dir != -1:
+			u.facing = dir
+		events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s moves to %s" % [u.display_name(), str(target)], u))
 
 
 # --- 3. Defense -------------------------------------------------------------
@@ -259,12 +302,22 @@ func _mitigation(ms: MatchState, target: UnitState, attacker_hex: Vector2i) -> f
 		defense *= 1.0 + WIRE_DEF_BONUS
 	if target.full_guard:
 		return defense * FULL_GUARD_DEF_MULT
-	var dir := HexCoord.direction_to(target.hex, attacker_hex)
+	var dir := attack_direction(target.hex, attacker_hex)
 	if dir == -1 or not _in_shielded_arcs(target.facing, dir):
-		return 0.0  # flanked (or non-adjacent) — bypass defense
+		return 0.0  # flanked — bypass defense
 	if target.shield_active:
 		return defense
 	return 0.0
+
+
+## Edge of `target_hex` an attack from `attacker_hex` enters through: the
+## direction of the first hex on the line from the target toward the attacker.
+## Works at any range (not just adjacent). Returns -1 if the hexes coincide.
+static func attack_direction(target_hex: Vector2i, attacker_hex: Vector2i) -> int:
+	if target_hex == attacker_hex:
+		return -1
+	var path := HexCoord.line(target_hex, attacker_hex)
+	return HexCoord.direction_to(target_hex, path[1])
 
 
 ## Shield covers the three front edges: facing-1, facing, facing+1.
@@ -299,7 +352,7 @@ func _is_offensive(card: TriggerCard) -> bool:
 	return card != null and (card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED)
 
 
-func _is_move(card: TriggerCard) -> bool:
+static func is_move_card(card: TriggerCard) -> bool:
 	return card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper")
 
 

@@ -105,8 +105,12 @@ func _reason(status: int) -> String:
 			return "Created"
 		400:
 			return "Bad Request"
+		403:
+			return "Forbidden"
 		404:
 			return "Not Found"
+		409:
+			return "Conflict"
 		500:
 			return "Internal Server Error"
 		_:

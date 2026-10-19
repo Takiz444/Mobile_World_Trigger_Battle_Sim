@@ -29,20 +29,41 @@ func _run() -> void:
 	var squad0 := TriggerLibrary.sample_units()
 	var squad1 := TriggerLibrary.sample_units()
 
+	# Cheated squad (inflated HP) is rejected at create time.
+	var cheat_squad := PlanCodec.encode_squad(squad0)
+	cheat_squad[0]["trion_hp"] = 9999
+	var cheat := await b0.create_match(12345, cheat_squad)
+	_check(int(cheat.get("status", 0)) == 400, "create rejects invalid squad")
+
 	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
 	_check(created.get("success", false), "create match")
 	var match_id := str(created["body"].get("match_id", ""))
+	var token0 := str(created["body"].get("token", ""))
 	_check(match_id != "", "got match id")
+	_check(token0 != "", "got host token")
 
 	var joined := await b1.join_match(match_id, PlanCodec.encode_squad(squad1))
 	_check(joined.get("success", false), "join match")
+	var token1 := str(joined["body"].get("token", ""))
+	_check(token1 != "" and token1 != token0, "got distinct joiner token")
 
 	var plan0 := _shield_plan(squad0)
 	var plan1 := _shield_plan(squad1)
 
-	var sub0 := await b0.submit_plan(match_id, 0, PlanCodec.encode_plan(plan0))
+	var forged := await b1.submit_plan(match_id, "not-a-token", 1, PlanCodec.encode_plan(plan0))
+	_check(int(forged.get("status", 0)) == 403, "submit rejects unknown token")
+
+	var bad_plan := PlanCodec.encode_plan(plan0)
+	bad_plan["units"][0][0]["main"] = "Ibis"  # not equipped
+	var illegal := await b0.submit_plan(match_id, token0, 1, bad_plan)
+	_check(int(illegal.get("status", 0)) == 400, "submit rejects unequipped card")
+
+	var stale := await b0.submit_plan(match_id, token0, 7, PlanCodec.encode_plan(plan0))
+	_check(int(stale.get("status", 0)) == 409, "submit rejects wrong turn")
+
+	var sub0 := await b0.submit_plan(match_id, token0, 1, PlanCodec.encode_plan(plan0))
 	_check(sub0.get("success", false), "submit team 0")
-	var sub1 := await b1.submit_plan(match_id, 1, PlanCodec.encode_plan(plan1))
+	var sub1 := await b1.submit_plan(match_id, token1, 1, PlanCodec.encode_plan(plan1))
 	_check(sub1.get("success", false), "submit team 1")
 
 	var info := await b0.get_match(match_id)
@@ -53,6 +74,9 @@ func _run() -> void:
 	if result is Dictionary:
 		_check(result.get("plans") != null, "result contains both plans")
 		_check(int(result.get("winner", -2)) in [-1, 0, 1], "winner field valid")
+		_check(result.get("state") is Dictionary, "result carries authoritative state")
+	_check((body.get("history", []) as Array).size() == 1, "history has one turn")
+	_check(int(body.get("turn", 0)) == 2, "server advanced to turn 2")
 
 	print("NET TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)

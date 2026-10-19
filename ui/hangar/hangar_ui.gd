@@ -307,6 +307,7 @@ func _on_host_online() -> void:
 		return
 	MatchSession.match_id = str(res["body"].get("match_id", ""))
 	MatchSession.team = 0
+	MatchSession.token = str(res["body"].get("token", ""))
 	_net_status.text = "Match created: %s" % MatchSession.match_id
 	_start_match_scene()
 
@@ -333,6 +334,7 @@ func _on_join_online() -> void:
 		return
 	MatchSession.match_id = id
 	MatchSession.team = 1
+	MatchSession.token = str(res["body"].get("token", ""))
 	_net_status.text = "Joined match %s" % id
 	_start_match_scene()
 

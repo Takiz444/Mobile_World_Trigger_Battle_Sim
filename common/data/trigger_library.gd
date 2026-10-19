@@ -3,6 +3,13 @@ extends RefCounted
 ## Static sample trigger/action card and unit definitions for prototyping.
 ## Later these will be replaced by .tres Resource files authored in the editor.
 
+## Standard unit stats. Every unit uses these; the server rejects squads that
+## claim anything else (loadouts are the only customization).
+const STANDARD_TRION_HP := 100
+const STANDARD_AT_POOL := 8
+const STANDARD_RATING := 5
+const STANDARD_TRION_CAPACITY := 100
+
 static var _move_card: TriggerCard
 
 
@@ -93,12 +100,12 @@ static func sample_units() -> Array[UnitData]:
 static func _make_unit(unit_name: String, main: Array, sub: Array) -> UnitData:
 	var u := UnitData.new()
 	u.unit_name = unit_name
-	u.base_trion_hp = 100
-	u.base_at_pool = 8
-	u.mobility_rating = 5
-	u.attack_rating = 5
-	u.defense_rating = 5
-	u.max_trion_capacity = 100
+	u.base_trion_hp = STANDARD_TRION_HP
+	u.base_at_pool = STANDARD_AT_POOL
+	u.mobility_rating = STANDARD_RATING
+	u.attack_rating = STANDARD_RATING
+	u.defense_rating = STANDARD_RATING
+	u.max_trion_capacity = STANDARD_TRION_CAPACITY
 	u.main_trigger_slots = _to_cards(main)
 	u.sub_trigger_slots = _to_cards(sub)
 	return u

@@ -59,8 +59,15 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 ### Headless Backend — `server/server.gd`
 - REST API: `GET /health`, `POST /match/create`, `POST /match/{id}/join`,
   `POST /match/{id}/submit`, `GET /match/{id}`.
-- Server-authoritative deterministic resolution via `MatchRunner`; in-memory
-  match store; 60s turn-timeout auto-fill (GDD 3.1).
+- Create/join return a secret per-player `token`; submits are attributed to a
+  team by token only, and must name the current `turn`.
+- Validates every squad (standard stats, slot rules, Trion budget) and plan
+  (only equipped cards, AT budget) before accepting it.
+- Server-authoritative deterministic resolution via `MatchRunner`; each result
+  carries a state snapshot, and the full turn history is kept so clients can
+  verify their replay, catch up on missed turns, and resync on reconnect.
+- In-memory match store; turn timer (default 12h, GDD 3.1) auto-fills missing
+  plans with the "Stand Ground + Shield" fallback.
 
 ### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
 - Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
@@ -91,8 +98,12 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ```bash
 godot --headless --path . res://server/server.tscn
-# optional: TT_PORT=9090 to change the port
+# optional env vars:
+#   TT_PORT=9090               change the port (default 8080)
+#   TT_TURN_TIMEOUT_SEC=60     turn timer before auto-fill (default 43200 = 12h)
 ```
+
+PowerShell example: `$env:TT_PORT="9090"; godot --headless --path . res://server/server.tscn`
 
 Then in two game clients, point the Hangar's **Server URL** at the server:
 one player **Hosts** (copies the match ID), the other **Joins** with that ID.
@@ -102,6 +113,7 @@ expires), the server resolves deterministically and both clients replay it.
 ## Tests (headless)
 
 ```bash
+godot --headless --path . res://test/rules_test.tscn   # combat rules + server validation
 godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow

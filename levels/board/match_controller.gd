@@ -35,6 +35,7 @@ var _online := false
 var _backend: HttpBackend
 var _match_id := ""
 var _team := 0
+var _token := ""
 
 # Match-over / waiting overlay
 var _overlay: Control
@@ -110,6 +111,7 @@ func _build_squads() -> void:
 func _setup_online() -> void:
 	_match_id = MatchSession.match_id
 	_team = MatchSession.team
+	_token = MatchSession.token
 	_backend = HttpBackend.new()
 	_backend.name = "HttpBackend"
 	_backend.server_url = MatchSession.server_url
@@ -140,6 +142,11 @@ func _setup_online() -> void:
 	_data_teams = [squad0, squad1]
 
 	_ms = MatchRunner.build_match(squad0, squad1, seed)
+	# Resume from the server's authoritative state (positions, HP, wires, RNG)
+	# so a reconnect mid-match starts in sync.
+	var state: Variant = body.get("state")
+	if state is Dictionary:
+		PlanCodec.apply_state(_ms, state)
 	_player_states = _ms.teams[_team]
 	_enemy_states = _ms.teams[1 - _team]
 	_units_view.setup(_ms.all_units(), _board.hex_size)
@@ -155,6 +162,10 @@ func _setup_online() -> void:
 	_event_log.set_turn(_turn)
 	_event_log.clear()
 	_event_log.add_message("Online match %s — you are team %d." % [_match_id, _team], Color(0.6, 0.9, 0.6))
+	var winner := int(body.get("winner", -1))
+	if winner != -1:
+		_show_match_over(winner)
+		return
 	_timeline.set_locked(false)
 
 
@@ -188,10 +199,13 @@ func _submit_local() -> void:
 
 func _submit_online() -> void:
 	var plan_dict := PlanCodec.encode_plan(_timeline.get_plan())
-	var submit := await _backend.submit_plan(_match_id, _team, plan_dict)
-	if not submit.get("success", false):
+	var submit := await _backend.submit_plan(_match_id, _token, _turn, plan_dict)
+	# 409 = stale turn (e.g. the server auto-resolved while we were away):
+	# fall through to catch-up instead of failing.
+	if not submit.get("success", false) and int(submit.get("status", 0)) != 409:
 		_show_waiting("Submit failed:\n%s" % str(submit.get("error", "?")))
 		_resolving = false
+		_timeline.set_locked(false)
 		return
 
 	_show_waiting("Plan submitted.\nWaiting for opponent…")
@@ -202,17 +216,7 @@ func _submit_online() -> void:
 		return
 	_overlay.visible = false
 
-	var body: Dictionary = poll["body"]
-	var result: Dictionary = body.get("result", {})
-	var plans: Array = result.get("plans", [])
-	if plans.size() < 2:
-		_show_waiting("Server returned an incomplete result.")
-		_resolving = false
-		return
-
-	var p0 := PlanCodec.decode_plan(plans[0], _data_teams[0])
-	var p1 := PlanCodec.decode_plan(plans[1], _data_teams[1])
-	var winner := await _replay_turn(p0, p1)
+	var winner := await _catch_up(poll["body"])
 	_after_resolution(winner)
 
 
@@ -229,6 +233,43 @@ func _poll_for_result() -> Dictionary:
 		if result is Dictionary and int(result.get("turn", -1)) >= _turn:
 			return resp
 	return {}
+
+
+## Replays every server result from our current turn onward (more than one if
+## turns were auto-resolved while we weren't polling). Returns the winner.
+func _catch_up(body: Dictionary) -> int:
+	var history: Array = body.get("history", [])
+	var winner := -1
+	for result in history:
+		if int(result.get("turn", -1)) < _turn:
+			continue
+		_turn = int(result["turn"])
+		_event_log.set_turn(_turn)
+		winner = await _replay_result(result)
+		if winner != -1:
+			break
+	return winner
+
+
+func _replay_result(result: Dictionary) -> int:
+	var plans: Array = result.get("plans", [])
+	if plans.size() < 2:
+		_event_log.add_message("Server returned an incomplete result.", Color(1.0, 0.5, 0.4))
+		return MatchRunner.winner(_ms)
+	var p0 := PlanCodec.decode_plan(plans[0], _data_teams[0])
+	var p1 := PlanCodec.decode_plan(plans[1], _data_teams[1])
+	var winner := await _replay_turn(p0, p1)
+
+	# The server is authoritative: if our local replay diverged, adopt its state.
+	var state: Variant = result.get("state")
+	if state is Dictionary and not PlanCodec.state_matches(_ms, state):
+		push_warning("Client replay diverged from server on turn %d; resyncing." % _turn)
+		_event_log.add_message("Resynced with server state.", Color(1.0, 0.8, 0.4))
+		PlanCodec.apply_state(_ms, state)
+		_units_view.refresh()
+		_board.set_wires(_ms.wires)
+		winner = MatchRunner.winner(_ms)
+	return winner
 
 
 ## Resolves + animates a full 6-tick turn and returns the winner (-1 if none).
@@ -505,8 +546,7 @@ func _projected_hex(unit_index: int, through_tick: int) -> Vector2i:
 	var plan := _timeline.get_plan()
 	for t in range(through_tick + 1):
 		var ta: TickAction = plan.get_tick(unit_index, t)
-		var card: TriggerCard = ta.main_card
-		if card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper") and ta.has_target:
+		if (TickEngine.is_move_card(ta.main_card) or TickEngine.is_move_card(ta.sub_card)) and ta.has_target:
 			if HexCoord.distance(hex, ta.target_hex) == 1 and _ms.get_unit_at(ta.target_hex) == null:
 				hex = ta.target_hex
 	return hex
@@ -614,9 +654,10 @@ func _show_waiting(text: String) -> void:
 
 
 func _show_match_over(winner: int) -> void:
-	_result_label.text = "VICTORY" if winner == 0 else "DEFEAT"
+	var won := winner == _team
+	_result_label.text = "VICTORY" if won else "DEFEAT"
 	_result_label.add_theme_color_override("font_color",
-		Color(0.4, 0.95, 0.5) if winner == 0 else Color(1.0, 0.4, 0.4))
+		Color(0.4, 0.95, 0.5) if won else Color(1.0, 0.4, 0.4))
 	_turn_info.text = "Match ended after %d turns" % _turn
 	_btn_row.visible = true
 	_overlay.visible = true
@@ -626,8 +667,8 @@ func _show_match_over(winner: int) -> void:
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_event_log.add_message(
-		"Match over — %s!" % ("Victory" if winner == 0 else "Defeat"),
-		Color(0.4, 0.95, 0.5) if winner == 0 else Color(1.0, 0.4, 0.4))
+		"Match over — %s!" % ("Victory" if won else "Defeat"),
+		Color(0.4, 0.95, 0.5) if won else Color(1.0, 0.4, 0.4))
 
 
 # --- Enemy AI (local mode only) --------------------------------------------

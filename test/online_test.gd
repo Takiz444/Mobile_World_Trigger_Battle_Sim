@@ -35,6 +35,7 @@ func _run() -> void:
 	MatchSession.mode = MatchSession.Mode.ONLINE
 	MatchSession.match_id = match_id
 	MatchSession.team = 0
+	MatchSession.token = str(created["body"].get("token", ""))
 	MatchSession.server_url = "http://127.0.0.1:8080"
 	MatchSession.squad = squad0
 
@@ -64,9 +65,16 @@ func _run() -> void:
 
 	# Opponent pre-submits; our submit then triggers server resolution.
 	var plan1 := _shield_plan(squad1)
-	await b1.submit_plan(match_id, 1, PlanCodec.encode_plan(plan1))
+	var token1 := str(joined["body"].get("token", ""))
+	await b1.submit_plan(match_id, token1, 1, PlanCodec.encode_plan(plan1))
 	await controller._on_plan_submitted()
 	_check(controller._turn == 2, "online turn advanced after resolution")
+
+	# Client replay must agree with the server's authoritative snapshot.
+	var info := await b0.get_match(match_id)
+	var state: Variant = info["body"].get("state")
+	_check(state is Dictionary and PlanCodec.state_matches(controller._ms, state),
+		"client state matches server after replay")
 
 	print("ONLINE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
