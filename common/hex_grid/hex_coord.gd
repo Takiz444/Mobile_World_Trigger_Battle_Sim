@@ -12,6 +12,9 @@ extends RefCounted
 
 const SQRT3 := 1.7320508075688772
 
+## World-space height of one building floor (used for unit elevation).
+const FLOOR_HEIGHT := 1.0
+
 ## Cube-space neighbor directions, indexed 0..5 (E, SE, SW, W, NW, NE).
 const CUBE_DIRECTIONS: Array[Vector3i] = [
 	Vector3i(1, -1, 0),

@@ -15,6 +15,10 @@ func _ready() -> void:
 	_test_swap_move()
 	_test_chain_move()
 	_test_grasshopper_sub()
+	_test_elevation_chain()
+	_test_elevation_contest()
+	_test_elevation_rules()
+	_test_ranged_at_elevated_target()
 	_test_squad_validation()
 	_test_plan_validation()
 	_test_state_snapshot()
@@ -95,6 +99,53 @@ func _test_grasshopper_sub() -> void:
 	_check(ok and ms.teams[0][0].hex == Vector2i(0, 1), "Grasshopper in sub slot moves the unit")
 
 
+func _test_elevation_chain() -> void:
+	# A climbs from floor 1 to floor 2 while B enters floor 1 from the street.
+	var ms := _match([[0, Vector2i(1, 0), 0], [1, Vector2i(0, 0), 0]])
+	ms.buildings[Vector2i(1, 0)] = 2
+	ms.teams[0][0].floor = 1
+	var p0 := _move_plan(ms, 0, Vector2i(1, 0), 2)
+	var p1 := _move_plan(ms, 1, Vector2i(1, 0), 1)
+	TickEngine.new().resolve_tick(ms, p0, p1, 0)
+	_check(ms.teams[0][0].floor == 2 and ms.teams[1][0].hex == Vector2i(1, 0) and ms.teams[1][0].floor == 1,
+		"elevation: climb + enter below resolve together")
+
+
+func _test_elevation_contest() -> void:
+	# Both teams try to enter floor 1 of the same building in the same tick.
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(2, 0), 0]])
+	ms.buildings[Vector2i(1, 0)] = 1
+	var p0 := _move_plan(ms, 0, Vector2i(1, 0), 1)
+	var p1 := _move_plan(ms, 1, Vector2i(1, 0), 1)
+	TickEngine.new().resolve_tick(ms, p0, p1, 0)
+	_check(ms.teams[0][0].hex == Vector2i(0, 0) and ms.teams[1][0].hex == Vector2i(2, 0),
+		"elevation: contested floor bounces both units")
+
+
+func _test_elevation_rules() -> void:
+	var ms := MatchState.new(1)
+	ms.buildings[Vector2i(1, 0)] = 3
+	ms.buildings[Vector2i(2, 0)] = 1
+	_check(TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(1, 0), 1), "enter building from street")
+	_check(not TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(1, 0), 0), "cannot walk into a building at ground level")
+	_check(not TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(1, 0), 3), "climb only one floor per move")
+	_check(not TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(2, 0), 0), "cannot exit onto another building's ground")
+	_check(TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(2, 0), 1), "cross between equal-height floors")
+
+
+func _test_ranged_at_elevated_target() -> void:
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
+	ms.buildings[Vector2i(0, 3)] = 2
+	ms.teams[1][0].floor = 2
+	var p0 := _plan(ms, 0)
+	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
+	p0.set_target(0, 0, Vector2i(0, 3))
+	var engine := TickEngine.new()
+	engine.always_hit = true
+	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
+	_check(ms.teams[1][0].trion_hp == 90, "ranged attack reaches a unit on an upper floor")
+
+
 # --- Validation -------------------------------------------------------------
 
 func _test_squad_validation() -> void:
@@ -148,6 +199,7 @@ func _test_plan_validation() -> void:
 func _test_state_snapshot() -> void:
 	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 777)
 	ms.teams[0][0].trion_hp = 42
+	ms.teams[0][1].floor = 2
 	ms.wires[Vector2i(1, 1)] = true
 	ms.rng.randf()
 	var snap: Variant = JSON.parse_string(JSON.stringify(PlanCodec.encode_state(ms)))
@@ -184,10 +236,10 @@ func _plan(ms: MatchState, team: int) -> TurnPlan:
 	return TurnPlan.new(units)
 
 
-func _move_plan(ms: MatchState, team: int, target: Vector2i) -> TurnPlan:
+func _move_plan(ms: MatchState, team: int, target: Vector2i, target_floor: int = 0) -> TurnPlan:
 	var plan := _plan(ms, team)
 	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	plan.set_target(0, 0, target)
+	plan.set_target(0, 0, target, target_floor)
 	return plan
 
 

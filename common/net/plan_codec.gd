@@ -77,6 +77,7 @@ static func encode_plan(plan: TurnPlan) -> Dictionary:
 				"main": ta.main_card.card_name if ta.main_card != null else null,
 				"sub": ta.sub_card.card_name if ta.sub_card != null else null,
 				"target": [ta.target_hex.x, ta.target_hex.y] if ta.has_target else null,
+				"target_floor": ta.target_floor,
 			})
 		units.append(ticks)
 	return { "units": units }
@@ -101,7 +102,7 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 				plan.assign(u, t, TurnPlan.SUB_SLOT, TriggerLibrary.get_card(str(sub_name)))
 			var target: Variant = tdata.get("target")
 			if target != null:
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])))
+				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get("target_floor", 0)))
 	return plan
 
 
@@ -203,7 +204,10 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictio
 			if target != null:
 				if not (target is Array) or target.size() != 2 or not _is_number(target[0]) or not _is_number(target[1]):
 					return { "plan": null, "error": "unit %d tick %d: malformed target" % [u, t] }
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])))
+				var target_floor: Variant = tdata.get("target_floor", 0)
+				if not _is_number(target_floor) or int(target_floor) < 0:
+					return { "plan": null, "error": "unit %d tick %d: malformed target floor" % [u, t] }
+				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor))
 	return { "plan": plan, "error": "" }
 
 
@@ -216,6 +220,7 @@ static func encode_state(ms: MatchState) -> Dictionary:
 	for u in ms.all_units():
 		units.append({
 			"hex": [u.hex.x, u.hex.y],
+			"floor": u.floor,
 			"facing": u.facing,
 			"hp": u.trion_hp,
 			"bailed": u.is_bailed,
@@ -236,6 +241,7 @@ static func apply_state(ms: MatchState, d: Dictionary) -> void:
 		var row: Dictionary = rows[i]
 		var hex: Array = row.get("hex", [u.hex.x, u.hex.y])
 		u.hex = Vector2i(int(hex[0]), int(hex[1]))
+		u.floor = int(row.get("floor", u.floor))
 		u.facing = int(row.get("facing", u.facing))
 		u.trion_hp = int(row.get("hp", u.trion_hp))
 		u.is_bailed = bool(row.get("bailed", u.is_bailed))

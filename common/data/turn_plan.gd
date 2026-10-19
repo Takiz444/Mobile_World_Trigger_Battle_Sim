@@ -44,11 +44,12 @@ func get_card(unit: int, tick: int, slot: int) -> TriggerCard:
 	return ta.sub_card if slot == SUB_SLOT else ta.main_card
 
 
-## Sets the target/destination hex for a tick's action (used for movement
-## destinations and attack targets during resolution).
-func set_target(unit: int, tick: int, target_hex: Vector2i) -> void:
+## Sets the target/destination hex (and optional floor) for a tick's action
+## (used for movement destinations and attack targets during resolution).
+func set_target(unit: int, tick: int, target_hex: Vector2i, target_floor: int = 0) -> void:
 	var ta := _ticks[unit][tick] as TickAction
 	ta.target_hex = target_hex
+	ta.target_floor = target_floor
 	ta.has_target = true
 
 
