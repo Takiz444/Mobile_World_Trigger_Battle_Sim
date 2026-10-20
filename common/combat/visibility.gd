@@ -141,6 +141,7 @@ static func encode_view(ms: MatchState, team: int, salt: int) -> Dictionary:
 					"hp": u.trion_hp,
 					"bailed": u.is_bailed,
 					"stealth": u.stealth_active,
+					"weight": u.weight_ticks,
 				})
 			State.RADAR:
 				var ping := radar_ping(ms, u, index, salt)
@@ -150,7 +151,7 @@ static func encode_view(ms: MatchState, team: int, salt: int) -> Dictionary:
 		index += 1
 	var wires: Array = []
 	for hex in ms.wires:
-		wires.append([hex.x, hex.y])
+		wires.append([hex.x, hex.y, int(ms.wires[hex])])
 	return { "units": units, "wires": wires }
 
 

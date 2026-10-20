@@ -232,10 +232,11 @@ static func encode_state(ms: MatchState) -> Dictionary:
 			"hp": u.trion_hp,
 			"bailed": u.is_bailed,
 			"stealth": u.stealth_active,
+			"weight": u.weight_ticks,
 		})
 	var wires: Array = []
 	for hex in ms.wires:
-		wires.append([hex.x, hex.y])
+		wires.append([hex.x, hex.y, int(ms.wires[hex])])
 	# RNG state is a 64-bit int; send it as a string so JSON doubles can't round it.
 	return { "units": units, "wires": wires, "rng_state": str(ms.rng.state) }
 
@@ -253,9 +254,10 @@ static func apply_state(ms: MatchState, d: Dictionary) -> void:
 		u.trion_hp = int(row.get("hp", u.trion_hp))
 		u.is_bailed = bool(row.get("bailed", u.is_bailed))
 		u.stealth_active = bool(row.get("stealth", u.stealth_active))
+		u.weight_ticks = int(row.get("weight", 0))
 	ms.wires.clear()
 	for w in d.get("wires", []):
-		ms.wires[Vector2i(int(w[0]), int(w[1]))] = true
+		ms.wires[Vector2i(int(w[0]), int(w[1]))] = int(w[2]) if w.size() > 2 else -1
 	if d.has("rng_state"):
 		ms.rng.state = str(d["rng_state"]).to_int()
 

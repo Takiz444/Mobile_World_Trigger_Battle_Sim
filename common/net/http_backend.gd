@@ -47,6 +47,33 @@ func submit_plan(match_id: String, token: String, turn: int, plan: Dictionary) -
 	return await request("POST", "/match/%s/submit" % match_id, { "token": token, "turn": turn, "plan": plan })
 
 
+# --- Accounts & ranked matchmaking -------------------------------------------
+
+func register_account(player_name: String) -> Dictionary:
+	return await request("POST", "/account/register", { "name": player_name })
+
+
+func get_account(player_id: String) -> Dictionary:
+	return await request("GET", "/account/%s" % player_id)
+
+
+func leaderboard() -> Dictionary:
+	return await request("GET", "/leaderboard")
+
+
+## Joins the ranked queue; the response is either matched or a ticket to poll.
+func queue_ranked(player_id: String, secret: String, squad: Array) -> Dictionary:
+	return await request("POST", "/queue", { "player_id": player_id, "secret": secret, "squad": squad })
+
+
+func poll_queue(ticket: String, secret: String) -> Dictionary:
+	return await request("GET", "/queue/%s?secret=%s" % [ticket, secret.uri_encode()])
+
+
+func cancel_queue(ticket: String, secret: String) -> Dictionary:
+	return await request("POST", "/queue/%s/cancel" % ticket, { "secret": secret })
+
+
 ## With a player token the response includes that team's fogged view,
 ## replay frames, and own plans; without one only public match info.
 func get_match(match_id: String, token: String = "") -> Dictionary:

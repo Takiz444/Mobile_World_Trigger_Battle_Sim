@@ -2,8 +2,8 @@ class_name HexMesh
 extends RefCounted
 ## Procedural hex-prism mesh generation for the 3D tabletop board.
 ##
-## Produces a pointy-top hex prism centered at the origin, matching the
-## HexCoord.axial_to_world() layout (vertices at 30 + 60*i degrees on the XZ
+## Produces a flat-top hex prism centered at the origin, matching the
+## HexCoord.axial_to_world() layout (vertices at 60*i degrees on the XZ
 ## plane). Vertices carry flat-shaded normals (up / down / outward radial).
 ## Back-face culling is not assumed; use CULL_DISABLED or correct winding.
 
@@ -11,7 +11,7 @@ extends RefCounted
 static func ring_points(size: float) -> PackedVector3Array:
 	var pts := PackedVector3Array()
 	for i in 6:
-		var angle := deg_to_rad(30.0 + 60.0 * i)
+		var angle := deg_to_rad(60.0 * i)
 		pts.append(Vector3(size * cos(angle), 0.0, size * sin(angle)))
 	return pts
 

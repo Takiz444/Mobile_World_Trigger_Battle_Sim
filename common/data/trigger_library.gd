@@ -37,21 +37,33 @@ static func make_card(card_name: String, at_cost: int, trion_cost: int, type: in
 
 
 static func sample_cards() -> Dictionary:
+	var melee := TriggerCard.CardType.MELEE
+	var ranged := TriggerCard.CardType.RANGED
 	return {
-		"Kogetsu": make_card("Kogetsu", 3, 20, TriggerCard.CardType.MELEE, false, 6),
-		"Scorpion": make_card("Scorpion", 3, 15, TriggerCard.CardType.MELEE, true, 4),
-		"Raygust": make_card("Raygust", 2, 15, TriggerCard.CardType.MELEE, true, 3),
-		"Asteroid": make_card("Asteroid", 3, 20, TriggerCard.CardType.RANGED, false, 5),
-		"Viper": make_card("Viper", 3, 20, TriggerCard.CardType.RANGED, true, 4),
-		"Hound": make_card("Hound", 3, 20, TriggerCard.CardType.RANGED, true, 4),
-		"Ibis": make_card("Ibis", 4, 25, TriggerCard.CardType.RANGED, false, 8),
-		"Egret": make_card("Egret", 3, 20, TriggerCard.CardType.RANGED, false, 5),
+		# Attacker triggers (melee).
+		"Kogetsu": make_card("Kogetsu", 3, 20, melee, false, 6),
+		"Scorpion": _traits(make_card("Scorpion", 3, 15, melee, true, 4), { "flexible": true }),
+		"Raygust": _traits(make_card("Raygust", 2, 15, melee, true, 3), { "guard": true }),
+		# Shooter / gunner bullets.
+		"Asteroid": _traits(make_card("Asteroid", 3, 20, ranged, false, 5), { "attack_range": 5 }),
+		"Viper": _traits(make_card("Viper", 3, 20, ranged, true, 4), { "attack_range": 5, "curved": true }),
+		"Hound": _traits(make_card("Hound", 3, 20, ranged, true, 4), { "attack_range": 6, "homing": true, "accuracy_bonus": 0.15 }),
+		"Lead Bullet": _traits(make_card("Lead Bullet", 2, 10, ranged, true, 0), { "attack_range": 5, "piercing": true, "effect": "weight" }),
+		# Sniper rifles.
+		"Egret": _traits(make_card("Egret", 3, 20, ranged, false, 5), { "attack_range": 10, "accuracy_bonus": 0.05 }),
+		"Ibis": _traits(make_card("Ibis", 4, 25, ranged, false, 8), { "attack_range": 9, "piercing": true }),
+		# Defense / utility.
 		"Shield": make_card("Shield", 2, 10, TriggerCard.CardType.SHIELD, true, 0),
 		"Bagworm": make_card("Bagworm", 1, 10, TriggerCard.CardType.STEALTH, true, 0),
-		"Grasshopper": make_card("Grasshopper", 1, 15, TriggerCard.CardType.UTILITY, true, 0),
+		"Grasshopper": _traits(make_card("Grasshopper", 1, 15, TriggerCard.CardType.UTILITY, true, 0), { "jump": true }),
 		"Spider": make_card("Spider", 2, 15, TriggerCard.CardType.UTILITY, true, 0),
-		"Lead Bullet": make_card("Lead Bullet", 2, 10, TriggerCard.CardType.UTILITY, true, 0),
 	}
+
+
+static func _traits(c: TriggerCard, props: Dictionary) -> TriggerCard:
+	for key in props:
+		c.set(key, props[key])
+	return c
 
 
 ## Resolves a card by name (used by network serialization). Returns null for
@@ -76,23 +88,23 @@ static func sample_units() -> Array[UnitData]:
 	var result: Array[UnitData] = []
 	result.append(_make_unit(
 		"Attacker",
-		[c["Kogetsu"], c["Scorpion"], c["Asteroid"], c["Shield"]],
+		[c["Kogetsu"], c["Raygust"], c["Asteroid"], c["Shield"]],
 		[c["Shield"], c["Bagworm"]]
 	))
 	result.append(_make_unit(
 		"Shooter",
-		[c["Asteroid"], c["Viper"], c["Shield"], c["Spider"]],
-		[c["Shield"], c["Grasshopper"]]
+		[c["Asteroid"], c["Hound"], c["Shield"], c["Spider"]],
+		[c["Shield"], c["Viper"]]
 	))
 	result.append(_make_unit(
 		"Sniper",
-		[c["Viper"], c["Asteroid"], c["Shield"], c["Bagworm"]],
+		[c["Egret"], c["Ibis"], c["Shield"], c["Bagworm"]],
 		[c["Shield"], c["Grasshopper"]]
 	))
 	result.append(_make_unit(
 		"Scout",
 		[c["Scorpion"], c["Spider"], c["Shield"], c["Bagworm"]],
-		[c["Bagworm"], c["Grasshopper"]]
+		[c["Lead Bullet"], c["Grasshopper"]]
 	))
 	return result
 

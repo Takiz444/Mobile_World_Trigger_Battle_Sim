@@ -44,17 +44,30 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - `MatchSession` — static online config (mode, server URL, match id, team).
 
 ### City Map — `common/map/map_data.gd`
-- 18×24 hex city modelled on `Project Docs/Map refrence with building.png`:
-  building blocks (1–4 floors), streets, half/full cover, four spawns per team.
-- Authored as text for the top half and rotated 180° for the bottom half, so
-  both sides are identical. Shared by client and server.
+- The 32×32 flat-top hex map from `Project Docs/Map refrence with building.png`,
+  traced hex by hex: the scan's hex lattice was fitted and every hex classified
+  as street or building, so streets and building footprints match the sheet
+  (472 building hexes in 40 blocks; the sheet is point-symmetric, so it's fair).
+- The sheet is top-down and shows no heights: floors (1–4) are assigned per
+  block from its footprint. Edit the digits in `LAYOUT` to change them.
+- Spawns: four streets along each short edge. Shared by client and server.
 
 ### Combat Resolution — `common/combat/`
 - `unit_state.gd`, `match_state.gd`, `combat_event.gd`
 - `tick_engine.gd` — deterministic 6-tick pipeline (resumable per-tick).
   Simultaneous movement on (hex, floor) cells, per-slot targets (Main and Sub
-  aim independently), buildings block shots (Viper curves around), and
-  Bagworm as a per-turn toggle (1 AT per turn, drops when attacking).
+  aim independently), buildings block shots, and Bagworm as a per-turn toggle
+  (1 AT per turn, drops when attacking).
+- Trigger behaviour (`TriggerCard` traits): Scorpion strikes around shields,
+  Raygust shields while swinging, Viper curves around buildings, Hound homes
+  (+hit, ignores half cover), Egret/Ibis are long-range snipers (Ibis pierces
+  shields), Lead Bullet weighs targets down (no moving or dodging for 6 ticks),
+  Grasshopper jumps 2 hexes or onto rooftops.
+- GDD 5.3 combos: **Melee Assist** (an ally next to your melee target follows
+  up for free) and **Crossfire Assist** (an ally with the target in its firing
+  arc follows up for half AT from its unspent pool). **Wire Mobility
+  Penchant**: on your own team's Spider wires you get +20% defense, +10%
+  evasion, and a 2-hex wire dash.
 - `visibility.gd` — fog of war (GDD 4.3): forward vision cones + all-round
   awareness, line of sight blocked by buildings/full cover, radar pings offset
   1–2 hexes for unseen enemies, Bagworm hides from radar until within 3 hexes.
@@ -73,6 +86,11 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   `POST /match/{id}/submit`, `GET /match/{id}`.
 - Create/join return a secret per-player `token`; submits are attributed to a
   team by token only, and must name the current `turn`.
+- Accounts + ranked matchmaking: `POST /account/register`, `GET /account/{id}`,
+  `GET /leaderboard`, `POST /queue` (pairs the waiting player closest in
+  rating), `GET /queue/{ticket}`, `POST /queue/{ticket}/cancel`. Ranked results
+  update both players' Elo (K=32). The Hangar's **Find Ranked Match** button
+  registers once per server (saved in `user://account.json`) and queues.
 - Validates every squad (standard stats, slot rules, Trion budget) and plan
   (only equipped cards, AT budget) before accepting it.
 - Server-authoritative deterministic resolution via `MatchRunner`, with
@@ -106,11 +124,17 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 **Flow:**
 1. **Hangar** — configure each unit's Trigger Holder, then **Start Match**
-   (local vs AI) or **Host Online Match** / **Join** (async multiplayer).
+   (local vs AI), **Host Online Match** / **Join** (async multiplayer), or
+   **Find Ranked Match** (matchmaking by rating).
 2. **Battle** — click a tick slot → click a hex to target it → drag cards into
    slots → **Submit All** to watch the animated replay in the combat log.
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
    offers Rematch or Return to Hangar.
+
+**Controls:** mouse — scroll to zoom, middle-drag to pan, right-drag to
+rotate, right-click a slot to clear it. Touch — drag to pan, pinch to zoom,
+twist to rotate, tap to select, double-tap a slot to clear it. The UI scales
+to the screen (1280×720 base, landscape).
 
 ## Run the Async Backend (Phase 3)
 
@@ -151,7 +175,7 @@ once so Godot registers them before running headless tests.
 
 ## Next Up
 
-- Accounts, matchmaking, and rating (the JSON match store is per-server).
-- GDD 5.3 combos (Melee Assist, Crossfire Assist) and the Wire Mobility Penchant.
-- Distinct behaviour for Hound / Egret / Ibis / Lead Bullet (ranges, homing).
-- Mobile touch controls (Phase 4).
+- Real-time spectating / live replay over Godot RPC (GDD 2.2).
+- Phase 4 polish: low-poly models, toon shaders, and balancing AT costs,
+  Trion weights, and penchant modifiers from playtests.
+- Scale-out: the JSON store suits one server; a database for many.

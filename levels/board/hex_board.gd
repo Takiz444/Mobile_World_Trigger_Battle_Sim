@@ -68,11 +68,25 @@ func _ready() -> void:
 	_build_board()
 
 
+## A click/tap selects on release, and only if the pointer barely moved —
+## so a one-finger camera pan on touch screens doesn't pick a hex.
+const TAP_SLOP_PX := 12.0
+
+var _press_pos := Vector2.ZERO
+var _pressed := false
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		_update_hover()
-	elif event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_pressed = true
+			_press_pos = event.position
+		elif _pressed:
+			_pressed = false
+			if event.position.distance_to(_press_pos) > TAP_SLOP_PX:
+				return
 			var hex := _mouse_to_hex()
 			if _tiles.has(hex):
 				select_hex(hex)

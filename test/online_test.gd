@@ -16,6 +16,7 @@ func _ready() -> void:
 func _run() -> void:
 	var server := MatchServer.new()
 	server.persist = false
+	server.port = 18080
 	add_child(server)
 	await get_tree().create_timer(0.5).timeout
 
@@ -23,10 +24,10 @@ func _run() -> void:
 	var squad1 := TriggerLibrary.sample_units()
 
 	var b0 := HttpBackend.new()
-	b0.server_url = "http://127.0.0.1:8080"
+	b0.server_url = "http://127.0.0.1:18080"
 	add_child(b0)
 	var b1 := HttpBackend.new()
-	b1.server_url = "http://127.0.0.1:8080"
+	b1.server_url = "http://127.0.0.1:18080"
 	add_child(b1)
 
 	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
@@ -37,7 +38,7 @@ func _run() -> void:
 	MatchSession.match_id = match_id
 	MatchSession.team = 0
 	MatchSession.token = str(created["body"].get("token", ""))
-	MatchSession.server_url = "http://127.0.0.1:8080"
+	MatchSession.server_url = "http://127.0.0.1:18080"
 	MatchSession.squad = squad0
 
 	var layer := CanvasLayer.new()

@@ -120,14 +120,16 @@ func _build_board_view() -> void:
 	_board.set_wires(_ms.wires)
 	if _camera != null:
 		_camera.set_bounds(_board.get_bounds())
-		# Frame the squad with the battlefield ahead of it: aim 40% of the way
+		# Frame the squad with some battlefield ahead of it: aim a few hexes
 		# from the squad's center toward the middle of the map.
 		var squad := Vector3.ZERO
 		for u in _player_states:
 			squad += _board.hex_to_world(u.hex)
 		squad /= maxf(1.0, _player_states.size())
 		var bounds := _board.get_bounds()
-		_camera.recenter(squad.lerp(bounds.get_center(), 0.4))
+		var ahead := (bounds.get_center() - squad)
+		ahead.y = 0.0
+		_camera.recenter(squad + ahead.normalized() * 5.0)
 
 
 func _setup_online() -> void:
@@ -202,30 +204,57 @@ func _target_floor_for_click(hex: Vector2i) -> int:
 	if info.is_empty():
 		return 0
 	var card: TriggerCard = info.get("card")
-	if card == null or (card.card_type != TriggerCard.CardType.MOVE and card.card_name != "Grasshopper"):
+	if not TickEngine.is_move_card(card):
 		return 0
+	var f := _preferred_move_floor(info, hex, true)
+	return f if f != -1 else _projected_floor(int(info.get("unit", 0)), int(info.get("tick", 0)) - 1)
 
+
+## Floors of `hex` the selected move card can reach from the unit's
+## projected position (unoccupied by known units). Same rules as the engine.
+func _move_floors(info: Dictionary, hex: Vector2i) -> Array[int]:
+	var out: Array[int] = []
+	var card: TriggerCard = info.get("card")
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	if card == null or unit_index < 0 or not _board.has_tile(hex):
+		return out
+	var origin := _projected_hex(unit_index, tick - 1)
+	var origin_floor := _projected_floor(unit_index, tick - 1)
+	for f in range(0, maxi(_ms.building_floors(hex), origin_floor + 1) + 1):
+		if f == origin_floor and hex == origin:
+			continue
+		if _known_unit_at(hex, f) != null:
+			continue
+		if TickEngine.is_valid_move(_ms, origin, origin_floor, hex, f, card, _team):
+			out.append(f)
+	return out
+
+
+## Best destination floor for `hex`, or -1 if unreachable: stay level when
+## possible; Grasshopper prefers rooftops; on the unit's own hex, climb (and
+## toggle down on a repeated click when `toggle`).
+func _preferred_move_floor(info: Dictionary, hex: Vector2i, toggle: bool) -> int:
+	var floors := _move_floors(info, hex)
+	if floors.is_empty():
+		return -1
+	var card: TriggerCard = info.get("card")
 	var unit_index: int = info.get("unit", -1)
 	var tick: int = info.get("tick", -1)
 	var origin := _projected_hex(unit_index, tick - 1)
 	var origin_floor := _projected_floor(unit_index, tick - 1)
-
 	if hex == origin:
-		# Vertical move within the same building: prefer up, toggle to down on repeat.
-		var existing := _target_floor_for(info)
-		if _target_hex_for(info) == origin and existing == origin_floor + 1 and _ms.floor_legal(origin, origin_floor - 1):
+		var up := origin_floor + 1
+		if toggle and _target_hex_for(info) == origin and _target_floor_for(info) >= up and floors.has(origin_floor - 1):
 			return origin_floor - 1
-		if _ms.floor_legal(origin, origin_floor + 1):
-			return origin_floor + 1
-		if origin_floor >= 2:
-			return origin_floor - 1
+		if card.jump:
+			return floors.max()
+		return up if floors.has(up) else floors[0]
+	if card.jump:
+		return floors.max()
+	if floors.has(origin_floor):
 		return origin_floor
-	# Enter a building from the ground, or exit it back to the ground.
-	if origin_floor == 0 and _ms.building_floors(hex) >= 1:
-		return 1
-	if origin_floor == 1 and _ms.floor_legal(hex, 0):
-		return 0
-	return origin_floor  # horizontal move stays on the same floor
+	return floors[0]
 
 
 func _on_tile_hovered(hex: Vector2i) -> void:
@@ -273,6 +302,11 @@ func _submit_online() -> void:
 
 	var winner := await _catch_up(poll["body"])
 	_after_resolution(winner)
+	var body: Dictionary = poll["body"]
+	if winner != -1 and bool(body.get("ranked", false)):
+		var delta := int((body.get("rating_change", [0, 0]) as Array)[_team])
+		_turn_info.text += "\nRanked: rating %+d" % delta
+		_event_log.add_message("Rating %+d" % delta, Color(0.6, 0.85, 1.0))
 
 
 func _poll_for_result() -> Dictionary:
@@ -345,6 +379,7 @@ func _apply_view(view: Dictionary) -> void:
 				u.trion_hp = int(row.get("hp", u.trion_hp))
 				u.is_bailed = bool(row.get("bailed", false))
 				u.stealth_active = bool(row.get("stealth", false))
+				u.weight_ticks = int(row.get("weight", 0))
 			Visibility.State.RADAR:
 				var ping: Array = row.get("ping", [0, 0])
 				u.ping_hex = Vector2i(int(ping[0]), int(ping[1]))
@@ -353,7 +388,7 @@ func _apply_view(view: Dictionary) -> void:
 				u.hex = OFFBOARD
 	_ms.wires.clear()
 	for w in view.get("wires", []):
-		_ms.wires[Vector2i(int(w[0]), int(w[1]))] = true
+		_ms.wires[Vector2i(int(w[0]), int(w[1]))] = int(w[2]) if w.size() > 2 else -1
 
 
 func _animate_frame(snapshots: Dictionary, events: Array) -> void:
@@ -563,13 +598,18 @@ func _format_prediction(card: TriggerCard, attacker: UnitState, target: UnitStat
 		return "%s → %s — out of range" % [cname, tname]
 	if p["blocked"]:
 		_prediction_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
-		return "%s → %s — blocked by full cover" % [cname, tname]
+		return "%s → %s — no line of sight" % [cname, tname]
+	if card.effect == "weight":
+		_prediction_label.add_theme_color_override("font_color", Color(0.5, 1.0, 0.55))
+		return "%s → %s — %d%% hit · weighs down (no move/dodge)" % [cname, tname, roundi(float(p["hit_chance"]) * 100.0)]
 
 	var dmg := int(p["power"])
 	var note := ""
 	if p["half_cover"]:
 		dmg = roundi(float(p["power"]) * 0.5)
 		note = " · ½ cover"
+	if p.get("piercing", false):
+		note += " · pierces shields"
 	var hit := roundi(float(p["hit_chance"]) * 100.0)
 	_prediction_label.add_theme_color_override("font_color", Color(0.5, 1.0, 0.55))
 	return "%s → %s — %d%% hit · %d dmg%s" % [cname, tname, hit, dmg, note]
@@ -588,27 +628,11 @@ func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
 	var tick: int = info.get("tick", -1)
 	var result: Array[Vector2i] = []
 
-	if card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper":
+	if TickEngine.is_move_card(card):
 		var origin := _projected_hex(unit_index, tick - 1)
-		var origin_floor := _projected_floor(unit_index, tick - 1)
-		# Horizontal: adjacent hexes on the same floor.
-		for n in HexCoord.neighbors(origin):
-			if _board.has_tile(n) and _ms.floor_legal(n, origin_floor) and _known_unit_at(n, origin_floor) == null:
-				result.append(n)
-		# Vertical: climb / descend one floor within the same building.
-		if _ms.floor_legal(origin, origin_floor + 1) and _known_unit_at(origin, origin_floor + 1) == null:
-			result.append(origin)
-		if origin_floor >= 2 and _known_unit_at(origin, origin_floor - 1) == null:
-			result.append(origin)
-		# Enter a building from the ground, or exit it back to the ground.
-		if origin_floor == 0:
-			for n in HexCoord.neighbors(origin):
-				if _board.has_tile(n) and _ms.building_floors(n) >= 1 and _known_unit_at(n, 1) == null:
-					result.append(n)
-		elif origin_floor == 1:
-			for n in HexCoord.neighbors(origin):
-				if _board.has_tile(n) and _ms.floor_legal(n, 0) and _known_unit_at(n, 0) == null:
-					result.append(n)
+		for hex in HexCoord.spiral(origin, maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE)):
+			if not _move_floors(info, hex).is_empty():
+				result.append(hex)
 
 	return result
 
@@ -635,7 +659,7 @@ func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
 				result.append(e.hex)
 	elif card.card_type == TriggerCard.CardType.RANGED:
 		for e in _enemy_states:
-			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) <= TickEngine.DEFAULT_RANGED_RANGE:
+			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) <= card.attack_range:
 				result.append(e.hex)
 	elif card.card_name == "Spider":
 		for hex in HexCoord.spiral(origin, 3):
@@ -661,7 +685,7 @@ func _update_ghost(info: Dictionary) -> void:
 	var unit_index: int = info.get("unit", -1)
 	var tick: int = info.get("tick", -1)
 	var card: TriggerCard = info.get("card")
-	var is_move := card != null and (card.card_type == TriggerCard.CardType.MOVE or card.card_name == "Grasshopper")
+	var is_move := TickEngine.is_move_card(card)
 
 	if is_move:
 		var origin := _projected_hex(unit_index, tick - 1)
@@ -671,8 +695,9 @@ func _update_ghost(info: Dictionary) -> void:
 		if target != HexBoard.INVALID_HEX and _board.has_tile(target):
 			_units_view.show_ghost(u, target, target_floor)
 			return
-		if _hovered_hex != HexBoard.INVALID_HEX and _is_valid_move_dest(origin, origin_floor, _hovered_hex, origin_floor):
-			_units_view.show_ghost(u, _hovered_hex, origin_floor)
+		var hover_floor := _preferred_move_floor(info, _hovered_hex, false) if _hovered_hex != HexBoard.INVALID_HEX else -1
+		if hover_floor != -1:
+			_units_view.show_ghost(u, _hovered_hex, hover_floor)
 			return
 		if origin != u.hex or origin_floor != u.floor:
 			_units_view.show_ghost(u, origin, origin_floor)
@@ -723,16 +748,6 @@ func _target_floor_for(info: Dictionary) -> int:
 	return 0
 
 
-func _is_valid_move_dest(origin: Vector2i, origin_floor: int, hex: Vector2i, floor: int) -> bool:
-	if not _board.has_tile(hex):
-		return false
-	if not _ms.floor_legal(hex, floor):
-		return false
-	if _known_unit_at(hex, floor) != null:
-		return false
-	return TickEngine.is_valid_move(_ms, origin, origin_floor, hex, floor)
-
-
 ## Where a unit will be after resolving all Move cards in ticks 0..through_tick
 ## (inclusive). through_tick < 0 means "no moves yet" (returns its current
 ## position). Matches the engine's sequential per-tick movement for previews.
@@ -747,7 +762,7 @@ func _projected_pos(unit_index: int, through_tick: int) -> Dictionary:
 		if slot != -1 and ta.slot_has_target(slot):
 			var to_hex := ta.slot_target(slot)
 			var to_floor := ta.slot_target_floor(slot)
-			if TickEngine.is_valid_move(_ms, hex, floor, to_hex, to_floor) and _known_unit_at(to_hex, to_floor) == null:
+			if TickEngine.is_valid_move(_ms, hex, floor, to_hex, to_floor, ta.slot_card(slot), _team) and _known_unit_at(to_hex, to_floor) == null:
 				hex = to_hex
 				floor = to_floor
 	return { "hex": hex, "floor": floor }
@@ -903,7 +918,7 @@ func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
 	for a in actions:
 		if melee == null and a.card_type == TriggerCard.CardType.MELEE:
 			melee = a
-		elif ranged == null and a.card_type == TriggerCard.CardType.RANGED:
+		elif a.card_type == TriggerCard.CardType.RANGED and a.power > 0 and (ranged == null or a.power > ranged.power):
 			ranged = a
 		elif shield == null and a.card_type == TriggerCard.CardType.SHIELD:
 			shield = a
@@ -925,8 +940,8 @@ func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
 			var weapon: TriggerCard = null
 			if melee != null and dist == 1 and target.floor == floor:
 				weapon = melee
-			elif ranged != null and dist <= TickEngine.DEFAULT_RANGED_RANGE \
-					and (ranged.card_name == "Viper" or Visibility.has_los(_ms, pos, floor, target.hex, target.floor)):
+			elif ranged != null and dist <= ranged.attack_range \
+					and (ranged.curved or Visibility.has_los(_ms, pos, floor, target.hex, target.floor)):
 				weapon = ranged
 			if weapon != null and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, weapon):
 				_enemy_plan.set_target(i, tick, target.hex)

@@ -4,7 +4,9 @@ extends Camera3D
 ##
 ## Desktop controls (PC-secondary per GDD 2.1):
 ##   scroll wheel = zoom, middle-drag = pan, right-drag = orbit (yaw/pitch).
-## Touch gestures (pinch-zoom, drag) will be layered on later for mobile.
+## Touch controls (mobile-first per GDD 2.1):
+##   one-finger drag = pan, pinch = zoom, two-finger twist = rotate.
+## Trackpad magnify / pan gestures are handled too.
 
 @export var target: Vector3 = Vector3.ZERO
 @export var start_size := 16.0
@@ -21,11 +23,17 @@ extends Camera3D
 @export var screen_offset_px := Vector2.ZERO
 
 const ZOOM_STEP := 0.1
+## Finger travel (px) before a one-finger touch counts as a pan, not a tap.
+const TOUCH_PAN_THRESHOLD := 12.0
 
 var _panning := false
 var _orbiting := false
 var _bounds := AABB()
 var _has_bounds := false
+var _touches: Dictionary = {}     # finger index -> current position
+var _touch_travel := 0.0          # accumulated one-finger drag distance
+var _pinch_dist := 0.0
+var _pinch_angle := 0.0
 
 
 func _ready() -> void:
@@ -53,6 +61,60 @@ func _unhandled_input(event: InputEvent) -> void:
 			_pan_pixels(event.relative)
 		elif _orbiting:
 			_orbit(event.relative)
+	elif event is InputEventScreenTouch:
+		_on_touch(event)
+	elif event is InputEventScreenDrag:
+		_on_drag(event)
+	elif event is InputEventMagnifyGesture:
+		_zoom_by(1.0 / maxf(0.01, event.factor))
+	elif event is InputEventPanGesture:
+		_pan_pixels(-event.delta * 8.0)
+
+
+# --- Touch ------------------------------------------------------------------
+
+func _on_touch(event: InputEventScreenTouch) -> void:
+	if event.pressed:
+		_touches[event.index] = event.position
+		_touch_travel = 0.0
+	else:
+		_touches.erase(event.index)
+	if _touches.size() == 2:
+		_begin_pinch()
+
+
+func _on_drag(event: InputEventScreenDrag) -> void:
+	_touches[event.index] = event.position
+	if _touches.size() == 1:
+		# One finger: pan once it has moved far enough to not be a tap.
+		_touch_travel += event.relative.length()
+		if _touch_travel >= TOUCH_PAN_THRESHOLD:
+			_pan_pixels(event.relative)
+	elif _touches.size() == 2:
+		# Two fingers: pinch to zoom, twist to rotate.
+		var pts: Array = _touches.values()
+		var a: Vector2 = pts[0]
+		var b: Vector2 = pts[1]
+		var dist := a.distance_to(b)
+		var angle := (b - a).angle()
+		if _pinch_dist > 0.0 and dist > 0.0:
+			_zoom_by(_pinch_dist / dist)
+		yaw -= wrapf(angle - _pinch_angle, -PI, PI)
+		_pinch_dist = dist
+		_pinch_angle = angle
+		_update_transform()
+
+
+func _begin_pinch() -> void:
+	var pts: Array = _touches.values()
+	_pinch_dist = (pts[0] as Vector2).distance_to(pts[1])
+	_pinch_angle = ((pts[1] as Vector2) - (pts[0] as Vector2)).angle()
+
+
+## Multiplies the ortho size (factor > 1 zooms out).
+func _zoom_by(factor: float) -> void:
+	size = clampf(size * factor, min_size, max_size)
+	_update_transform()
 
 
 ## direction +1 = zoom in (smaller ortho size), -1 = zoom out.
