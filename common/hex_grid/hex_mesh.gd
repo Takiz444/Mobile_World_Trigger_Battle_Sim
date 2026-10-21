@@ -67,6 +67,46 @@ static func build(size: float, height: float) -> ArrayMesh:
 	return mesh
 
 
+## The hex outline (XZ) as a 2D polygon (x, z), counter-clockwise.
+static func ring_polygon(size: float) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for p in ring_points(size):
+		out.append(Vector2(p.x, p.z))
+	return out
+
+
+## Thin flat prism (top face + sides) from a convex 2D polygon in XZ.
+static func build_polygon_prism(poly: PackedVector2Array, height: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var half_h := height * 0.5
+	var n := poly.size()
+	for i in range(1, n - 1):
+		for p in [poly[0], poly[i + 1], poly[i]]:
+			st.set_normal(Vector3.UP)
+			st.add_vertex(Vector3(p.x, half_h, p.y))
+	for i in n:
+		var a := poly[i]
+		var b := poly[(i + 1) % n]
+		var nrm := Vector3(b.y - a.y, 0.0, -(b.x - a.x)).normalized()
+		for p in [Vector3(a.x, half_h, a.y), Vector3(b.x, -half_h, b.y), Vector3(b.x, half_h, b.y),
+				Vector3(a.x, half_h, a.y), Vector3(a.x, -half_h, a.y), Vector3(b.x, -half_h, b.y)]:
+			st.set_normal(nrm)
+			st.add_vertex(p)
+	return st.commit()
+
+
+## Convex collision shape for a convex 2D polygon (XZ) extruded by `height`.
+static func build_polygon_shape(poly: PackedVector2Array, height: float) -> ConvexPolygonShape3D:
+	var pts := PackedVector3Array()
+	for p in poly:
+		pts.append(Vector3(p.x, height * 0.5, p.y))
+		pts.append(Vector3(p.x, -height * 0.5, p.y))
+	var shape := ConvexPolygonShape3D.new()
+	shape.points = pts
+	return shape
+
+
 ## Convex collision shape matching the hex prism (12 points: top + bottom rings).
 static func build_convex_shape(size: float, height: float) -> ConvexPolygonShape3D:
 	var half_h := height * 0.5

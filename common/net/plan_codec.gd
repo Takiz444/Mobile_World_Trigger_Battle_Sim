@@ -155,7 +155,7 @@ static func _validate_unit(d: Dictionary) -> String:
 			if n == null:
 				continue
 			var card := TriggerLibrary.get_card(str(n))
-			if card == null or card.card_type == TriggerCard.CardType.MOVE:
+			if card == null or card.card_type == TriggerCard.CardType.MOVE or card.free_action:
 				return "unknown trigger '%s'" % str(n)
 			if s == 1 and not card.is_dual_slot_compatible:
 				return "%s cannot be equipped in a sub slot" % card.card_name

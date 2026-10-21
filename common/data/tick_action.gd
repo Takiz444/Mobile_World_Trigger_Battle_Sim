@@ -49,8 +49,9 @@ func set_slot_target(slot: int, hex: Vector2i, floor: int = 0) -> void:
 		has_target = true
 
 
+## Both slots used by real actions (free actions like Look add no Mental Load).
 func is_dual_slot_active() -> bool:
-	return main_card != null and sub_card != null
+	return main_card != null and sub_card != null and not main_card.free_action and not sub_card.free_action
 
 
 func is_full_guard() -> bool:

@@ -34,6 +34,12 @@ func _ready() -> void:
 	_test_melee_assist()
 	_test_crossfire_assist()
 	_test_elo()
+	_test_vision_profiles()
+	_test_los_3d()
+	_test_interior_vision()
+	_test_look_and_attack_facing()
+	_test_city_rects()
+	_test_no_seeing_through_buildings()
 	_test_squad_validation()
 	_test_plan_validation()
 	_test_state_snapshot()
@@ -406,6 +412,134 @@ func _test_crossfire_assist() -> void:
 	engine.always_hit = true
 	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
 	_check(ms.teams[1][0].trion_hp == 90, "Crossfire Assist needs unspent AT")
+
+
+# --- Vision & city -------------------------------------------------------------
+
+func _test_vision_profiles() -> void:
+	var ms := _match([[0, Vector2i(0, 0), 0, 0], [0, Vector2i(3, 0), 0, 2]])
+	var attacker: UnitState = ms.teams[0][0]
+	var sniper: UnitState = ms.teams[0][1]
+	var pa := Visibility.profile(attacker)
+	var ps := Visibility.profile(sniper)
+	_check(int(ps["focus_range"]) == int(pa["focus_range"]) + Visibility.SCOPE_BONUS, "sniper scope extends focus range")
+	sniper.floor = 3
+	_check(int(Visibility.profile(sniper)["focus_range"]) == int(ps["focus_range"]) + 3, "elevation extends vision")
+
+	# Focus cone is long and narrow; peripheral is wide and short.
+	var viewer := attacker
+	var far_ahead := HexCoord.neighbor(Vector2i(0, 0), 0) * 7
+	_check(Visibility.in_view(viewer, far_ahead), "sees far straight ahead (focus cone)")
+	var side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 7
+	_check(not Visibility.in_view(viewer, side), "doesn't see far off to the side")
+	var near_side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 4
+	_check(Visibility.in_view(viewer, near_side), "peripheral vision catches nearby flanks")
+	var behind := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[3] * 4
+	_check(not Visibility.in_view(viewer, behind), "can't see behind")
+	_check(Visibility.sees_position(ms, viewer, HexCoord.neighbor(Vector2i(0, 0), 3), 0), "hears an adjacent enemy behind it")
+
+
+func _test_los_3d() -> void:
+	var ms := MatchState.new(1)
+	ms.buildings[Vector2i(0, 1)] = 1
+	# Ground to ground at range 4 over a 1-floor building right next to the viewer: blocked.
+	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 4), 0), "low building blocks a ground-level line")
+	# From floor 2 the line clears the 1-floor roof.
+	_check(Visibility.has_los(ms, Vector2i(0, 0), 2, Vector2i(0, 4), 0), "shooting down from floor 2 clears a lower roof")
+	# A tall building far away still blocks a high line where it rises above it.
+	ms.buildings[Vector2i(0, 3)] = 4
+	_check(not Visibility.has_los(ms, Vector2i(0, 0), 2, Vector2i(0, 5), 0), "a taller tower in the way blocks")
+
+
+func _test_interior_vision() -> void:
+	# A 3-hex building at (0,2),(0,3),(0,4); a unit on floor 1 inside.
+	var ms := _match([[0, Vector2i(0, 0), 5, 0], [1, Vector2i(0, 3), 0]])
+	for r in [2, 3, 4]:
+		ms.buildings[Vector2i(0, r)] = 3
+	var watcher: UnitState = ms.teams[0][0]
+	var inside: UnitState = ms.teams[1][0]
+	inside.floor = 1
+	watcher.facing = TickEngine.attack_direction(watcher.hex, inside.hex)
+	_check(not Visibility.sees_position(ms, watcher, inside.hex, 1), "a unit deep inside a building is hidden from the street")
+	inside.hex = Vector2i(0, 2)
+	_check(Visibility.sees_position(ms, watcher, inside.hex, 1), "a unit at the window (outer wall) can be seen")
+
+
+func _test_look_and_attack_facing() -> void:
+	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 4), 0]])
+	var plan := _plan(ms, 0)
+	var look := TriggerLibrary.get_look_card()
+	var ok_move := plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
+	plan.set_target(0, 0, Vector2i(1, 0))
+	var ok_look := plan.assign(0, 0, TurnPlan.SUB_SLOT, look)
+	plan.set_target(0, 0, Vector2i(-3, 0), 0, TurnPlan.SUB_SLOT)
+	_check(ok_move and ok_look and plan.get_at_spent(0) == 1, "Look is free and adds no Mental Load")
+	TickEngine.new().resolve_tick(ms, plan, _plan(ms, 1), 0)
+	var u: UnitState = ms.teams[0][0]
+	_check(u.hex == Vector2i(1, 0) and u.facing == TickEngine.attack_direction(Vector2i(1, 0), Vector2i(-3, 0)),
+		"move, then Look turns to watch the chosen hex")
+
+	ms = _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
+	_fire(ms, "Asteroid", Vector2i(0, 3))
+	_check(ms.teams[0][0].facing == TickEngine.attack_direction(Vector2i(0, 0), Vector2i(0, 3)), "attacking turns the unit toward its target")
+
+
+func _test_city_rects() -> void:
+	var map := MapData.city()
+	var rects := CityBuildings.compute_rects(map.buildings)
+	var covered := true
+	var street_clear := true
+	var heights_match := true
+	for hex in map.tiles:
+		var p := HexCoord.axial_to_world(hex, 1.0)
+		var hit: Dictionary = {}
+		for r in rects:
+			var x0 := 1.5 * int(r["c0"]) - 0.75
+			var x1 := 1.5 * int(r["c1"]) + 0.75
+			if p.x > x0 and p.x < x1 and p.z > float(r["top"]) and p.z < float(r["bot"]):
+				hit = r
+				break
+		if map.buildings.has(hex):
+			if hit.is_empty():
+				covered = false
+			elif int(hit["floors"]) != int(map.buildings[hex]):
+				heights_match = false
+		elif not hit.is_empty():
+			street_clear = false
+	_check(covered, "every building hex sits inside a 3D building")
+	_check(street_clear, "no street hex is covered by a building")
+	_check(heights_match, "3D building heights match the gameplay floors")
+
+
+func _test_no_seeing_through_buildings() -> void:
+	# An enemy on the far side of a building, inside awareness range: unseen.
+	var ms := _match([[0, Vector2i(0, 0), 5], [1, Vector2i(0, 2), 0]])
+	ms.buildings[Vector2i(0, 1)] = 3
+	_check(not Visibility.sees_position(ms, ms.teams[0][0], Vector2i(0, 2), 0), "can't see an adjacent-range enemy through a building")
+
+	# On the real city: whenever a sight line counts as clear, it really
+	# misses every building box (validates the nearby-building shortcut).
+	var city := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units())
+	var hexes: Array = city.tiles.keys().filter(func(h: Vector2i) -> bool: return not city.buildings.has(h))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var leaks := 0
+	var clear := 0
+	for _i in 400:
+		var a: Vector2i = hexes[rng.randi_range(0, hexes.size() - 1)]
+		var b: Vector2i = hexes[rng.randi_range(0, hexes.size() - 1)]
+		if HexCoord.distance(a, b) > 12 or not Visibility.has_los(city, a, 0, b, 0):
+			continue
+		clear += 1
+		var pa := HexCoord.axial_to_world(a, 1.0)
+		var pb := HexCoord.axial_to_world(b, 1.0)
+		pa.y = Visibility.EYE_HEIGHT
+		pb.y = Visibility.BODY_HEIGHT
+		for r in city.building_rects():
+			if not Visibility._segment_box(pa, pb, r).is_empty():
+				leaks += 1
+				break
+	_check(clear > 20 and leaks == 0, "no clear sight line passes through any building (%d clear, %d leaks)" % [clear, leaks])
 
 
 func _test_elo() -> void:

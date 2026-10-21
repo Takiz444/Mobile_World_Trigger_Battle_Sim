@@ -167,9 +167,9 @@ func is_all_valid() -> bool:
 func get_available_actions(unit: int) -> Array[TriggerCard]:
 	var result: Array[TriggerCard] = []
 	var seen := {}
-	var move := TriggerLibrary.get_move_card()
-	result.append(move)
-	seen[move.card_name] = true
+	for basic in [TriggerLibrary.get_move_card(), TriggerLibrary.get_look_card()]:
+		result.append(basic)
+		seen[basic.card_name] = true
 
 	var u := units[unit]
 	for card in u.main_trigger_slots:

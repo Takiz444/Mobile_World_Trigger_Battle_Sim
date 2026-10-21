@@ -48,8 +48,10 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   traced hex by hex: the scan's hex lattice was fitted and every hex classified
   as street or building, so streets and building footprints match the sheet
   (472 building hexes in 40 blocks; the sheet is point-symmetric, so it's fair).
-- The sheet is top-down and shows no heights: floors (1–4) are assigned per
-  block from its footprint. Edit the digits in `LAYOUT` to change them.
+- The sheet is top-down and shows no heights: each block is split into
+  rectangular segments (towers with lower wings), each with its own height
+  (1–4 floors), mirrored across the map so both sides stay fair. Edit the
+  digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
 - Spawns: four streets along each short edge. Shared by client and server.
 
 ### Combat Resolution — `common/combat/`
@@ -68,9 +70,16 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   arc follows up for half AT from its unspent pool). **Wire Mobility
   Penchant**: on your own team's Spider wires you get +20% defense, +10%
   evasion, and a 2-hex wire dash.
-- `visibility.gd` — fog of war (GDD 4.3): forward vision cones + all-round
-  awareness, line of sight blocked by buildings/full cover, radar pings offset
-  1–2 hexes for unseen enemies, Bagworm hides from radar until within 3 hexes.
+- `visibility.gd` — per-character vision and fog of war (GDD 4.3). Each unit
+  has a long narrow **focus cone**, a wide short **peripheral cone**, and an
+  all-round awareness radius. Sniper scopes extend the focus range; each
+  floor of height adds range. Line of sight is traced in 3D (eye height to
+  body height) against the real building boxes (`common/map/building_rects.gd`,
+  the same geometry that's rendered), so nobody sees through a building.
+  Units inside buildings see and are seen only from near the outer wall. Unseen enemies show as radar pings offset 1–2 hexes;
+  Bagworm hides from radar until within 3 hexes.
+- Facing matters: units turn toward what they attack, and the free **Look**
+  action (0 AT, no Mental Load) turns a unit to watch a hex after moving.
 - `match_runner.gd` — shared squad placement, turn resolution, winner detection,
   and the GDD 3.1 "Stand Ground + Shield" fallback plan. Used by both the local
   client and the headless server.
@@ -106,8 +115,19 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
 - `board_units.gd` — team-colored markers standing on the tile surface,
   tweened movement/facing, damage flash, bail-out, and radar-ping markers.
-- `hex_board.gd` — map tiles, translucent stacked-floor buildings, cover props,
-  and the fog overlay (tiles outside your team's sight are darkened).
+- `city_buildings.gd` + `building.gdshader` — the city: building hexes merge
+  into clean rectangular segments with window-grid facades, floor lines,
+  parapets, and rooftop equipment (water tanks and antennas on towers). Heights
+  come from the map, so rooftops always match where units stand.
+- `hex_board.gd` — street tiles, roof-level pick colliders and highlight caps
+  for building hexes (clipped to the building's footprint, so highlights never
+  spill past a wall), cover props, and the fog overlay.
+- `board_units.gd` — low-poly Border agents in Trion combat suits (team-colored
+  jacket, dark trousers, emblem, team ring) with a role weapon from the
+  loadout: glowing blade, sniper rifle, or a floating Trion cube. Figures turn
+  to face their facing. Units hidden behind or inside buildings show as
+  team-colored x-ray silhouettes; the selected character's vision cones are drawn on the board
+  at its planned position and facing.
 - `board_camera.gd` — camera clamped to the map and framed around the UI.
 - `match_controller.gd` — local (vs AI) and online (async) match orchestration,
   multi-turn lifecycle, win/loss overlay, and replay animation.
@@ -130,6 +150,15 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
    slots → **Submit All** to watch the animated replay in the combat log.
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
    offers Rematch or Return to Hangar.
+
+**Vision:** select a unit to see its focus cone, peripheral cone, and
+awareness ring. The cones are built from 3D physics raycasts from the
+character's eye against the buildings' solid bodies, so they stop at walls,
+and shadow-casting lights from the eye show the same view as light and
+shadow. (The rules use exact ray-vs-box math on the same geometry, and the
+smoke test checks the two agree.) Drag **Look** into a slot and click a hex to choose where it
+watches (free). Rooftops see farther; stand by an outer wall to see out of a
+building.
 
 **Controls:** mouse — scroll to zoom, middle-drag to pan, right-drag to
 rotate, right-click a slot to clear it. Touch — drag to pan, pinch to zoom,

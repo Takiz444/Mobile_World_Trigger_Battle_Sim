@@ -41,6 +41,8 @@ enum CardType { MOVE, MELEE, RANGED, SHIELD, UTILITY, STEALTH }
 @export var accuracy_bonus: float = 0.0
 ## Special on-hit effect: "weight" (Lead Bullet) roots the target.
 @export var effect: String = ""
+## Free action (Look): costs no AT and adds no dual-slot Mental Load.
+@export var free_action: bool = false
 
 
 ## Human-readable summary for tooltips.

@@ -24,7 +24,6 @@ signal tile_selected(hex: Vector2i)
 @export var highlight_color: Color = Color(0.3, 1.0, 0.5)
 @export var effect_color: Color = Color(1.0, 0.5, 0.15)
 @export var wire_color: Color = Color(1.0, 0.6, 0.2)
-@export var building_color: Color = Color(0.62, 0.7, 0.82, 0.42)
 
 var _mesh: ArrayMesh
 var _shape: ConvexPolygonShape3D
@@ -35,13 +34,13 @@ var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
 var _effect_material: StandardMaterial3D
 var _wire_material: StandardMaterial3D
-var _building_material: StandardMaterial3D
 
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
 var _tile_meshes: Dictionary = {}  # Vector2i -> MeshInstance3D
 var _cover_props: Dictionary = {}  # Vector2i -> MeshInstance3D
-var _buildings: Dictionary = {}    # Vector2i -> Node3D (stacked floor slabs)
-var _floor_mesh: ArrayMesh
+var _city: CityBuildings             # rectangular building segments (visual)
+var _roof_bodies: Dictionary = {}    # Vector2i -> StaticBody3D (roof picking)
+var _roof_caps: Dictionary = {}      # Vector2i -> MeshInstance3D (roof highlight)
 var _fog_enabled := false
 var _visible_hexes: Dictionary = {} # Vector2i -> true (inside friendly sight)
 
@@ -64,7 +63,6 @@ func _ready() -> void:
 	_highlight_material = _make_material(highlight_color)
 	_effect_material = _make_material(effect_color)
 	_wire_material = _make_material(wire_color)
-	_building_material = _make_building_material()
 	_build_board()
 
 
@@ -262,33 +260,70 @@ func set_cover(cover: Dictionary) -> void:
 		_cover_props[hex] = _spawn_cover_prop(hex, int(cover[hex]))
 
 
-## Spawns/refreshes 1..4-floor gray building blocks.
+## Builds the city: clean rectangular buildings (CityBuildings) plus, per
+## building hex, a roof-level pick collider (so clicking a rooftop selects
+## that hex, not the street behind it) and a thin roof cap that shows
+## hover/selection/range highlights on top of the building.
 func set_buildings(buildings: Dictionary) -> void:
-	for b in _buildings.values():
-		b.queue_free()
-	_buildings.clear()
+	if _city == null:
+		_city = CityBuildings.new()
+		_city.name = "City"
+		add_child(_city)
+	_city.build(buildings, hex_size)
+	for n in _roof_bodies.values():
+		n.queue_free()
+	_roof_bodies.clear()
+	_roof_caps.clear()
+	var rect_of := {}
+	for r in _city.rects:
+		for h in r["hexes"]:
+			rect_of[h] = r
 	for hex in buildings.keys():
-		_buildings[hex] = _spawn_building(hex, int(buildings[hex]))
+		var roof_y := HexCoord.GROUND_Y + int(buildings[hex]) * HexCoord.FLOOR_HEIGHT
+		var p := HexCoord.axial_to_world(hex, hex_size)
+		# The hex clipped to its building's footprint: the unit still occupies
+		# the whole hex, but the roof cap / pick area stops at the wall.
+		var poly := _roof_polygon(hex, p, rect_of.get(hex, {}))
+		var body := StaticBody3D.new()
+		body.name = "Roof_%d_%d" % [hex.x, hex.y]
+		body.collision_layer = 1
+		body.collision_mask = 0
+		body.set_meta(&"hex_q", hex.x)
+		body.set_meta(&"hex_r", hex.y)
+		body.position = Vector3(p.x, roof_y - HexCoord.GROUND_Y, p.z)
+		var col := CollisionShape3D.new()
+		col.shape = HexMesh.build_polygon_shape(poly, tile_height)
+		body.add_child(col)
+		var cap := MeshInstance3D.new()
+		cap.mesh = HexMesh.build_polygon_prism(_inset(poly, 0.06 * hex_size), 0.04)
+		cap.position.y = HexCoord.GROUND_Y + 0.03
+		cap.visible = false
+		body.add_child(cap)
+		add_child(body)
+		_roof_bodies[hex] = body
+		_roof_caps[hex] = cap
+		_apply(hex)
 
 
-## A building is a stack of translucent hex "floor slabs" (hologram style), so
-## units standing on interior floors stay visible. A unit on floor f stands on
-## top of slab f-1; floor == floors is the roof.
-func _spawn_building(hex: Vector2i, floors: int) -> Node3D:
-	if _floor_mesh == null:
-		_floor_mesh = HexMesh.build(hex_size * 0.97, HexCoord.FLOOR_HEIGHT * 0.9)
-	var root := Node3D.new()
-	root.name = "Building_%d_%d" % [hex.x, hex.y]
-	root.position = HexCoord.axial_to_world(hex, hex_size)
-	for f in floors:
-		var mi := MeshInstance3D.new()
-		mi.name = "Floor%d" % (f + 1)
-		mi.mesh = _floor_mesh
-		mi.material_override = _building_material
-		mi.position.y = HexCoord.GROUND_Y + (f + 0.45) * HexCoord.FLOOR_HEIGHT
-		root.add_child(mi)
-	add_child(root)
-	return root
+## Hex outline (local to the hex center) intersected with its building's
+## rectangle. Falls back to the full hex if there's no rectangle.
+func _roof_polygon(hex: Vector2i, center: Vector3, rect: Dictionary) -> PackedVector2Array:
+	var hex_poly := HexMesh.ring_polygon(hex_size)
+	if rect.is_empty():
+		return hex_poly
+	var b := BuildingRects.bounds(rect, hex_size)
+	var c := Vector2(center.x, center.z)
+	var rect_poly := PackedVector2Array([
+		b.position - c, Vector2(b.end.x, b.position.y) - c, b.end - c, Vector2(b.position.x, b.end.y) - c,
+	])
+	var clipped := Geometry2D.intersect_polygons(hex_poly, rect_poly)
+	return clipped[0] if not clipped.is_empty() else hex_poly
+
+
+## Shrinks a convex polygon slightly so roof caps don't z-fight the parapet.
+func _inset(poly: PackedVector2Array, amount: float) -> PackedVector2Array:
+	var grown := Geometry2D.offset_polygon(poly, -amount)
+	return grown[0] if not grown.is_empty() else poly
 
 
 func _spawn_cover_prop(hex: Vector2i, level: int) -> MeshInstance3D:
@@ -355,9 +390,15 @@ func set_fog(seen: Dictionary) -> void:
 
 
 func _set_tile_material(hex: Vector2i, mat: Material) -> void:
+	var cap: MeshInstance3D = _roof_caps.get(hex)
+	var highlighted := mat != _base_material and mat != _fog_material
 	var mi: MeshInstance3D = _tile_meshes.get(hex)
 	if mi != null:
-		mi.material_override = mat
+		# Building hexes highlight on the roof cap, not the street tile below.
+		mi.material_override = _base_material if (cap != null and highlighted) else mat
+	if cap != null:
+		cap.material_override = mat
+		cap.visible = highlighted
 
 
 func _make_material(color: Color) -> StandardMaterial3D:
@@ -377,18 +418,6 @@ func _make_prop_material(level: int) -> StandardMaterial3D:
 	mat.albedo_color = Color(0.55, 0.5, 0.42) if level == 1 else Color(0.32, 0.3, 0.26)
 	mat.metallic = 0.0
 	mat.roughness = 0.8
-	return mat
-
-
-func _make_building_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = building_color
-	mat.metallic = 0.0
-	mat.roughness = 0.6
-	mat.emission_enabled = true
-	mat.emission = Color(building_color.r, building_color.g, building_color.b)
-	mat.emission_energy_multiplier = 0.15
 	return mat
 
 

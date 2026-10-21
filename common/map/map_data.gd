@@ -9,9 +9,12 @@ extends RefCounted
 ## street network and building footprints match the sheet exactly. The sheet
 ## is point-symmetric (180 degrees), so both sides are equivalent.
 ##
-## The sheet is drawn top-down and does not show heights; floors are
-## assigned per building block from its footprint (small houses 1-2 floors,
-## mid-size blocks 3, the large complexes 4). Edit the digits to change them.
+## The sheet is drawn top-down and does not show heights. Each building block
+## is split into rectangular segments (the same rectangles the 3D city is built
+## from, see levels/board/city_buildings.gd) and each segment has its own
+## height, giving towers with lower wings; heights mirror across the map's
+## 180-degree symmetry so both sides stay fair. Edit the digits to change them
+## (keep a segment's hexes the same digit).
 ##
 ## Legend:
 ##   .    street (open ground)
@@ -27,38 +30,38 @@ const COLS := 32
 const ROWS := 32
 
 const LAYOUT: Array[String] = [
-	"....Z.......Z2...Z4444.4.4Z11.22",
-	".11.........22....44444444.11.22",
-	".11.......2222....4.444.......22",
-	"...................2.44.33....2.",
-	"333..11.444444....22..4.33......",
-	"333..11.444444....22.3.333.3.3.3",
-	"333....444........22.33333.33333",
-	"333..44444.4.4....2...3.3..333..",
-	"3.....4.4..444.............333.1",
-	".33..4.4.4.444....44444444.....1",
-	"333..444444444....44444444.222..",
-	"333..444444444....44444444.22..1",
-	"333..44......................2.1",
-	"333..44444.44.....222.2222..22.1",
-	"333..44444444.....222.2222..22.1",
+	"....Z.......Z2...Z3333.2.2Z21.33",
+	".11.........22....33333222.21.33",
+	".11.......1122....3.333.......33",
+	"...................2.33.22....3.",
+	"332..11.332222....22..3.22......",
+	"332..11.332222....22.4.422.4.4.3",
+	"332....133........22.44422.44433",
+	"332..11133.4.4....2...4.2..444..",
+	"3.....1.3..444.............444.1",
+	".23..4.4.4.444....44444444.....1",
+	"123..444444444....44444444.211..",
+	"123..444444444....44444444.21..2",
+	"123..44......................3.2",
+	"123..44222.11.....222.3333..33.2",
+	"123..44222111.....222.3333..33.2",
 	"................................",
 	"................................",
-	"1.22..2222.222.....44444444..333",
-	"1.22..2222.222.....44.44444..333",
-	"1.2......................44..333",
-	"1..22.44444444....444444444..333",
-	"..222.44444444....444444444..333",
-	"1.....44444444....444.4.4.4..33.",
-	"1.333.............444..4.4.....3",
-	"..333..3.3...2....4.4.44444..333",
-	"33333.33333.22........444....333",
-	"3.3.3.333.3.22....444444.11..333",
-	"......33.4..22....444444.11..333",
-	".2....33.44.2...................",
-	"22.......444.4....2222.......11.",
-	"22.11.44444444....22.........11.",
-	"22.11A4.4.4444A...2A.......A....",
+	"2.33..3333.222.....11122244..321",
+	"2.33..3333.222.....11.22244..321",
+	"2.3......................44..321",
+	"2..12.44444444....444444444..321",
+	"..112.44444444....444444444..321",
+	"1.....44444444....444.4.4.4..32.",
+	"1.444.............444..3.1.....3",
+	"..444..2.4...2....4.4.33111..233",
+	"33444.22444.22........331....233",
+	"3.4.4.224.4.22....222233.11..233",
+	"......22.3..22....222233.11..233",
+	".3....22.33.2...................",
+	"33.......333.3....2211.......11.",
+	"33.12.22233333....22.........11.",
+	"33.12A2.2.3333A...2A.......A....",
 ]
 
 var tiles: Dictionary = {}      # Vector2i -> true
@@ -98,13 +101,16 @@ static func city() -> MapData:
 	return m
 
 
-## Facing (0..5) from `hex` that points most directly at the map center.
+## Facing (0..5) from `hex` that points most directly at the map center
+## (compared in world space — several hex directions can tie on distance).
 func facing_toward_center(hex: Vector2i) -> int:
+	var to := HexCoord.axial_to_world(center, 1.0) - HexCoord.axial_to_world(hex, 1.0)
 	var best := 0
-	var best_d := 0x7FFFFFFF
+	var best_dot := -INF
 	for d in 6:
-		var dist := HexCoord.distance(HexCoord.neighbor(hex, d), center)
-		if dist < best_d:
-			best_d = dist
+		var dir := HexCoord.axial_to_world(HexCoord.AXIAL_DIRECTIONS[d], 1.0).normalized()
+		var dot := dir.dot(to.normalized())
+		if dot > best_dot:
+			best_dot = dot
 			best = d
 	return best

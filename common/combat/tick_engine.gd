@@ -149,6 +149,19 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 			intents.append([u, _cell(to_hex, to_floor), card])
 	_resolve_moves(ms, intents, tick, events)
 
+	# Look (stance shift): turn to face a hex. Resolves after movement so a
+	# unit can move and then keep watching a chosen direction.
+	for row in _iter_active(ms, plans, tick):
+		var u: UnitState = row[2]
+		var ta: TickAction = row[3]
+		for slot in [TickAction.MAIN, TickAction.SUB]:
+			var card := ta.slot_card(slot)
+			if card != null and card.card_name == "Look" and ta.slot_has_target(slot):
+				var dir := attack_direction(u.hex, ta.slot_target(slot))
+				if dir != -1 and dir != u.facing:
+					u.facing = dir
+					events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s turns to watch %s" % [u.display_name(), str(ta.slot_target(slot))], u))
+
 
 ## Wires belong to the deploying team (Wire Mobility Penchant applies to it).
 func _deploy_wire(ms: MatchState, u: UnitState, target: Vector2i, tick: int, events: Array[CombatEvent]) -> void:
@@ -444,6 +457,11 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 		if not card.curved and not Visibility.has_los(ms, attacker.hex, attacker.floor, target.hex, target.floor):
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s shot blocked (no line of sight)" % attacker.display_name(), attacker, target))
 			return null
+
+	# The attacker turns toward its target (its vision cone and shield follow).
+	var face := attack_direction(attacker.hex, target.hex)
+	if face != -1:
+		attacker.facing = face
 
 	# Hit / evasion roll.
 	if not always_hit:

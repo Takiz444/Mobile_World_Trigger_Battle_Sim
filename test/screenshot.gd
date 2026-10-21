@@ -3,7 +3,7 @@ extends Node
 ## Needs a rendering window, so do NOT pass --headless.
 ##
 ## Run:
-##   godot --path . res://test/screenshot.tscn -- <out.png> [ortho_size] [pitch_deg] [turns] [center]
+##   godot --path . res://test/screenshot.tscn -- <out.png> [ortho_size] [pitch_deg] [turns] [center|unit]
 ##   godot --path . res://test/screenshot.tscn -- <out.png> hangar
 ## `turns` plays that many empty local turns first (the enemy AI advances).
 
@@ -33,7 +33,15 @@ func _ready() -> void:
 		cam.size = float(args[1])
 		if args.size() > 2:
 			cam.pitch = deg_to_rad(float(args[2]))
-		if args.size() > 4 and args[4] == "center":
+		if args.size() > 4 and args[4] == "unit":
+			var ctl := main.get_node("MatchController") as MatchController
+			var u: UnitState = ctl._player_states[0]
+			cam.screen_offset_px = Vector2.ZERO
+			cam.recenter(HexCoord.axial_to_world(u.hex, 1.0) + Vector3(1.0, 0, -0.5))
+			(main.get_node("UILayer") as CanvasLayer).visible = false
+			# Light up nearby hexes so roof-cap clipping is visible.
+			(main.get_node("HexBoard") as HexBoard).highlight_hexes(HexCoord.spiral(u.hex, 3))
+		elif args.size() > 4 and args[4] == "center":
 			var board := main.get_node("HexBoard") as HexBoard
 			cam.screen_offset_px = Vector2.ZERO
 			cam.recenter(board.get_bounds().get_center())

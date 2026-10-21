@@ -118,6 +118,10 @@ func _build_board_view() -> void:
 	_board.set_cover(_ms.cover)
 	_board.set_buildings(_ms.buildings)
 	_board.set_wires(_ms.wires)
+	var board_box := _board.get_bounds()
+	var edge := _board.hex_size
+	_units_view.set_map_bounds(Rect2(board_box.position.x - edge, board_box.position.z - edge,
+		board_box.size.x + 2.0 * edge, board_box.size.z + 2.0 * edge))
 	if _camera != null:
 		_camera.set_bounds(_board.get_bounds())
 		# Frame the squad with some battlefield ahead of it: aim a few hexes
@@ -434,6 +438,7 @@ func _begin_replay() -> void:
 	_event_log.clear()
 	_board.clear_highlights()
 	_units_view.clear_ghost()
+	_units_view.clear_vision()
 	_units_view.set_selected(null)
 	if _prediction_label != null:
 		_prediction_label.visible = false
@@ -545,6 +550,62 @@ func _update_targeting() -> void:
 	var idx := _timeline.get_current_unit()
 	if idx >= 0 and idx < _player_states.size():
 		_units_view.set_selected(_player_states[idx])
+	_update_vision(info)
+
+
+## Shows the selected character's vision cones where it will be (and which
+## way it will face) at the selected tick. With a Look card selected, the
+## cone follows the hovered hex to preview the new facing.
+func _update_vision(info: Dictionary) -> void:
+	if _resolving or _player_states.is_empty():
+		_units_view.clear_vision()
+		return
+	var idx: int = info.get("unit", _timeline.get_current_unit())
+	if idx < 0 or idx >= _player_states.size() or _player_states[idx].is_bailed:
+		_units_view.clear_vision()
+		return
+	var tick: int = info.get("tick", -1)
+	var hex := _projected_hex(idx, tick)
+	var floor := _projected_floor(idx, tick)
+	var facing := _projected_facing(idx, tick)
+	var card: TriggerCard = info.get("card")
+	if card != null and card.card_name == "Look" and _target_hex_for(info) == HexBoard.INVALID_HEX \
+			and _hovered_hex != HexBoard.INVALID_HEX:
+		var dir := TickEngine.attack_direction(hex, _hovered_hex)
+		if dir != -1:
+			facing = dir
+	# Standing inside a building: vision only leaves through its outer wall.
+	var own_rect: Dictionary = {}
+	if floor < _ms.building_floors(hex):
+		var ri := _ms.building_rect_index(hex)
+		if ri != -1:
+			own_rect = _ms.building_rects()[ri]
+	_units_view.show_vision(_player_states[idx], hex, floor, facing, own_rect)
+
+
+## Facing after ticks 0..through_tick of the plan: moves face their step,
+## Look faces its target, attacks turn toward their target (engine rules).
+func _projected_facing(unit_index: int, through_tick: int) -> int:
+	var u: UnitState = _player_states[unit_index]
+	var facing := u.facing
+	var plan := _timeline.get_plan()
+	for t in range(through_tick + 1):
+		var hex := _projected_hex(unit_index, t - 1)
+		var ta: TickAction = plan.get_tick(unit_index, t)
+		var moved_to := _projected_hex(unit_index, t)
+		if moved_to != hex:
+			var dir := TickEngine.attack_direction(hex, moved_to)
+			if dir != -1:
+				facing = dir
+		for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
+			var card := ta.slot_card(slot)
+			if card == null or not ta.slot_has_target(slot) or TickEngine.is_move_card(card):
+				continue
+			if card.card_name == "Look" or card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED:
+				var dir := TickEngine.attack_direction(moved_to, ta.slot_target(slot))
+				if dir != -1:
+					facing = dir
+	return facing
 
 
 ## Live hit-chance / damage readout for the hovered (or locked) target of the
@@ -947,18 +1008,28 @@ func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
 				_enemy_plan.set_target(i, tick, target.hex)
 				continue
 
-		# Advance on a seen enemy, else on the nearest radar contact.
+		# Advance on a seen enemy, else on the nearest radar contact, while
+		# keeping eyes on it (Look is free and fits the Sub slot).
 		var goal := target if target != null else _pick_target(pos, seen, false)
 		if goal != null and move_card != null and floor == 0 and HexCoord.distance(pos, goal.hex) > 1:
 			var step := _next_step(pos, goal.hex)
 			if step != pos and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, move_card):
 				_enemy_plan.set_target(i, tick, step)
 				pos = step
+				_watch(i, tick, goal.hex)
 				continue
 
 		# Fallback: raise shield (more AT lets later ticks do other things).
 		if shield != null:
 			_enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, shield)
+		if goal != null:
+			_watch(i, tick, goal.hex)
+
+
+## Free Look toward `hex` in the Sub slot (keeps the AI's vision on threats).
+func _watch(i: int, tick: int, hex: Vector2i) -> void:
+	if _enemy_plan.assign(i, tick, TurnPlan.SUB_SLOT, TriggerLibrary.get_look_card()):
+		_enemy_plan.set_target(i, tick, hex, 0, TurnPlan.SUB_SLOT)
 
 
 ## Assigns Main+Sub shield in one tick (Full Guard, 4 AT) if affordable.
