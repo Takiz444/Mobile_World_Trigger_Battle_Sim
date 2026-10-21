@@ -16,9 +16,6 @@ signal tile_selected(hex: Vector2i)
 @export var hex_size: float = 1.0
 @export var tile_height: float = HexCoord.GROUND_Y * 2.0
 
-# Neutral slate streets so both team colors (blue / red) read clearly.
-@export var tile_color: Color = Color(0.2, 0.235, 0.29)
-@export var fog_color: Color = Color(0.11, 0.12, 0.15)
 @export var hover_color: Color = Color(0.25, 0.85, 1.0)
 @export var selected_color: Color = Color(1.0, 0.82, 0.2)
 @export var highlight_color: Color = Color(0.3, 1.0, 0.5)
@@ -27,8 +24,10 @@ signal tile_selected(hex: Vector2i)
 
 var _mesh: ArrayMesh
 var _shape: ConvexPolygonShape3D
-var _base_material: StandardMaterial3D
-var _fog_material: StandardMaterial3D
+var _base_material: ShaderMaterial    # hex overlay: faint grid line only
+var _fog_material: ShaderMaterial     # hex overlay: grid line + fog tint
+var _decor: Node3D                    # street lamps
+var _ground: MeshInstance3D           # continuous street surface
 var _hover_material: StandardMaterial3D
 var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
@@ -54,10 +53,12 @@ var _wire_hexes: Dictionary = {}   # Vector2i -> true
 
 
 func _ready() -> void:
-	_mesh = HexMesh.build(hex_size, tile_height)
+	# Tiles are thin overlays on the continuous street; the pick collider
+	# keeps the full tile thickness.
+	_mesh = HexMesh.build(hex_size * 0.995, 0.01)
 	_shape = HexMesh.build_convex_shape(hex_size, tile_height)
-	_base_material = _make_material(tile_color)
-	_fog_material = _make_material(fog_color)
+	_base_material = _make_overlay_material(0.0)
+	_fog_material = _make_overlay_material(1.0)
 	_hover_material = _make_material(hover_color)
 	_selected_material = _make_material(selected_color)
 	_highlight_material = _make_material(highlight_color)
@@ -139,6 +140,8 @@ func _spawn_tile(hex: Vector2i) -> void:
 	mesh_inst.name = "Mesh"
 	mesh_inst.mesh = _mesh
 	mesh_inst.material_override = _base_material
+	mesh_inst.position.y = HexCoord.GROUND_Y + 0.006
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(mesh_inst)
 
 	var col := CollisionShape3D.new()
@@ -270,6 +273,7 @@ func set_buildings(buildings: Dictionary) -> void:
 		_city.name = "City"
 		add_child(_city)
 	_city.build(buildings, hex_size)
+	_decorate_streets(buildings)
 	for n in _roof_bodies.values():
 		n.queue_free()
 	_roof_bodies.clear()
@@ -303,6 +307,194 @@ func set_buildings(buildings: Dictionary) -> void:
 		_roof_bodies[hex] = body
 		_roof_caps[hex] = cap
 		_apply(hex)
+
+
+# --- Street Decoration --------------------------------------------------------
+
+## Dresses the streets: one continuous street surface (asphalt, straight
+## sidewalks and curbs around every building, avenue markings, manholes) and
+## street lamps. Purely visual (no collision, no sight blocking).
+func _decorate_streets(buildings: Dictionary) -> void:
+	_build_ground(buildings)
+	_spawn_lamps(buildings)
+
+
+## Mask resolution for baked sidewalks (pixels per world unit).
+const MASK_PPU := 10.0
+const SIDEWALK_WIDTH := 0.42
+const CURB_WIDTH := 0.07
+
+
+func _build_ground(buildings: Dictionary) -> void:
+	if _ground != null:
+		_ground.queue_free()
+	var box := get_bounds()
+	var margin := 2.5 * hex_size
+	var x0 := box.position.x - margin
+	var z0 := box.position.z - margin
+	var size := Vector2(box.size.x + 2.0 * margin, box.size.z + 2.0 * margin)
+
+	# Bake sidewalks: every building rectangle grown by the sidewalk width
+	# (R) and, underneath, by sidewalk + curb (G). Native fill_rect, so fast.
+	var w := int(ceil(size.x * MASK_PPU))
+	var h := int(ceil(size.y * MASK_PPU))
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 1))
+	for pass_i in 2:
+		var grow := (SIDEWALK_WIDTH + CURB_WIDTH) if pass_i == 0 else SIDEWALK_WIDTH
+		var col := Color(0, 1, 0, 1) if pass_i == 0 else Color(1, 1, 0, 1)
+		for r in _city.rects:
+			var b := BuildingRects.bounds(r, hex_size).grow(grow * hex_size)
+			var px := Rect2i(
+				int(floor((b.position.x - x0) * MASK_PPU)), int(floor((b.position.y - z0) * MASK_PPU)),
+				int(ceil(b.size.x * MASK_PPU)), int(ceil(b.size.y * MASK_PPU)))
+			img.fill_rect(px.intersection(Rect2i(0, 0, w, h)), col)
+	var mask := ImageTexture.create_from_image(img)
+
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://levels/board/street.gdshader")
+	mat.set_shader_parameter("sidewalk_mask", mask)
+	mat.set_shader_parameter("mask_origin", Vector2(x0, z0))
+	mat.set_shader_parameter("mask_size", Vector2(w, h) / MASK_PPU)
+	var edge := hex_size
+	mat.set_shader_parameter("map_rect", Vector4(box.position.x - 0.75 * edge, box.position.z - 0.87 * edge,
+		box.end.x + 0.75 * edge, box.end.z + 0.87 * edge))
+	_set_avenues(mat, buildings)
+
+	var plane := PlaneMesh.new()
+	plane.size = size
+	_ground = MeshInstance3D.new()
+	_ground.name = "StreetSurface"
+	_ground.mesh = plane
+	_ground.material_override = mat
+	_ground.position = Vector3(x0 + size.x * 0.5, HexCoord.GROUND_Y, z0 + size.y * 0.5)
+	add_child(_ground)
+
+
+## Avenues: rows / columns of the map that are (almost) entirely street get
+## continuous center lines and zebra crossings where they meet.
+func _set_avenues(mat: ShaderMaterial, buildings: Dictionary) -> void:
+	var road_rows := {}
+	var road_cols := {}
+	var row_count := {}
+	var col_count := {}
+	for hex in _tiles.keys():
+		var row := BuildingRects.offset_row(hex)
+		row_count[row] = int(row_count.get(row, 0)) + 1
+		col_count[hex.x] = int(col_count.get(hex.x, 0)) + 1
+		if buildings.has(hex):
+			continue
+		if not road_rows.has(row):
+			road_rows[row] = []
+		road_rows[row].append(hex)
+		road_cols[hex.x] = int(road_cols.get(hex.x, 0)) + 1
+	var rows: Array = []
+	for row in road_rows:
+		if road_rows[row].size() >= int(row_count[row]) and road_rows[row].size() >= 8:
+			rows.append(row)
+	var cols: Array = []
+	for col in road_cols:
+		if int(road_cols[col]) >= int(col_count[col]) * 0.85 and int(road_cols[col]) >= 8:
+			cols.append(col)
+	if not rows.is_empty():
+		var zs: Array = []
+		for row in rows:
+			for hex in road_rows[row]:
+				zs.append(hex_to_world(hex).z)
+		# Span between the facing building walls (sidewalk edges), not hex tips.
+		var z0: float = zs.min() - hex_size * 0.433
+		var z1: float = zs.max() + hex_size * 0.433
+		mat.set_shader_parameter("avenue_z", (z0 + z1) * 0.5)
+		mat.set_shader_parameter("avenue_z_span", Vector2(z0, z1))
+	if not cols.is_empty():
+		var x0: float = 1.5 * hex_size * float(cols.min()) - 0.75 * hex_size
+		var x1: float = 1.5 * hex_size * float(cols.max()) + 0.75 * hex_size
+		mat.set_shader_parameter("avenue_x", (x0 + x1) * 0.5)
+		mat.set_shader_parameter("avenue_x_span", Vector2(x0, x1))
+
+
+## Street lamps on some sidewalk hexes, standing on the sidewalk right against
+## the nearest building wall (off the hex center, so units and paths stay
+## clear), each with a warm light that pools on the street.
+func _spawn_lamps(buildings: Dictionary) -> void:
+	if _decor != null:
+		_decor.queue_free()
+	_decor = Node3D.new()
+	_decor.name = "StreetDecor"
+	add_child(_decor)
+	var rect_of := {}
+	for r in _city.rects:
+		for h in r["hexes"]:
+			rect_of[h] = r
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.18, 0.19, 0.22)
+	pole_mat.metallic = 0.6
+	pole_mat.roughness = 0.4
+	var bulb_mat := StandardMaterial3D.new()
+	bulb_mat.albedo_color = Color(1.0, 0.86, 0.6)
+	bulb_mat.emission_enabled = true
+	bulb_mat.emission = Color(1.0, 0.8, 0.5)
+	bulb_mat.emission_energy_multiplier = 3.0
+	for hex in _tiles.keys():
+		if buildings.has(hex) or (absi(hex.x * 73856093 ^ hex.y * 19349663) % 4) != 0:
+			continue
+		var rect: Dictionary = {}
+		for n in HexCoord.neighbors(hex):
+			if rect_of.has(n):
+				rect = rect_of[n]
+				break
+		if rect.is_empty():
+			continue
+		# Nearest point on the building wall, then step out onto the sidewalk.
+		var c3 := hex_to_world(hex)
+		var c := Vector2(c3.x, c3.z)
+		var b := BuildingRects.bounds(rect, hex_size)
+		var wall := Vector2(clampf(c.x, b.position.x, b.end.x), clampf(c.y, b.position.y, b.end.y))
+		var out2 := (c - wall).normalized()
+		if out2 == Vector2.ZERO:
+			continue
+		var out := Vector3(out2.x, 0, out2.y)
+		var base := Vector3(wall.x, HexCoord.GROUND_Y, wall.y) + out * 0.2 * hex_size
+		var pole := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.022
+		cyl.bottom_radius = 0.032
+		cyl.height = 1.15
+		pole.mesh = cyl
+		pole.material_override = pole_mat
+		pole.position = base + Vector3(0, 0.575, 0)
+		_decor.add_child(pole)
+		var arm := MeshInstance3D.new()
+		var arm_box := BoxMesh.new()
+		arm_box.size = Vector3(0.03, 0.03, 0.3)
+		arm.mesh = arm_box
+		arm.material_override = pole_mat
+		arm.position = base + Vector3(0, 1.13, 0) + out * 0.14
+		arm.basis = Basis.looking_at(out, Vector3.UP)
+		_decor.add_child(arm)
+		var bulb := MeshInstance3D.new()
+		var sph := SphereMesh.new()
+		sph.radius = 0.06
+		sph.height = 0.1
+		bulb.mesh = sph
+		bulb.material_override = bulb_mat
+		bulb.position = base + Vector3(0, 1.1, 0) + out * 0.28
+		_decor.add_child(bulb)
+		var light := OmniLight3D.new()
+		light.position = bulb.position
+		light.light_color = Color(1.0, 0.78, 0.5)
+		light.light_energy = 1.2
+		light.omni_range = 2.6 * hex_size
+		light.omni_attenuation = 1.4
+		_decor.add_child(light)
+
+
+func _make_overlay_material(fog_amount: float) -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://levels/board/hex_overlay.gdshader")
+	mat.set_shader_parameter("fog_amount", fog_amount)
+	mat.set_shader_parameter("hex_size", hex_size)
+	return mat
 
 
 ## Hex outline (local to the hex center) intersected with its building's
@@ -401,9 +593,11 @@ func _set_tile_material(hex: Vector2i, mat: Material) -> void:
 		cap.visible = highlighted
 
 
+## Highlight overlay: translucent so the street shows through.
 func _make_material(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(color, 0.62)
 	mat.metallic = 0.0
 	mat.roughness = 0.55
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED

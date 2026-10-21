@@ -1,6 +1,6 @@
 shader_type spatial;
-// City building facade: concrete walls with a window grid per floor (glass
-// glows faintly, hologram-tabletop style), floor slab lines, a darker
+// City building facade: concrete walls with a window grid per floor (some
+// rooms lit warm at dusk, the rest dark reflective glass), floor slab lines, a darker
 // street-level band, and a flat roof finish. Each building sets its own
 // `tint` via set_instance_shader_parameter().
 
@@ -13,6 +13,10 @@ uniform float window_spacing = 0.45;
 
 varying vec3 world_pos;
 varying vec3 world_normal;
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
 
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -41,10 +45,16 @@ void fragment() {
 			wall *= 0.8;  // floor slab line
 		}
 		if (window) {
-			ALBEDO = glass_color;
-			EMISSION = glass_color * 0.35;
-			ROUGHNESS = 0.15;
-			METALLIC = 0.4;
+			// At dusk some rooms have their lights on (warm), the rest are
+			// dark glass reflecting the sky.
+			vec2 cell = vec2(floor(along / window_spacing) + world_normal.x * 37.0 + world_normal.z * 91.0,
+				floor(h / floor_height));
+			float lit = step(0.6, hash(cell + tint.rg * 13.0));
+			vec3 warm = vec3(1.0, 0.82, 0.55);
+			ALBEDO = mix(glass_color * 0.6, warm * 0.8, lit);
+			EMISSION = mix(glass_color * 0.12, warm * 0.9, lit);
+			ROUGHNESS = mix(0.08, 0.4, lit);
+			METALLIC = mix(0.6, 0.0, lit);
 		} else {
 			ALBEDO = wall;
 			ROUGHNESS = 0.85;
