@@ -4,6 +4,9 @@ extends Node
 ##   LOCAL  — vs the built-in enemy AI, resolved locally.
 ##   ONLINE — async backend: submit plans, poll for the opponent, then replay
 ##            the server-resolved plans through the deterministic engine.
+##            With MatchSession.live, the server pushes results over the live
+##            WebSocket (LiveClient) and a short turn clock runs: whatever is
+##            planned when it runs out is locked in automatically.
 ##
 ## Drives the shared replay visualization (tweened movement, event log) for
 ## both modes.
@@ -39,6 +42,19 @@ var _backend: HttpBackend
 var _match_id := ""
 var _team := 0
 var _token := ""
+
+# Live mode (ONLINE + MatchSession.live)
+## Seconds before the server deadline at which the current plan auto-locks.
+const LIVE_AUTO_LOCK_SEC := 1.5
+var _live: LiveClient
+var _live_deadline_ms := -1          # Time.get_ticks_msec() of the turn deadline
+var _live_queue: Array[Dictionary] = []   # pushed turn results awaiting replay
+var _live_replaying := false
+var _live_over: Dictionary = {}      # match_over message, once received
+var _opponent_online := true
+var _opponent_locked := false
+var _over_shown := false
+var _clock_label: Label
 
 # Match-over / waiting overlay
 var _overlay: Control
@@ -86,6 +102,7 @@ func _start_match() -> void:
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_turn = 1
+	_over_shown = false
 	_overlay.visible = false
 	_btn_row.visible = true
 	_event_log.set_turn(_turn)
@@ -194,6 +211,8 @@ func _setup_online() -> void:
 		_show_match_over(winner)
 		return
 	_timeline.set_locked(false)
+	if MatchSession.live:
+		_start_live(body)
 
 
 func _on_tile_selected(hex: Vector2i) -> void:
@@ -273,7 +292,9 @@ func _on_plan_submitted() -> void:
 		return
 	_resolving = true
 	_timeline.set_locked(true)
-	if _online:
+	if _live != null:
+		_submit_live()
+	elif _online:
 		await _submit_online()
 	else:
 		await _submit_local()
@@ -304,9 +325,12 @@ func _submit_online() -> void:
 		return
 	_overlay.visible = false
 
-	var winner := await _catch_up(poll["body"])
-	_after_resolution(winner)
 	var body: Dictionary = poll["body"]
+	var winner := await _catch_up(body)
+	if winner == -1:
+		# Ended without a new turn result (e.g. the opponent forfeited).
+		winner = int(body.get("winner", -1))
+	_after_resolution(winner)
 	if winner != -1 and bool(body.get("ranked", false)):
 		var delta := int((body.get("rating_change", [0, 0]) as Array)[_team])
 		_turn_info.text += "\nRanked: rating %+d" % delta
@@ -939,11 +963,21 @@ func _show_waiting(text: String) -> void:
 
 
 func _show_match_over(winner: int) -> void:
+	if _over_shown:
+		return
+	_over_shown = true
 	var won := winner == _team
-	_result_label.text = "VICTORY" if won else "DEFEAT"
+	var draw := winner == MatchRunner.DRAW
+	_result_label.text = "DRAW" if draw else ("VICTORY" if won else "DEFEAT")
 	_result_label.add_theme_color_override("font_color",
-		Color(0.4, 0.95, 0.5) if won else Color(1.0, 0.4, 0.4))
+		Color(0.85, 0.85, 0.6) if draw else (Color(0.4, 0.95, 0.5) if won else Color(1.0, 0.4, 0.4)))
 	_turn_info.text = "Match ended after %d turns" % _turn
+	if not _live_over.is_empty():
+		_turn_info.text += _live_result_text(_live_over)
+	if _clock_label != null:
+		_clock_label.visible = false
+	# Rematch replays the local AI match; online matches go back to the Hangar.
+	_rematch_btn.visible = not _online
 	_btn_row.visible = true
 	_overlay.visible = true
 	_timeline.set_locked(true)
@@ -952,8 +986,170 @@ func _show_match_over(winner: int) -> void:
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_event_log.add_message(
-		"Match over — %s!" % ("Victory" if won else "Defeat"),
+		"Match over — %s!" % ("Draw" if draw else ("Victory" if won else "Defeat")),
 		Color(0.4, 0.95, 0.5) if won else Color(1.0, 0.4, 0.4))
+
+
+# --- Live Mode ----------------------------------------------------------------
+# Live ranked / friendly matches: the server runs a short turn clock and
+# pushes results over the live WebSocket. The client mirrors the clock,
+# auto-locks the current plan just before it runs out, and replays pushed
+# results in order (several can queue up after a reconnect).
+
+func _start_live(body: Dictionary) -> void:
+	_build_clock_label()
+	_set_live_deadline(float(body.get("seconds_left", -1.0)))
+	_live = LiveClient.new()
+	_live.name = "LiveClient"
+	add_child(_live)
+	_live.state_received.connect(_on_live_state)
+	_live.turn_resolved.connect(_on_live_resolved)
+	_live.opponent_locked.connect(func(turn: int) -> void:
+		if turn == _turn:
+			_opponent_locked = true)
+	_live.submit_acked.connect(_on_live_ack)
+	_live.match_over.connect(_on_live_match_over)
+	_live.presence_changed.connect(func(connected: Array) -> void:
+		_opponent_online = bool(connected[1 - _team]))
+	_live.connection_changed.connect(func(connected: bool) -> void:
+		if not connected:
+			_event_log.add_message("Connection lost — reconnecting…", Color(1.0, 0.7, 0.4)))
+	var url := MatchSession.live_url if MatchSession.live_url != "" else LiveClient.derive_url(MatchSession.server_url)
+	_live.open(url, _match_id, _token)
+
+
+func _set_live_deadline(seconds_left: float) -> void:
+	_live_deadline_ms = Time.get_ticks_msec() + int(seconds_left * 1000.0) if seconds_left >= 0.0 else -1
+
+
+func _submit_live() -> void:
+	_live.submit(_turn, PlanCodec.encode_plan(_timeline.get_plan()))
+	_event_log.add_message("Plan locked in.", Color(0.7, 0.85, 1.0))
+
+
+func _process(_delta: float) -> void:
+	if _live == null or _clock_label == null or _over_shown:
+		return
+	var left := -1.0
+	if _live_deadline_ms >= 0:
+		left = maxf(0.0, (_live_deadline_ms - Time.get_ticks_msec()) / 1000.0)
+	var status := ""
+	if _resolving and not _live_replaying:
+		status = "  ·  locked in"
+	if _opponent_locked:
+		status += "  ·  opponent locked in"
+	if not _opponent_online:
+		status += "  ·  opponent reconnecting…"
+	if not _live.is_open():
+		status += "  ·  reconnecting…"
+	var clock := "--:--"
+	if left >= 0.0:
+		clock = "%d:%02d" % [int(left) / 60, int(left) % 60]
+	_clock_label.text = "Turn %d/%d   %s%s" % [_turn, Ladder.LIVE_MAX_TURNS, clock, status]
+	_clock_label.modulate = Color(1.0, 0.45, 0.4) if left >= 0.0 and left < 10.0 else Color(1, 1, 1)
+	# Buzzer: lock in whatever is planned (the server would otherwise fall
+	# back to "Stand Ground + Shield").
+	if left >= 0.0 and left <= LIVE_AUTO_LOCK_SEC and not _resolving and not _live_replaying:
+		_on_plan_submitted()
+
+
+## Full state after every (re)connect: queue any turn results we missed.
+func _on_live_state(body: Dictionary) -> void:
+	_set_live_deadline(float(body.get("seconds_left", -1.0)))
+	for result in body.get("history", []):
+		if int(result.get("turn", -1)) >= _turn and not _queued(int(result["turn"])):
+			_live_queue.append(result)
+	var winner := int(body.get("winner", -1))
+	if winner != -1 and _live_over.is_empty():
+		_live_over = { "winner": winner, "reason": body.get("end_reason", ""),
+			"rating_change": body.get("rating_change", [0, 0]), "trophy_change": body.get("trophy_change", [0, 0]) }
+	_drain_live()
+
+
+func _on_live_resolved(result: Dictionary, _next_turn: int, seconds_left: float) -> void:
+	_set_live_deadline(seconds_left)
+	if int(result.get("turn", -1)) >= _turn and not _queued(int(result["turn"])):
+		_live_queue.append(result)
+	_drain_live()
+
+
+func _on_live_ack(msg: Dictionary) -> void:
+	# 409 = stale turn: the turn already resolved; its result is on the way.
+	if msg.has("error") and int(msg.get("code", 0)) != 409:
+		_event_log.add_message("Submit rejected: %s" % str(msg["error"]), Color(1.0, 0.4, 0.4))
+		_resolving = false
+		_timeline.set_locked(false)
+
+
+func _on_live_match_over(msg: Dictionary) -> void:
+	_live_over = msg
+	_drain_live()
+
+
+func _queued(turn: int) -> bool:
+	for r in _live_queue:
+		if int(r.get("turn", -1)) == turn:
+			return true
+	return false
+
+
+## Replays queued results one at a time, then shows the result if the match
+## is over.
+func _drain_live() -> void:
+	if _live_replaying:
+		return
+	_live_replaying = true
+	while not _live_queue.is_empty():
+		var result: Dictionary = _live_queue.pop_front()
+		if int(result.get("turn", -1)) < _turn:
+			continue
+		_resolving = true
+		_timeline.set_locked(true)
+		_overlay.visible = false
+		var winner := await _catch_up({ "history": [result] })
+		_opponent_locked = false
+		if winner != -1:
+			_live_replaying = false
+			_show_match_over(winner)
+			return
+		_after_resolution(-1)
+	_live_replaying = false
+	if not _live_over.is_empty():
+		_show_match_over(int(_live_over.get("winner", -1)))
+
+
+func _live_result_text(msg: Dictionary) -> String:
+	var reason := str(msg.get("reason", ""))
+	var text := ""
+	match reason:
+		"turn_cap":
+			text = "\nTurn limit — decided on units and Trion left"
+		"forfeit":
+			text = "\nOpponent surrendered" if int(msg.get("winner", -1)) == _team else "\nYou surrendered"
+		"afk":
+			text = "\nDecided by inactivity"
+	var trophies := int((msg.get("trophy_change", [0, 0]) as Array)[_team])
+	if trophies != 0:
+		text += "\nTrophies %+d" % trophies
+	return text
+
+
+func _build_clock_label() -> void:
+	_clock_label = Label.new()
+	_clock_label.name = "LiveClock"
+	_clock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_clock_label.add_theme_font_size_override("font_size", 20)
+	_clock_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+	_clock_label.add_theme_constant_override("font_outline_size", 6)
+	_clock_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_prediction_label.get_parent().add_child(_clock_label)
+	_fit_clock_label()
+	get_viewport().size_changed.connect(_fit_clock_label)
+
+
+func _fit_clock_label() -> void:
+	_clock_label.position = Vector2(0, 84)
+	_clock_label.size = Vector2(get_viewport().get_visible_rect().size.x, 28)
 
 
 # --- Enemy AI (local mode only) --------------------------------------------

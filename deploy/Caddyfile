@@ -1,0 +1,22 @@
+# TLS termination + routing for the game server. Caddy obtains and renews
+# the certificate for $TT_DOMAIN automatically (the DNS A record must point
+# at this host, and ports 80/443 must be open).
+
+{$TT_DOMAIN} {
+	encode gzip
+
+	# Live channel: WebSocket upgrade is proxied transparently.
+	handle /live* {
+		reverse_proxy server:8081
+	}
+
+	# Admin endpoints are never exposed publicly; call them from the host
+	# (docker compose exec server ...) or over a VPN.
+	handle /admin/* {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy server:8080
+	}
+}

@@ -57,13 +57,23 @@ func get_account(player_id: String) -> Dictionary:
 	return await request("GET", "/account/%s" % player_id)
 
 
+## Permanently deletes the account (required in-app by the App Store).
+func delete_account(player_id: String, secret: String) -> Dictionary:
+	return await request("POST", "/account/delete", { "player_id": player_id, "secret": secret })
+
+
+func forfeit(match_id: String, token: String) -> Dictionary:
+	return await request("POST", "/match/%s/forfeit" % match_id, { "token": token })
+
+
 func leaderboard() -> Dictionary:
 	return await request("GET", "/leaderboard")
 
 
 ## Joins the ranked queue; the response is either matched or a ticket to poll.
-func queue_ranked(player_id: String, secret: String, squad: Array) -> Dictionary:
-	return await request("POST", "/queue", { "player_id": player_id, "secret": secret, "squad": squad })
+## `mode` is "async" (correspondence) or "live" (trophy ladder).
+func queue_ranked(player_id: String, secret: String, squad: Array, mode := "async") -> Dictionary:
+	return await request("POST", "/queue", { "player_id": player_id, "secret": secret, "squad": squad, "mode": mode })
 
 
 func poll_queue(ticket: String, secret: String) -> Dictionary:

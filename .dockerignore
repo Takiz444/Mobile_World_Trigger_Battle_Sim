@@ -1,0 +1,6 @@
+.git
+.godot
+**/*.import
+Project Docs
+test
+deploy/.env

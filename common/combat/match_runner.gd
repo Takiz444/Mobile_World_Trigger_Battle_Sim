@@ -5,6 +5,8 @@ extends RefCounted
 ## This is the single source of truth for the "server-authoritative" turn math.
 
 const DEFAULT_SEED := 12345
+## Result code for a drawn match (live matches that hit the turn cap even).
+const DRAW := 2
 
 
 ## Builds a fresh MatchState on the city map (MapData) and places both
@@ -44,6 +46,27 @@ static func winner(ms: MatchState) -> int:
 	if team_all_bailed(ms, 1):
 		return 0
 	return -1
+
+
+## Winner when a live match reaches its turn cap: more units standing, then
+## more remaining Trion (as a share of the squad's total), else DRAW.
+static func tiebreak_winner(ms: MatchState) -> int:
+	var alive := [0, 0]
+	var share := [0.0, 0.0]
+	for team in 2:
+		var hp := 0
+		var max_hp := 0
+		for u in ms.teams[team]:
+			max_hp += u.unit_data.base_trion_hp
+			if not u.is_bailed:
+				alive[team] += 1
+				hp += u.trion_hp
+		share[team] = float(hp) / maxf(1.0, max_hp)
+	if alive[0] != alive[1]:
+		return 0 if alive[0] > alive[1] else 1
+	if absf(share[0] - share[1]) > 0.0001:
+		return 0 if share[0] > share[1] else 1
+	return DRAW
 
 
 static func team_all_bailed(ms: MatchState, team: int) -> bool:

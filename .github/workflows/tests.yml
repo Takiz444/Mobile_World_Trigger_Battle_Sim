@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main, dev, multiplayer]
+  pull_request:
+
+jobs:
+  headless:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GODOT_VERSION: 4.7.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot
+        run: |
+          curl -fsSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+
+      - name: Register classes
+        run: godot --headless --editor --quit --path .
+
+      - name: Rules
+        run: godot --headless --path . res://test/rules_test.tscn
+      - name: Backend
+        run: godot --headless --path . res://test/net_test.tscn
+      - name: Online client
+        run: godot --headless --path . res://test/online_test.tscn
+      - name: Live play
+        run: godot --headless --path . res://test/live_test.tscn
+      - name: Local smoke
+        run: godot --headless --path . res://test/smoke_test.tscn
+
+  server-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build server image
+        run: docker build -f deploy/Dockerfile -t trion-server .

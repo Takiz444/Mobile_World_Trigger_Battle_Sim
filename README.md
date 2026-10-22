@@ -98,8 +98,9 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - Accounts + ranked matchmaking: `POST /account/register`, `GET /account/{id}`,
   `GET /leaderboard`, `POST /queue` (pairs the waiting player closest in
   rating), `GET /queue/{ticket}`, `POST /queue/{ticket}/cancel`. Ranked results
-  update both players' Elo (K=32). The Hangar's **Find Ranked Match** button
-  registers once per server (saved in `user://account.json`) and queues.
+  update both players' hidden Elo rating (K=32). The Hangar's **Live Battle** /
+  **Async Ranked** buttons register once per server (saved in
+  `user://account.json`) and queue.
 - Validates every squad (standard stats, slot rules, Trion budget) and plan
   (only equipped cards, AT budget) before accepting it.
 - Server-authoritative deterministic resolution via `MatchRunner`, with
@@ -110,6 +111,22 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - Matches persist to disk (`TT_DATA_FILE`, default `user://matches.json`) and
   survive restarts; turn timer (default 12h, GDD 3.1) auto-fills missing plans
   with the "Stand Ground + Shield" fallback.
+
+### Live Competitive Play — `common/net/ladder.gd`, `live_hub.gd`, `live_client.gd`
+- **Live Battle** is the main ranked mode: both players online, a server-run
+  turn clock (60 s for turn 1, 40 s after), early resolve when both lock in,
+  and auto-lock of the current plan at the buzzer. Results are pushed over a
+  WebSocket (`TT_LIVE_PORT`, default `TT_PORT + 1`) instead of polled.
+- 8-turn cap with a tiebreak (units standing, then Trion left, else draw);
+  surrender; a player auto-filled 2 turns in a row forfeits (AFK).
+- **Trophies & arenas** on top of the hidden rating: ±20–40 per match, arena
+  floors, season soft reset (`POST /admin/season/reset`, needs `TT_ADMIN_KEY`).
+- Matchmaking pairs by hidden rating with a search window that widens while
+  waiting; live and async queues are separate.
+- Reconnects resync automatically; `POST /account/delete` deletes an account
+  (App Store requirement).
+- Launch plan, App Store checklist, and scaling path:
+  `docs/multiplayer/LAUNCH_PLAN.md`.
 
 ### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
 - Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
@@ -144,8 +161,8 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 **Flow:**
 1. **Hangar** — configure each unit's Trigger Holder, then **Start Match**
-   (local vs AI), **Host Online Match** / **Join** (async multiplayer), or
-   **Find Ranked Match** (matchmaking by rating).
+   (local vs AI), **Host Online Match** / **Join** (friendly match by ID),
+   **Live Battle** (live trophy ladder), or **Async Ranked** (correspondence).
 2. **Battle** — click a tick slot → click a hex to target it → drag cards into
    slots → **Submit All** to watch the animated replay in the combat log.
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
@@ -173,6 +190,17 @@ godot --headless --path . res://server/server.tscn
 #   TT_PORT=9090               change the port (default 8080)
 #   TT_TURN_TIMEOUT_SEC=60     turn timer before auto-fill (default 43200 = 12h)
 #   TT_DATA_FILE=matches.json  where matches are saved (default user://matches.json)
+#   TT_LIVE_PORT=8081          live WebSocket port (default TT_PORT + 1)
+#   TT_PUBLIC_LIVE_URL=wss://play.example.com/live   advertised to clients
+#   TT_ADMIN_KEY=<secret>      enables /admin endpoints (season reset)
+```
+
+**Production:** `deploy/` has a Docker image and a Compose stack with Caddy
+for automatic HTTPS/WSS (required on iOS):
+
+```bash
+cp deploy/.env.example deploy/.env   # set TT_DOMAIN, TT_ADMIN_KEY
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 ```
 
 PowerShell example: `$env:TT_PORT="9090"; godot --headless --path . res://server/server.tscn`
@@ -189,7 +217,10 @@ godot --headless --path . res://test/rules_test.tscn   # combat rules + server v
 godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow
+godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies
 ```
+
+CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.
 
 Each prints `PASS`/`FAIL` and exits non-zero on failure.
 
@@ -204,7 +235,10 @@ once so Godot registers them before running headless tests.
 
 ## Next Up
 
-- Real-time spectating / live replay over Godot RPC (GDD 2.2).
+- Launch blockers and next steps are tracked in `docs/multiplayer/LAUNCH_PLAN.md`
+  (IP licensing, account-deletion UI, Sign in with Apple, Keychain, iOS export).
+- Real-time spectating over the live channel (GDD 2.2).
 - Phase 4 polish: low-poly models, toon shaders, and balancing AT costs,
   Trion weights, and penchant modifiers from playtests.
-- Scale-out: the JSON store suits one server; a database for many.
+- Scale-out: the JSON store suits one server; Postgres + match workers for
+  many (see the launch plan).

@@ -20,7 +20,9 @@ var _join_btn: Button
 var _net_status: Label
 var _name_input: LineEdit
 var _ranked_btn: Button
+var _live_btn: Button
 var _searching := false
+var _search_mode := ""
 
 
 func _ready() -> void:
@@ -168,10 +170,18 @@ func _build_layout() -> void:
 	_name_input.text = str(saved.get("name", ""))
 	ranked_row.add_child(_name_input)
 
+	# Live Battle is the trophy ladder (short turn clock, both players
+	# online); Async Ranked is the correspondence queue (long turn timer).
+	_live_btn = Button.new()
+	_live_btn.text = "Live Battle"
+	_live_btn.custom_minimum_size = Vector2(200, 40)
+	_live_btn.pressed.connect(_on_find_ranked.bind("live"))
+	ranked_row.add_child(_live_btn)
+
 	_ranked_btn = Button.new()
-	_ranked_btn.text = "Find Ranked Match"
+	_ranked_btn.text = "Async Ranked"
 	_ranked_btn.custom_minimum_size = Vector2(200, 40)
-	_ranked_btn.pressed.connect(_on_find_ranked)
+	_ranked_btn.pressed.connect(_on_find_ranked.bind("async"))
 	ranked_row.add_child(_ranked_btn)
 
 	_net_status = Label.new()
@@ -309,12 +319,15 @@ func _on_reset_pressed() -> void:
 
 func _on_start_pressed() -> void:
 	MatchSession.mode = MatchSession.Mode.LOCAL
+	MatchSession.live = false
 	_start_match_scene()
 
 
 func _on_host_online() -> void:
 	_net_status.text = ""
 	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.live = false
+	MatchSession.live_url = ""
 	MatchSession.server_url = _server_input.text.strip_edges()
 	MatchSession.squad = SquadStore.get_squad().duplicate()
 	MatchSession.seed = 12345
@@ -358,16 +371,22 @@ func _on_join_online() -> void:
 	MatchSession.match_id = id
 	MatchSession.team = 1
 	MatchSession.token = str(res["body"].get("token", ""))
+	# The host decides whether a friendly battle runs on the live clock.
+	MatchSession.live = str(res["body"].get("mode", "async")) == "live"
+	MatchSession.live_url = ""
 	_net_status.text = "Joined match %s" % id
 	_start_match_scene()
 
 
-## Ranked matchmaking: registers (once per server), joins the queue, and
-## polls until paired. Pressing the button again cancels the search.
-func _on_find_ranked() -> void:
+## Ranked matchmaking: registers (once per server), joins the `mode` queue
+## ("live" ladder or "async"), and polls until paired. Pressing the button
+## again cancels the search.
+func _on_find_ranked(mode: String) -> void:
 	if _searching:
-		_searching = false
+		if mode == _search_mode:
+			_searching = false
 		return
+	_search_mode = mode
 	_net_status.text = ""
 	var server := _server_input.text.strip_edges()
 	MatchSession.server_url = server
@@ -384,7 +403,7 @@ func _on_find_ranked() -> void:
 		return
 
 	var squad := PlanCodec.encode_squad(MatchSession.squad)
-	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad)
+	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
 	if int(res.get("status", 0)) == 403:
 		# The server no longer knows this account (e.g. a fresh server): re-register.
 		AccountStore.clear_for(server)
@@ -392,24 +411,27 @@ func _on_find_ranked() -> void:
 		if account.is_empty():
 			backend.queue_free()
 			return
-		res = await backend.queue_ranked(account["player_id"], account["secret"], squad)
+		res = await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
 	if not res.get("success", false):
 		_net_status.text = "Matchmaking failed: %s" % str(res.get("error", "?"))
 		backend.queue_free()
 		return
 
 	var profile := await backend.get_account(account["player_id"])
-	var rating := int(profile.get("body", {}).get("rating", 0))
+	var trophies := int(profile.get("body", {}).get("trophies", 0))
+	var arena := str(profile.get("body", {}).get("arena", ""))
+	var button := _live_btn if mode == "live" else _ranked_btn
+	var idle_text := button.text
 	_searching = true
-	_ranked_btn.text = "Cancel Search"
+	button.text = "Cancel Search"
 	var ticket: Dictionary = res["body"]
 	while _searching and str(ticket.get("status", "")) == "queued":
-		_net_status.text = "Searching for an opponent…  (%s · rating %d)" % [account["name"], rating]
+		_net_status.text = "Searching for an opponent…  (%s · %d trophies · %s)" % [account["name"], trophies, arena]
 		await get_tree().create_timer(1.0).timeout
 		var poll := await backend.poll_queue(str(ticket["ticket"]), account["secret"])
 		if poll.get("success", false):
 			ticket = poll["body"]
-	_ranked_btn.text = "Find Ranked Match"
+	button.text = idle_text
 	if str(ticket.get("status", "")) != "matched":
 		_searching = false
 		await backend.cancel_queue(str(ticket.get("ticket", "")), account["secret"])
@@ -419,6 +441,8 @@ func _on_find_ranked() -> void:
 	_searching = false
 	backend.queue_free()
 	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.live = mode == "live"
+	MatchSession.live_url = str(ticket.get("live_url", ""))
 	MatchSession.match_id = str(ticket["match_id"])
 	MatchSession.team = int(ticket["team"])
 	MatchSession.token = str(ticket["token"])
