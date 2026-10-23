@@ -42,8 +42,9 @@ func _run() -> void:
 
 	_check(_controller._ms.all_units().size() == 8, "8 units placed on board")
 	_check(not _controller._overlay.visible, "overlay hidden at match start")
-	_check(_controller._ms.cover.size() > 0, "cover generated on board")
+	_check(_controller._ms.buildings.size() > 0, "city map buildings placed on board")
 	_controller._update_targeting()
+	await _check_physics_matches_rules()
 
 	for turn in range(3):
 		if _controller._overlay.visible:
@@ -57,6 +58,35 @@ func _run() -> void:
 
 	print("SMOKE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
+
+
+## The rendered city's physics solids and the engine's line-of-sight rules
+## must agree: fire real physics rays between random street positions (eye
+## height to body height) and compare with Visibility.has_los.
+func _check_physics_matches_rules() -> void:
+	for _i in 3:
+		await get_tree().physics_frame
+	var ms := _controller._ms
+	var space := _board.get_world_3d().direct_space_state
+	var streets: Array = ms.tiles.keys().filter(func(h: Vector2i) -> bool: return not ms.buildings.has(h))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 11
+	var tested := 0
+	var agree := 0
+	for _i in 800:
+		var a: Vector2i = streets[rng.randi_range(0, streets.size() - 1)]
+		var b: Vector2i = streets[rng.randi_range(0, streets.size() - 1)]
+		if a == b or HexCoord.distance(a, b) > 12:
+			continue
+		var pa := HexCoord.axial_to_world(a, _board.hex_size)
+		var pb := HexCoord.axial_to_world(b, _board.hex_size)
+		pa.y = HexCoord.GROUND_Y + Visibility.EYE_HEIGHT * HexCoord.FLOOR_HEIGHT
+		pb.y = HexCoord.GROUND_Y + Visibility.BODY_HEIGHT * HexCoord.FLOOR_HEIGHT
+		var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(pa, pb, CityBuildings.COLLISION_LAYER))
+		tested += 1
+		if hit.is_empty() == Visibility.has_los(ms, a, 0, b, 0):
+			agree += 1
+	_check(tested > 100 and agree == tested, "3D physics raycasts agree with the sight rules (%d/%d)" % [agree, tested])
 
 
 func _check(cond: bool, label: String) -> void:

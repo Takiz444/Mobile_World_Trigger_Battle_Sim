@@ -5,75 +5,32 @@ extends RefCounted
 ## This is the single source of truth for the "server-authoritative" turn math.
 
 const DEFAULT_SEED := 12345
+## Result code for a drawn match (live matches that hit the turn cap even).
+const DRAW := 2
 
 
-## Builds a fresh MatchState and places two squads on the standard starting
-## positions. Player (team 0) along the -Z edge, enemy (team 1) along +Z.
+## Builds a fresh MatchState on the city map (MapData) and places both
+## squads on their spawn hexes facing the map center. Team 0 starts on the
+## bottom half, team 1 on the top half.
 static func build_match(
 	player_data: Array[UnitData],
 	enemy_data: Array[UnitData],
 	seed: int = DEFAULT_SEED
 ) -> MatchState:
 	var ms := MatchState.new(seed)
-	var p0: Array[UnitState] = []
-	var p1: Array[UnitState] = []
-	for i in player_data.size():
-		p0.append(UnitState.new(player_data[i], 0, Vector2i(-3 + i * 2, -2), 5))
-	for i in enemy_data.size():
-		p1.append(UnitState.new(enemy_data[i], 1, Vector2i(-3 + i * 2, 2), 2))
-	ms.setup_team(0, p0)
-	ms.setup_team(1, p1)
-	_generate_buildings(ms)
-	_generate_cover(ms)
+	var map := MapData.city()
+	ms.tiles = map.tiles
+	ms.buildings = map.buildings
+	ms.cover = map.cover
+	var squads := [player_data, enemy_data]
+	for team in 2:
+		var states: Array[UnitState] = []
+		var data: Array = squads[team]
+		for i in data.size():
+			var hex: Vector2i = map.spawns[team][i % map.spawns[team].size()]
+			states.append(UnitState.new(data[i], team, hex, map.facing_toward_center(hex)))
+		ms.setup_team(team, states)
 	return ms
-
-
-## Scatters deterministic 1..4-floor buildings across the mid-field band,
-## avoiding unit spawn hexes. Buildings drive the engine's elevation rules.
-static func _generate_buildings(ms: MatchState) -> void:
-	var rng := ms.rng
-	var occupied := {}
-	for u in ms.all_units():
-		occupied[u.hex] = true
-	var candidates: Array[Vector2i] = []
-	for hex in HexCoord.spiral(Vector2i.ZERO, 5):
-		if hex.y < -1 or hex.y > 1:
-			continue
-		if occupied.has(hex):
-			continue
-		candidates.append(hex)
-	_shuffle(candidates, rng)
-	for i in mini(6, candidates.size()):
-		ms.buildings[candidates[i]] = rng.randi_range(1, 4)
-
-
-## Generates deterministic cover in the mid-field band between the two squads.
-## Cover hexes drive the engine's line-of-sight blocking and damage mitigation.
-static func _generate_cover(ms: MatchState) -> void:
-	var rng := ms.rng
-	var occupied := {}
-	for u in ms.all_units():
-		occupied[u.hex] = true
-	var candidates: Array[Vector2i] = []
-	for hex in HexCoord.spiral(Vector2i.ZERO, 5):
-		if hex.y < -1 or hex.y > 1:
-			continue
-		if occupied.has(hex):
-			continue
-		if ms.buildings.has(hex):
-			continue
-		candidates.append(hex)
-	_shuffle(candidates, rng)
-	for i in mini(8, candidates.size()):
-		ms.cover[candidates[i]] = 2 if rng.randf() < 0.4 else 1
-
-
-static func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
-	for i in range(arr.size() - 1, 0, -1):
-		var j := rng.randi_range(0, i)
-		var tmp: Variant = arr[i]
-		arr[i] = arr[j]
-		arr[j] = tmp
 
 
 ## Resolves a full 6-tick turn deterministically.
@@ -89,6 +46,27 @@ static func winner(ms: MatchState) -> int:
 	if team_all_bailed(ms, 1):
 		return 0
 	return -1
+
+
+## Winner when a live match reaches its turn cap: more units standing, then
+## more remaining Trion (as a share of the squad's total), else DRAW.
+static func tiebreak_winner(ms: MatchState) -> int:
+	var alive := [0, 0]
+	var share := [0.0, 0.0]
+	for team in 2:
+		var hp := 0
+		var max_hp := 0
+		for u in ms.teams[team]:
+			max_hp += u.unit_data.base_trion_hp
+			if not u.is_bailed:
+				alive[team] += 1
+				hp += u.trion_hp
+		share[team] = float(hp) / maxf(1.0, max_hp)
+	if alive[0] != alive[1]:
+		return 0 if alive[0] > alive[1] else 1
+	if absf(share[0] - share[1]) > 0.0001:
+		return 0 if share[0] > share[1] else 1
+	return DRAW
 
 
 static func team_all_bailed(ms: MatchState, team: int) -> bool:

@@ -7,6 +7,7 @@ var teams: Array = []            # teams[team] -> Array[UnitState]
 var wires: Dictionary = {}       # Vector2i -> true
 var cover: Dictionary = {}       # Vector2i -> int (0 none, 1 half, 2 full)
 var buildings: Dictionary = {}   # Vector2i -> int floors (1..4)
+var tiles: Dictionary = {}       # Vector2i -> true (board extent; empty = unbounded)
 var rng: RandomNumberGenerator
 
 
@@ -51,6 +52,47 @@ func get_unit_at_any_floor(hex: Vector2i, team: int = -1) -> UnitState:
 	return null
 
 
+## Building geometry (BuildingRects) used for 3D line of sight, cached and
+## rebuilt whenever the set of building hexes changes size (or after
+## invalidate_buildings()).
+var _rects: Array = []
+var _rect_of: Dictionary = {}   # building hex -> index into _rects
+var _rects_for_size := -1
+
+
+func building_rects() -> Array:
+	_ensure_rects()
+	return _rects
+
+
+## Index (into building_rects()) of the building segment covering `hex`, or -1.
+func building_rect_index(hex: Vector2i) -> int:
+	_ensure_rects()
+	return int(_rect_of.get(hex, -1))
+
+
+## Call after changing building heights in place (same set of hexes).
+func invalidate_buildings() -> void:
+	_rects_for_size = -1
+
+
+func _ensure_rects() -> void:
+	if _rects_for_size == buildings.size():
+		return
+	_rects = BuildingRects.compute(buildings)
+	_rect_of.clear()
+	for i in _rects.size():
+		for hex in _rects[i]["hexes"]:
+			_rect_of[hex] = i
+	_rects_for_size = buildings.size()
+
+
+## Whether `hex` is on the board. An empty tile set means "no bounds" (used
+## by small unit-test boards).
+func has_tile(hex: Vector2i) -> bool:
+	return tiles.is_empty() or tiles.has(hex)
+
+
 ## Number of elevated floors of the building at `hex` (0 = no building).
 func building_floors(hex: Vector2i) -> int:
 	return int(buildings.get(hex, 0))
@@ -59,6 +101,8 @@ func building_floors(hex: Vector2i) -> int:
 ## Whether a unit may stand at `floor` of `hex`. Floor 0 (ground) is only
 ## legal on open hexes; floors > 0 require a building tall enough.
 func floor_legal(hex: Vector2i, floor: int) -> bool:
+	if not has_tile(hex):
+		return false
 	if floor == 0:
 		return building_floors(hex) == 0
 	return building_floors(hex) >= floor

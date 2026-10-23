@@ -15,6 +15,8 @@ func _ready() -> void:
 
 func _run() -> void:
 	var server := MatchServer.new()
+	server.persist = false
+	server.port = 18080
 	add_child(server)
 	await get_tree().create_timer(0.5).timeout
 
@@ -22,10 +24,10 @@ func _run() -> void:
 	var squad1 := TriggerLibrary.sample_units()
 
 	var b0 := HttpBackend.new()
-	b0.server_url = "http://127.0.0.1:8080"
+	b0.server_url = "http://127.0.0.1:18080"
 	add_child(b0)
 	var b1 := HttpBackend.new()
-	b1.server_url = "http://127.0.0.1:8080"
+	b1.server_url = "http://127.0.0.1:18080"
 	add_child(b1)
 
 	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
@@ -35,7 +37,8 @@ func _run() -> void:
 	MatchSession.mode = MatchSession.Mode.ONLINE
 	MatchSession.match_id = match_id
 	MatchSession.team = 0
-	MatchSession.server_url = "http://127.0.0.1:8080"
+	MatchSession.token = str(created["body"].get("token", ""))
+	MatchSession.server_url = "http://127.0.0.1:18080"
 	MatchSession.squad = squad0
 
 	var layer := CanvasLayer.new()
@@ -64,9 +67,22 @@ func _run() -> void:
 
 	# Opponent pre-submits; our submit then triggers server resolution.
 	var plan1 := _shield_plan(squad1)
-	await b1.submit_plan(match_id, 1, PlanCodec.encode_plan(plan1))
+	var token1 := str(joined["body"].get("token", ""))
+	await b1.submit_plan(match_id, token1, 1, PlanCodec.encode_plan(plan1))
 	await controller._on_plan_submitted()
 	_check(controller._turn == 2, "online turn advanced after resolution")
+
+	# Client's own units must match the server's authoritative view.
+	var info := await b0.get_match(match_id, str(created["body"].get("token", "")))
+	var units: Array = info["body"].get("view", {}).get("units", [])
+	var synced := units.size() == 8
+	for i in 4:
+		if not synced:
+			break
+		var u: UnitState = controller._ms.teams[0][i]
+		var hex: Array = units[i].get("hex", [])
+		synced = hex.size() == 2 and Vector2i(int(hex[0]), int(hex[1])) == u.hex
+	_check(synced, "client units match server view after replay")
 
 	print("ONLINE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)

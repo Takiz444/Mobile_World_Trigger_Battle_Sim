@@ -104,7 +104,11 @@ func _drop_data(_at_position: Vector2, data: Variant) -> void:
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
-		if event.button_index == MOUSE_BUTTON_LEFT:
+		# Double-tap clears on touch screens (no right button there).
+		if event.button_index == MOUSE_BUTTON_LEFT and event.double_click and card != null:
+			clear_requested.emit(self)
+			accept_event()
+		elif event.button_index == MOUSE_BUTTON_LEFT:
 			selected.emit(self)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if card != null:

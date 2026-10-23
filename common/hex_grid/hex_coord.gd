@@ -8,14 +8,19 @@ extends RefCounted
 ## simplify distance, line-drawing, and rounding operations.
 ##
 ## World-space conversion maps the hex board onto the XZ plane (y = 0) to
-## support the 3D low-poly "hologram tabletop" diorama. Layout is pointy-top.
+## support the 3D low-poly "hologram tabletop" diorama. Layout is flat-top
+## (hexes stacked in columns), matching the reference map sheet.
 
 const SQRT3 := 1.7320508075688772
 
 ## World-space height of one building floor (used for unit elevation).
 const FLOOR_HEIGHT := 1.0
+## World-space Y of the top face of a board tile (tiles are centered on y=0).
+## Units, props, and buildings stand on this surface.
+const GROUND_Y := 0.175
 
-## Cube-space neighbor directions, indexed 0..5 (E, SE, SW, W, NW, NE).
+## Cube-space neighbor directions, indexed 0..5. With the flat-top layout
+## (+Z = south / toward team 0): SE, NE, N, NW, SW, S.
 const CUBE_DIRECTIONS: Array[Vector3i] = [
 	Vector3i(1, -1, 0),
 	Vector3i(1, 0, -1),
@@ -27,12 +32,12 @@ const CUBE_DIRECTIONS: Array[Vector3i] = [
 
 ## Axial neighbor directions, indexed identically to CUBE_DIRECTIONS.
 const AXIAL_DIRECTIONS: Array[Vector2i] = [
-	Vector2i(1, 0),    # E
-	Vector2i(1, -1),   # SE
-	Vector2i(0, -1),   # SW
-	Vector2i(-1, 0),   # W
-	Vector2i(-1, 1),   # NW
-	Vector2i(0, 1),    # NE
+	Vector2i(1, 0),    # SE
+	Vector2i(1, -1),   # NE
+	Vector2i(0, -1),   # N
+	Vector2i(-1, 0),   # NW
+	Vector2i(-1, 1),   # SW
+	Vector2i(0, 1),    # S
 ]
 
 
@@ -139,17 +144,18 @@ static func line(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
 
 # --- World-Space Mapping ----------------------------------------------------
 
-## Converts axial coordinates to a 3D world position on the XZ plane.
+## Converts axial coordinates to a 3D world position on the XZ plane
+## (flat-top: q steps 1.5 sizes right, r steps one hex height down).
 static func axial_to_world(hex: Vector2i, size: float) -> Vector3:
-	var x := size * (SQRT3 * hex.x + SQRT3 * 0.5 * hex.y)
-	var z := size * (1.5 * hex.y)
+	var x := size * (1.5 * hex.x)
+	var z := size * (SQRT3 * 0.5 * hex.x + SQRT3 * hex.y)
 	return Vector3(x, 0.0, z)
 
 
 ## Converts a 3D world position (XZ plane) to the nearest axial hex.
 static func world_to_axial(pos: Vector3, size: float) -> Vector2i:
-	var q := (SQRT3 / 3.0 * pos.x - 1.0 / 3.0 * pos.z) / size
-	var r := (2.0 / 3.0 * pos.z) / size
+	var q := (2.0 / 3.0 * pos.x) / size
+	var r := (-1.0 / 3.0 * pos.x + SQRT3 / 3.0 * pos.z) / size
 	return cube_to_axial(cube_round(Vector3(q, -q - r, r)))
 
 

@@ -12,8 +12,20 @@ config_version=5
 
 config/name="Mobile_WorldTrigger_turnbased_game"
 run/main_scene="res://ui/hangar/hangar.tscn"
-config/features=PackedStringArray("4.6", "Forward Plus")
+config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=4
+
+[input_devices]
+
+pointing/emulate_mouse_from_touch=true
 
 [physics]
 

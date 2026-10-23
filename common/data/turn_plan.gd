@@ -44,13 +44,12 @@ func get_card(unit: int, tick: int, slot: int) -> TriggerCard:
 	return ta.sub_card if slot == SUB_SLOT else ta.main_card
 
 
-## Sets the target/destination hex (and optional floor) for a tick's action
-## (used for movement destinations and attack targets during resolution).
-func set_target(unit: int, tick: int, target_hex: Vector2i, target_floor: int = 0) -> void:
+## Sets the target/destination hex (and optional floor) for one slot of a
+## tick (movement destinations and attack targets). Main and Sub aim
+## independently.
+func set_target(unit: int, tick: int, target_hex: Vector2i, target_floor: int = 0, slot: int = MAIN_SLOT) -> void:
 	var ta := _ticks[unit][tick] as TickAction
-	ta.target_hex = target_hex
-	ta.target_floor = target_floor
-	ta.has_target = true
+	ta.set_slot_target(slot, target_hex, target_floor)
 
 
 # --- Assignment -------------------------------------------------------------
@@ -114,11 +113,20 @@ func get_at_pool(unit: int) -> int:
 	return pool
 
 
+## Bagworm is a maintained toggle (GDD 5.2: 1 AT maintenance per turn): only
+## the first Bagworm placement of the turn is charged.
 func get_at_spent(unit: int) -> int:
 	var total := 0
+	var bagworm_paid := false
 	var row: Array = _ticks[unit]
 	for ta in row:
-		total += _tick_cost(ta as TickAction)
+		var tick_action := ta as TickAction
+		total += _tick_cost(tick_action)
+		for card in [tick_action.main_card, tick_action.sub_card]:
+			if card != null and card.card_type == TriggerCard.CardType.STEALTH and not tick_action.is_full_guard():
+				if bagworm_paid:
+					total -= card.action_at_cost
+				bagworm_paid = true
 	return total
 
 
@@ -159,9 +167,9 @@ func is_all_valid() -> bool:
 func get_available_actions(unit: int) -> Array[TriggerCard]:
 	var result: Array[TriggerCard] = []
 	var seen := {}
-	var move := TriggerLibrary.get_move_card()
-	result.append(move)
-	seen[move.card_name] = true
+	for basic in [TriggerLibrary.get_move_card(), TriggerLibrary.get_look_card()]:
+		result.append(basic)
+		seen[basic.card_name] = true
 
 	var u := units[unit]
 	for card in u.main_trigger_slots:

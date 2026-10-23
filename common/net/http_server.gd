@@ -84,6 +84,14 @@ func _try_parse(buf: PackedByteArray) -> Variant:
 		var parsed: Variant = JSON.parse_string(body_text)
 		if parsed is Dictionary:
 			body = parsed
+	# Query-string parameters (e.g. GET /match/<id>?token=...) are merged into
+	# the body so handlers read them the same way.
+	var q := path.find("?")
+	if q != -1:
+		for pair in path.substr(q + 1).split("&", false):
+			var kv := pair.split("=", true, 1)
+			body[kv[0].uri_decode()] = kv[1].uri_decode() if kv.size() > 1 else ""
+		path = path.substr(0, q)
 	return { "method": method, "path": path, "body": body }
 
 
@@ -105,8 +113,12 @@ func _reason(status: int) -> String:
 			return "Created"
 		400:
 			return "Bad Request"
+		403:
+			return "Forbidden"
 		404:
 			return "Not Found"
+		409:
+			return "Conflict"
 		500:
 			return "Internal Server Error"
 		_:
