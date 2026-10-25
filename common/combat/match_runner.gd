@@ -33,7 +33,7 @@ static func build_match(
 	return ms
 
 
-## Resolves a full 6-tick turn deterministically.
+## Resolves a full 3-tick turn deterministically.
 static func resolve_turn(ms: MatchState, plan0: TurnPlan, plan1: TurnPlan) -> Array[CombatEvent]:
 	var engine := TickEngine.new()
 	return engine.resolve(ms, plan0, plan1)

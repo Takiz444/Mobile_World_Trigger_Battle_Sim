@@ -2,11 +2,11 @@ class_name TurnPlan
 extends RefCounted
 ## Planning-phase data model for one turn (GDD section 5).
 ##
-## Holds per-unit 6-tick timelines and owns the Action Token economy:
+## Holds per-unit 3-tick timelines and owns the Action Token economy:
 ## Dual-Slot Mental Load (+1 AT), Full Guard (flat 4 AT), and the
 ## Kogetsu/Scorpion melee Penchant (+2 base AT pool).
 
-const TICKS_PER_TURN := 6
+const TICKS_PER_TURN := 3
 const MAIN_SLOT := 0
 const SUB_SLOT := 1
 const MENTAL_LOAD_COST := 1

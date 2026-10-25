@@ -201,7 +201,7 @@ func _test_bagworm_toggle() -> void:
 	var p0 := _plan(ms, 0)
 	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Bagworm"))
 	var engine := TickEngine.new()
-	for t in 4:
+	for t in TurnPlan.TICKS_PER_TURN:
 		engine.resolve_tick(ms, p0, _plan(ms, 1), t)
 	_check(ms.teams[0][0].stealth_active, "Bagworm stays on for the rest of the turn")
 	engine.resolve_tick(ms, _plan(ms, 0), _plan(ms, 1), 0)
@@ -401,13 +401,17 @@ func _test_crossfire_assist() -> void:
 	_fire(ms, "Asteroid", target)
 	_check(ms.teams[1][0].trion_hp == 80, "Crossfire Assist: ally with the target in its arc fires too (hp %d)" % ms.teams[1][0].trion_hp)
 
-	# Same setup, but the ally has spent all its AT: no follow-up.
+	# Same setup, but the ally has spent all its AT: no follow-up. Across a
+	# 3-tick turn the Shooter spends its full 8 AT: Full Guard on tick 0 (4 AT)
+	# plus Shield on ticks 1 and 2 (2 AT each).
 	ms = _match(specs)
 	var p0 := _plan(ms, 0)
 	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
 	p0.set_target(0, 0, target)
-	for t in range(1, 5):
-		p0.assign(1, t, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
+	p0.assign(1, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
+	p0.assign(1, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Shield"))
+	p0.assign(1, 1, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
+	p0.assign(1, 2, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
 	var engine := TickEngine.new()
 	engine.always_hit = true
 	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
@@ -611,10 +615,12 @@ func _test_plan_validation() -> void:
 	res = PlanCodec.decode_plan_checked(cheat, units)
 	_check(str(res["error"]) != "", "rejects card the unit has not equipped")
 
-	# 6 x Kogetsu (3 AT each) blows the 10 AT penchant pool.
+	# Kogetsu (3 AT) + Raygust (2 AT) in every tick, plus 1 AT Mental Load
+	# per dual tick = 6 AT/tick: 18 AT blows the 10 AT penchant pool.
 	var overrun := PlanCodec.encode_plan(TurnPlan.new(units))
 	for t in TurnPlan.TICKS_PER_TURN:
 		overrun["units"][0][t]["main"] = "Kogetsu"
+		overrun["units"][0][t]["sub"] = "Raygust"
 	res = PlanCodec.decode_plan_checked(overrun, units)
 	_check(str(res["error"]) != "", "rejects AT overrun")
 

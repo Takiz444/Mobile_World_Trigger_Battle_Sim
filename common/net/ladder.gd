@@ -38,7 +38,7 @@ const TROPHY_GAP_STEP := 12
 
 const LIVE_FIRST_TURN_SEC := 60      # extra time to read the board on turn 1
 const LIVE_TURN_SEC := 40
-const LIVE_REPLAY_SEC := 6           # clients animate the 6-tick replay
+const LIVE_REPLAY_SEC := 3           # clients animate the 3-tick replay
 const LIVE_LOAD_GRACE_SEC := 15      # both clients load the battle scene
 const LIVE_MAX_TURNS := 8
 ## A live player auto-filled this many turns in a row forfeits (AFK).

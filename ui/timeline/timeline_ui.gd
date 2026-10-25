@@ -1,8 +1,8 @@
 class_name TimelineUI
 extends Control
-## 6-tick timeline ribbon + card hand + AT economy UI (GDD section 7).
+## 3-tick timeline ribbon + card hand + AT economy UI (GDD section 7).
 ##
-## Top bar: unit quick-select tabs. Bottom panel: 6 tick columns (Main/Sub),
+## Top bar: unit quick-select tabs. Bottom panel: 3 tick columns (Main/Sub),
 ## draggable action-card hand, AT meter, and the Submit All button.
 ## The middle of the screen passes mouse input through to the 3D board.
 

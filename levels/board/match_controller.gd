@@ -436,7 +436,7 @@ func _animate_frame(snapshots: Dictionary, events: Array) -> void:
 			_units_view.flash_hit(target)
 
 
-## Local mode: resolves + animates a full 6-tick turn and returns the winner
+## Local mode: resolves + animates a full 3-tick turn and returns the winner
 ## (-1 if none). The engine sees everything, but the board and the combat log
 ## only show what the player's team can see (fog of war).
 func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:

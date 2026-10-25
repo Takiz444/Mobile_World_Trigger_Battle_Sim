@@ -1,12 +1,12 @@
 class_name TickAction
 extends RefCounted
-## A single unit's planned action bundle for one tick (1..6) on the timeline.
+## A single unit's planned action bundle for one tick (1..3) on the timeline.
 ##
 ## main_card and sub_card together model the Dual-Slot system (section 5.3):
 ## concurrent Main + Sub actions incur a Mental Load penalty, and a double
 ## Shield assignment represents Full Guard.
 
-var tick_index: int = 0          # 1..6
+var tick_index: int = 0          # 1..3
 var main_card: TriggerCard
 var sub_card: TriggerCard
 # Main-slot target.

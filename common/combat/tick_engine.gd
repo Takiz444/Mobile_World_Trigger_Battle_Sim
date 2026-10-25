@@ -1,6 +1,6 @@
 class_name TickEngine
 extends RefCounted
-## Deterministic 6-tick resolution engine (GDD section 8.2).
+## Deterministic 3-tick resolution engine (GDD section 8.2).
 ##
 ## Sub-phase priority per tick:
 ##   1. State & Priority  — Bagworm (stealth) toggles
