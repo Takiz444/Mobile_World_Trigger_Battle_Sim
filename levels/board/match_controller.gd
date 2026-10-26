@@ -15,6 +15,8 @@ const MOVE_DURATION := 0.35
 const TICK_PAUSE := 0.25
 const POLL_INTERVAL := 1.0
 const MATCH_SEED := 12345
+## World distance between adjacent hex centres (flat-top layout).
+const HEX_SPACING := 1.7320508075688772
 ## Where hidden enemies are parked in the client's MatchState (online mode),
 ## so occupancy checks can't leak their real position.
 const OFFBOARD := Vector2i(100000, 100000)
@@ -475,7 +477,7 @@ func _animate_frame(snapshots: Dictionary, events: Array) -> void:
 			var to: Variant = ev.get("to")
 			var actor: UnitState = by_name.get(str(ev.get("actor", "")))
 			if from != null and to != null and actor != null:
-				_fx.play_attack(int(ev.get("card_type", -1)), Vector2i(int(from[0]), int(from[1])), Vector2i(int(to[0]), int(to[1])), actor.floor)
+				_fx.play_attack(int(ev.get("card_type", -1)), Vector2i(int(from[0]), int(from[1])), Vector2i(int(to[0]), int(to[1])), actor.floor, bool(ev.get("curved", false)))
 			continue
 		if phase != CombatEvent.Phase.RESOLUTION or int(ev.get("damage", 0)) <= 0:
 			continue
@@ -606,7 +608,7 @@ func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> 
 	_animate_moves(snapshots)
 	for ev in events:
 		if ev.phase == CombatEvent.Phase.ATTACK and ev.has_line and ev.actor != null:
-			_fx.play_attack(ev.card_type, ev.from_hex, ev.to_hex, ev.actor.floor)
+			_fx.play_attack(ev.card_type, ev.from_hex, ev.to_hex, ev.actor.floor, ev.curved)
 		elif ev.phase == CombatEvent.Phase.RESOLUTION and ev.damage > 0 and ev.target != null:
 			_fx.play_impact(ev.target.hex, ev.target.floor)
 			if ev.target.is_bailed:
@@ -769,6 +771,8 @@ func _compute_preview(info: Dictionary) -> Dictionary:
 	var base: Array[Vector2i] = []
 	var choice: Array[Vector2i] = []
 	var path: Array[Vector2i] = []
+	var points: Array[Vector3] = []
+	var hexes: Array[Vector2i] = []
 	var unit_index: int = info.get("unit", -1)
 	var card: TriggerCard = info.get("card")
 	var tick: int = info.get("tick", -1)
@@ -788,16 +792,77 @@ func _compute_preview(info: Dictionary) -> Dictionary:
 						if _board.has_tile(h):
 							base.append(h)
 			elif card.card_type == TriggerCard.CardType.RANGED:
-				# Projectiles show no filled area: the FX layer draws the bullet
-				# line and marks each hex it crosses (see _shot_path).
-				path = _shot_path(origin, info, card)
+				# Projectiles show no filled area: the FX layer draws the shot line
+				# and marks each hex it crosses (see _shot_geometry).
+				var shot := _shot_geometry(origin, _projected_floor(unit_index, tick), info, card)
+				if not shot.is_empty():
+					points = shot["points"]
+					hexes = shot["hexes"]
 			elif card.card_name == "Spider":
 				for hex in HexCoord.spiral(origin, 3):
 					if _board.has_tile(hex):
 						choice.append(hex)
 			elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
 				base.append(origin)
-	return { "origin": origin, "base": base, "choice": choice, "path": path }
+	return { "origin": origin, "base": base, "choice": choice, "path": path, "points": points, "hexes": hexes }
+
+
+## Shot geometry for the preview: world points to draw the line through and the
+## hexes it crosses. Curved shots (Viper/Hound) follow hex centres; straight
+## shots fly a true straight line toward the aimed hex (or to max range along
+## the unit's facing).
+func _shot_geometry(origin: Vector2i, floor: int, info: Dictionary, card: TriggerCard) -> Dictionary:
+	var points: Array[Vector3] = []
+	var hexes: Array[Vector2i] = []
+	if card.curved:
+		var line := _shot_path(origin, info, card)
+		hexes = line.duplicate()
+		points.append(_board.hex_to_world_at(origin, floor))
+		for h in line:
+			points.append(_board.hex_to_world_at(h, floor))
+		return { "points": points, "hexes": hexes }
+
+	var a := _board.hex_to_world_at(origin, floor)
+	var reach := float(card.attack_range) * HEX_SPACING * _board.hex_size
+	var target := _target_hex_for(info)
+	if target == HexBoard.INVALID_HEX:
+		target = _hovered_hex
+	var b: Vector3
+	if target != HexBoard.INVALID_HEX and target != origin:
+		var tpos := _board.hex_to_world_at(target, floor)
+		var d := tpos - a
+		d.y = 0.0
+		if d.length() < 0.001:
+			return {}
+		b = a + d.normalized() * minf(d.length(), reach)
+	else:
+		var facing := _preview_attack_dir(info, origin)
+		if facing == -1:
+			return {}
+		var fwd := HexCoord.axial_to_world(HexCoord.AXIAL_DIRECTIONS[facing], 1.0)
+		fwd.y = 0.0
+		b = a + fwd.normalized() * reach
+	points.append(a)
+	points.append(b)
+	for h in _hexes_crossed(a, b):
+		if h != origin and _board.has_tile(h):
+			hexes.append(h)
+	return { "points": points, "hexes": hexes }
+
+
+## Hexes a straight segment passes over, in order (sampled and deduplicated).
+func _hexes_crossed(a: Vector3, b: Vector3) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	var dist := a.distance_to(b)
+	var steps := maxi(1, int(ceil(dist / (_board.hex_size * 0.2))))
+	var last := Vector2i(-999999, -999999)
+	for i in steps + 1:
+		var p := a.lerp(b, float(i) / float(steps))
+		var h := HexCoord.world_to_axial(p, _board.hex_size)
+		if h != last:
+			out.append(h)
+			last = h
+	return out
 
 
 ## Hexes a projectile crosses on its way to the aimed hex: the hex line from
@@ -860,14 +925,18 @@ func _update_fx_preview(info: Dictionary, pv: Dictionary) -> void:
 	if card.card_type == TriggerCard.CardType.MELEE:
 		_fx.show_slash_preview(origin, floor, _preview_attack_dir(info, origin))
 	elif card.card_type == TriggerCard.CardType.RANGED:
-		var path: Array[Vector2i] = []
-		var raw: Variant = pv.get("path", null)
-		if raw is Array:
-			path.assign(raw)
-		if path.is_empty():
+		var pts: Array[Vector3] = []
+		var hs: Array[Vector2i] = []
+		var raw_points: Variant = pv.get("points", null)
+		if raw_points is Array:
+			pts.assign(raw_points)
+		var raw_hexes: Variant = pv.get("hexes", null)
+		if raw_hexes is Array:
+			hs.assign(raw_hexes)
+		if pts.size() < 2:
 			_fx.clear_preview()
 		else:
-			_fx.show_line_preview(path, floor)
+			_fx.show_shot_preview(pts, hs, floor)
 	else:
 		_fx.clear_preview()
 

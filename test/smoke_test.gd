@@ -88,6 +88,20 @@ func _check_preview() -> void:
 		"ranged preview draws a bullet line")
 	_check(_controller._fx._preview_hexes.size() >= 3, "bullet line marks each hex it crosses")
 
+	# Straight shots (Asteroid) fly one true straight line to the aimed hex.
+	var aim := HexCoord.neighbor(HexCoord.neighbor(u.hex, u.facing), posmod(u.facing + 1, 6))
+	if _board.has_tile(aim):
+		_controller._hovered_hex = aim
+		_controller._update_targeting()
+		_check(_controller._fx._preview_points.size() == 2, "straight shot is one straight line (2 points)")
+		_check(_controller._fx._preview_hexes.has(aim), "straight shot marks the aimed hex")
+		var p0: Vector3 = _controller._fx._preview_points[0]
+		var p1: Vector3 = _controller._fx._preview_points[1]
+		var aim_world := _board.hex_to_world_at(aim, u.floor)
+		_check(absf(p0.distance_to(p1) - p0.distance_to(aim_world)) < 0.01,
+			"straight line ends exactly at the aimed hex centre (no hex snapping)")
+		_controller._hovered_hex = HexBoard.INVALID_HEX
+
 	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
 	_controller._update_targeting()
 	_check(_board._effect_hexes.size() > 0, "move preview shows reachable hexes (orange)")

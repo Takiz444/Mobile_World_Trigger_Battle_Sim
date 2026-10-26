@@ -32,6 +32,7 @@ var _preview_time := 0.0
 var _preview_mat: StandardMaterial3D = null
 var _preview_base_yaw := 0.0
 var _preview_hexes: Array[Vector2i] = []
+var _preview_points: Array[Vector3] = []
 var _preview_floor := 0
 var _preview_pulse: Node3D = null
 var _preview_dots: Array[Node3D] = []
@@ -51,26 +52,20 @@ func _process(delta: float) -> void:
 			_preview_mat.albedo_color.a = 0.22 + 0.16 * (0.5 + 0.5 * sin(_preview_time * 4.2))
 		_preview.rotation.y = _preview_base_yaw + deg_to_rad(13.0) * sin(_preview_time * 2.6)
 	elif _preview_kind == "line":
-		var n := _preview_hexes.size()
-		if n == 0:
+		if _preview_points.size() < 2:
 			return
-		var segs := maxi(1, n - 1)
-		var t := fmod(_preview_time * 1.1, 1.0)
-		var f := t * float(segs)
-		var i := clampi(int(floor(f)), 0, segs - 1)
-		var frac := f - float(i)
-		var a := _hex_pos(_preview_hexes[i], _preview_floor)
-		var b := _hex_pos(_preview_hexes[mini(i + 1, n - 1)], _preview_floor)
+		var t := fmod(_preview_time * 1.0, 1.0)
 		if _preview_pulse != null:
-			_preview_pulse.position = a.lerp(b, frac)
+			_preview_pulse.position = _poly_point(t)
 		# Hex markers light up as the pulse passes over them.
-		for k in _preview_dots.size():
+		var n := _preview_dots.size()
+		for k in n:
 			var mat := _preview_dots[k].get_meta(&"mat", null) as StandardMaterial3D
 			if mat == null:
 				continue
-			var at := float(k) / float(segs)
-			var lit := maxf(0.0, 1.0 - absf(at - t) * 3.5)
-			mat.albedo_color.a = 0.2 + 0.6 * lit
+			var at := float(k) / float(maxi(1, n - 1))
+			var lit := maxf(0.0, 1.0 - absf(at - t) * 3.0)
+			mat.albedo_color.a = 0.18 + 0.6 * lit
 
 
 # --- One-shot animations ----------------------------------------------------
@@ -102,18 +97,14 @@ func play_slash(hex: Vector2i, floor: int, facing: int) -> void:
 	tw.finished.connect(root.queue_free)
 
 
-## Bullet flying along a hex path (each hex the line crosses), leaving fading
-## beam segments and bursting on the final hex.
-func play_bullet_path(path: Array[Vector2i], floor: int) -> void:
-	if path.is_empty():
+## One-shot projectile animation along a polyline of world points. Straight
+## shots pass two points; curved shots follow hex centres. Bursts on the end.
+func play_shot(points: Array[Vector3], floor: int) -> void:
+	if points.size() < 2:
 		return
-	if path.size() == 1:
-		play_impact(path[0], floor)
-		return
-
 	var beams: Array[MeshInstance3D] = []
-	for i in range(1, path.size()):
-		beams.append(_make_beam(_hex_pos(path[i - 1], floor), _hex_pos(path[i], floor), 0.4))
+	for i in range(1, points.size()):
+		beams.append(_make_beam(points[i - 1], points[i], 0.4))
 
 	# Bullet head.
 	var dot := MeshInstance3D.new()
@@ -122,19 +113,18 @@ func play_bullet_path(path: Array[Vector2i], floor: int) -> void:
 	orb.height = hex_size * 0.3
 	dot.mesh = orb
 	dot.material_override = _additive(BULLET_COLOR, 1.0)
-	dot.position = _hex_pos(path[0], floor)
+	dot.position = points[0]
 	add_child(dot)
 
 	var tw := create_tween()
 	var total := 0.0
-	for i in range(1, path.size()):
-		var a := _hex_pos(path[i - 1], floor)
-		var b := _hex_pos(path[i], floor)
-		var d := maxf(0.03, a.distance_to(b) / (BULLET_SPEED_HEX * hex_size))
+	for i in range(1, points.size()):
+		var d := maxf(0.04, points[i - 1].distance_to(points[i]) / (BULLET_SPEED_HEX * hex_size))
 		total += d
-		tw.tween_property(dot, "position", b, d).set_ease(Tween.EASE_IN)
+		tw.tween_property(dot, "position", points[i], d).set_ease(Tween.EASE_IN)
+	var impact_hex := HexCoord.world_to_axial(points[points.size() - 1], hex_size)
 	tw.tween_callback(func() -> void:
-		play_impact(path[path.size() - 1], floor)
+		play_impact(impact_hex, floor)
 		dot.queue_free())
 
 	# Beams fade out behind the bullet.
@@ -199,12 +189,18 @@ func play_shield(hex: Vector2i, floor: int) -> void:
 
 
 ## Plays the right one-shot attack animation for a card type.
-func play_attack(card_type: int, from_hex: Vector2i, to_hex: Vector2i, floor: int) -> void:
+func play_attack(card_type: int, from_hex: Vector2i, to_hex: Vector2i, floor: int, curved: bool = false) -> void:
 	if card_type == TriggerCard.CardType.MELEE:
 		var facing := TickEngine.attack_direction(from_hex, to_hex)
 		play_slash(from_hex, floor, facing if facing != -1 else 0)
 	elif card_type == TriggerCard.CardType.RANGED:
-		play_bullet_path(HexCoord.line(from_hex, to_hex), floor)
+		var pts: Array[Vector3] = []
+		if curved:
+			for h in HexCoord.line(from_hex, to_hex):
+				pts.append(_hex_pos(h, floor))
+		else:
+			pts = [_hex_pos(from_hex, floor), _hex_pos(to_hex, floor)]
+		play_shot(pts, floor)
 
 
 # --- Looping planning preview ----------------------------------------------
@@ -232,33 +228,34 @@ func show_slash_preview(origin: Vector2i, floor: int, facing: int) -> void:
 	add_child(_preview)
 
 
-## Animated bullet line along a hex path: a thin beam through the crossed
-## hexes, a ring marker on each hex the line touches, and a travelling pulse.
-## (No filled tiles — the path itself is the preview.)
-func show_line_preview(path: Array[Vector2i], floor: int) -> void:
-	if path.is_empty():
+## Animated projectile preview along a polyline of world points, with a ring
+## marker on each hex the shot crosses. Straight shots pass two points;
+## curved shots follow the hex centres.
+func show_shot_preview(points: Array[Vector3], hexes: Array[Vector2i], floor: int) -> void:
+	if points.size() < 2:
 		clear_preview()
 		return
-	var key := "line:%d:" % floor
-	for h in path:
-		key += "%d,%d;" % [h.x, h.y]
+	var key := "shot:%d:" % floor
+	for p in points:
+		key += "%.2f,%.2f;" % [p.x, p.z]
 	if _preview != null and _preview_key == key:
 		return
 	_clear_preview_nodes()
 	_preview_key = key
 	_preview_kind = "line"
 	_preview_time = 0.0
-	_preview_hexes = path.duplicate()
+	_preview_points = points.duplicate()
+	_preview_hexes = hexes.duplicate()
 	_preview_floor = floor
 	_preview = Node3D.new()
 	add_child(_preview)
 
-	# Beam segments between consecutive hex centres.
-	for i in range(1, path.size()):
-		_preview.add_child(_make_beam(_hex_pos(path[i - 1], floor), _hex_pos(path[i], floor), 0.3))
+	# One straight beam for straight shots; a segment per hex for curved ones.
+	for i in range(1, points.size()):
+		_preview.add_child(_make_beam(points[i - 1], points[i], 0.3))
 
 	# A flat ring on every hex the line crosses (replaces the old tile fill).
-	for h in path:
+	for h in hexes:
 		var ring := MeshInstance3D.new()
 		var torus := TorusMesh.new()
 		torus.inner_radius = hex_size * 0.42
@@ -266,7 +263,7 @@ func show_line_preview(path: Array[Vector2i], floor: int) -> void:
 		torus.rings = 6
 		torus.ring_segments = 6
 		ring.mesh = torus
-		var m := _additive(Color(BULLET_COLOR, 1.0), 0.3)
+		var m := _additive(Color(BULLET_COLOR, 1.0), 0.25)
 		ring.material_override = m
 		ring.set_meta(&"mat", m)
 		ring.rotation_degrees.x = 90.0
@@ -274,14 +271,14 @@ func show_line_preview(path: Array[Vector2i], floor: int) -> void:
 		_preview.add_child(ring)
 		_preview_dots.append(ring)
 
-	# Travelling pulse that loops from the unit to the end of the path.
+	# Travelling pulse that loops from the unit to the end of the shot.
 	_preview_pulse = MeshInstance3D.new()
 	var orb := SphereMesh.new()
 	orb.radius = hex_size * 0.12
 	orb.height = hex_size * 0.24
 	(_preview_pulse as MeshInstance3D).mesh = orb
 	(_preview_pulse as MeshInstance3D).material_override = _additive(Color(BULLET_COLOR, 1.0), 1.0)
-	_preview_pulse.position = _hex_pos(path[0], floor)
+	_preview_pulse.position = points[0]
 	_preview.add_child(_preview_pulse)
 
 
@@ -298,7 +295,21 @@ func _clear_preview_nodes() -> void:
 	_preview_mat = null
 	_preview_pulse = null
 	_preview_hexes.clear()
+	_preview_points.clear()
 	_preview_dots.clear()
+
+
+## Point at parameter t (0..1) along the preview polyline.
+func _poly_point(t: float) -> Vector3:
+	var n := _preview_points.size()
+	if n == 0:
+		return Vector3.ZERO
+	if n == 1:
+		return _preview_points[0]
+	var segs := n - 1
+	var f := clampf(t, 0.0, 1.0) * float(segs)
+	var i := clampi(int(floor(f)), 0, segs - 1)
+	return _preview_points[i].lerp(_preview_points[i + 1], f - float(i))
 
 
 ## Thin additive cylinder stretched between two world points (a beam).

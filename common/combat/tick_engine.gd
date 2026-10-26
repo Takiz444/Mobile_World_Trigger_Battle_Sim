@@ -468,13 +468,13 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 		var roll := ms.rng.randf()
 		if roll > _hit_chance(ms, target, card):
 			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s misses %s" % [attacker.display_name(), target.display_name()], attacker, target) \
-				.with_attack(card.card_type, attacker.hex, target.hex))
+				.with_attack(card.card_type, attacker.hex, target.hex, card.curved))
 			return target
 
 	if card.effect == "weight":
 		pending.append({ "target": target, "damage": 0, "effect": "weight" })
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s tags %s with Lead Bullet" % [attacker.display_name(), target.display_name()], attacker, target) \
-			.with_attack(card.card_type, attacker.hex, target.hex))
+			.with_attack(card.card_type, attacker.hex, target.hex, card.curved))
 		return target
 
 	# Damage + mitigation (applied later in the Resolution phase).
@@ -486,7 +486,7 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 	var damage := maxi(0, roundi(raw - mitigation))
 	pending.append({ "target": target, "damage": damage, "effect": "" })
 	events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s hits %s with %s for %d (mitigated %.1f)" % [attacker.display_name(), target.display_name(), card.card_name, damage, mitigation], attacker, target, damage) \
-		.with_attack(card.card_type, attacker.hex, target.hex))
+		.with_attack(card.card_type, attacker.hex, target.hex, card.curved))
 	return target
 
 

@@ -295,6 +295,7 @@ static func encode_events(events: Array[CombatEvent]) -> Array:
 			"target": ev.target.display_name() if ev.target != null else null,
 			"damage": ev.damage,
 			"card_type": ev.card_type,
+			"curved": ev.curved,
 			"from": [ev.from_hex.x, ev.from_hex.y] if ev.has_line else null,
 			"to": [ev.to_hex.x, ev.to_hex.y] if ev.has_line else null,
 		})
