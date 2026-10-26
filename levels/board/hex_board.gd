@@ -11,6 +11,7 @@ const INVALID_HEX := Vector2i(-2147483648, -2147483648)
 
 signal tile_hovered(hex: Vector2i)
 signal tile_selected(hex: Vector2i)
+signal tile_edge_selected(hex: Vector2i, direction: int)
 
 @export var board_radius: int = 5
 @export var hex_size: float = 1.0
@@ -85,6 +86,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif _pressed:
 			_pressed = false
 			if event.position.distance_to(_press_pos) > TAP_SLOP_PX:
+				return
+			# A click near a hex's side sets the selected slot's facing; a
+			# click on the inner area selects the tile itself.
+			var edge := mouse_edge_direction()
+			if edge != -1:
+				var edge_hex := _mouse_to_hex()
+				if _tiles.has(edge_hex):
+					tile_edge_selected.emit(edge_hex, edge)
 				return
 			var hex := _mouse_to_hex()
 			if _tiles.has(hex):
@@ -618,9 +627,17 @@ func _make_prop_material(level: int) -> StandardMaterial3D:
 # --- Mouse Picking ----------------------------------------------------------
 
 func _mouse_to_hex() -> Vector2i:
+	var pick := _mouse_pick()
+	return pick.get("hex", INVALID_HEX) if not pick.is_empty() else INVALID_HEX
+
+
+## Raw mouse raycast against the board. Returns
+## { "hex": Vector2i, "position": Vector3 } or an empty Dictionary when the
+## pointer is not over a tile.
+func _mouse_pick() -> Dictionary:
 	var cam := get_viewport().get_camera_3d()
 	if cam == null:
-		return INVALID_HEX
+		return {}
 	var mouse_pos := get_viewport().get_mouse_position()
 	var origin := cam.project_ray_origin(mouse_pos)
 	var normal := cam.project_ray_normal(mouse_pos)
@@ -629,9 +646,37 @@ func _mouse_to_hex() -> Vector2i:
 	query.collision_mask = 1
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
 	if result.is_empty():
-		return INVALID_HEX
+		return {}
 
 	var collider: Object = result["collider"]
 	if collider == null or not collider.has_meta(&"hex_q"):
-		return INVALID_HEX
-	return Vector2i(int(collider.get_meta(&"hex_q")), int(collider.get_meta(&"hex_r")))
+		return {}
+	return {
+		"hex": Vector2i(int(collider.get_meta(&"hex_q")), int(collider.get_meta(&"hex_r"))),
+		"position": result["position"],
+	}
+
+
+## Which hex edge (direction 0..5) the pointer is over, or -1 for the inner
+## area / no tile. Used to pick facing: clicking near a hex's side sets the
+## selected slot's facing instead of selecting the tile itself.
+func mouse_edge_direction() -> int:
+	var pick := _mouse_pick()
+	if pick.is_empty():
+		return -1
+	var hex: Vector2i = pick["hex"]
+	var center := hex_to_world(hex)
+	var v := Vector2(float(pick["position"].x) - center.x, float(pick["position"].z) - center.z)
+	if v.length() < hex_size * 0.45:
+		return -1
+	var best := -1
+	var best_dot := -2.0
+	for d in 6:
+		var dir_hex: Vector2i = HexCoord.AXIAL_DIRECTIONS[d]
+		var w := HexCoord.axial_to_world(dir_hex, hex_size)
+		var wv := Vector2(w.x, w.z).normalized()
+		var dot := v.normalized().dot(wv)
+		if dot > best_dot:
+			best_dot = dot
+			best = d
+	return best

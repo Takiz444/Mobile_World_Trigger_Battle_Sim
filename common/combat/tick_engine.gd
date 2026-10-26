@@ -149,18 +149,18 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 			intents.append([u, _cell(to_hex, to_floor), card])
 	_resolve_moves(ms, intents, tick, events)
 
-	# Look (stance shift): turn to face a hex. Resolves after movement so a
-	# unit can move and then keep watching a chosen direction.
+	# Facing override: each slot may pick a hex edge to face (replaces the old
+	# free "Look" card). Resolves after movement so a unit can move and then
+	# keep watching a chosen direction; Main resolves before Sub.
 	for row in _iter_active(ms, plans, tick):
 		var u: UnitState = row[2]
 		var ta: TickAction = row[3]
 		for slot in [TickAction.MAIN, TickAction.SUB]:
-			var card := ta.slot_card(slot)
-			if card != null and card.card_name == "Look" and ta.slot_has_target(slot):
-				var dir := attack_direction(u.hex, ta.slot_target(slot))
-				if dir != -1 and dir != u.facing:
+			if ta.slot_has_facing(slot):
+				var dir := ta.slot_facing(slot)
+				if dir != u.facing:
 					u.facing = dir
-					events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s turns to watch %s" % [u.display_name(), str(ta.slot_target(slot))], u))
+					events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s turns to face edge %d" % [u.display_name(), dir], u))
 
 
 ## Wires belong to the deploying team (Wire Mobility Penchant applies to it).

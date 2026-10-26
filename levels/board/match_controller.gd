@@ -80,6 +80,7 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_build_overlay(ui_layer)
 
 	_board.tile_selected.connect(_on_tile_selected)
+	_board.tile_edge_selected.connect(_on_tile_edge_selected)
 	_board.tile_hovered.connect(_on_tile_hovered)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
 	_timeline.unit_selected.connect(_on_unit_selected)
@@ -217,6 +218,12 @@ func _setup_online() -> void:
 
 func _on_tile_selected(hex: Vector2i) -> void:
 	_timeline.set_target_for_selected_slot(hex, _target_floor_for_click(hex))
+
+
+## A hex edge was clicked: set the selected slot's facing override (the
+## direction the unit should look after that slot's action).
+func _on_tile_edge_selected(_hex: Vector2i, direction: int) -> void:
+	_timeline.set_facing_for_selected_slot(direction)
 
 
 ## Picks the destination floor for a clicked hex. Movement cards may climb or
@@ -578,8 +585,7 @@ func _update_targeting() -> void:
 
 
 ## Shows the selected character's vision cones where it will be (and which
-## way it will face) at the selected tick. With a Look card selected, the
-## cone follows the hovered hex to preview the new facing.
+## way it will face) at the selected tick.
 func _update_vision(info: Dictionary) -> void:
 	if _resolving or _player_states.is_empty():
 		_units_view.clear_vision()
@@ -592,12 +598,6 @@ func _update_vision(info: Dictionary) -> void:
 	var hex := _projected_hex(idx, tick)
 	var floor := _projected_floor(idx, tick)
 	var facing := _projected_facing(idx, tick)
-	var card: TriggerCard = info.get("card")
-	if card != null and card.card_name == "Look" and _target_hex_for(info) == HexBoard.INVALID_HEX \
-			and _hovered_hex != HexBoard.INVALID_HEX:
-		var dir := TickEngine.attack_direction(hex, _hovered_hex)
-		if dir != -1:
-			facing = dir
 	# Standing inside a building: vision only leaves through its outer wall.
 	var own_rect: Dictionary = {}
 	if floor < _ms.building_floors(hex):
@@ -608,7 +608,8 @@ func _update_vision(info: Dictionary) -> void:
 
 
 ## Facing after ticks 0..through_tick of the plan: moves face their step,
-## Look faces its target, attacks turn toward their target (engine rules).
+## per-slot facing overrides turn to the chosen edge, and attacks turn toward
+## their target (mirrors the engine's phase order).
 func _projected_facing(unit_index: int, through_tick: int) -> int:
 	var u: UnitState = _player_states[unit_index]
 	var facing := u.facing
@@ -621,11 +622,16 @@ func _projected_facing(unit_index: int, through_tick: int) -> int:
 			var dir := TickEngine.attack_direction(hex, moved_to)
 			if dir != -1:
 				facing = dir
+		# Facing override (Main then Sub) — mirrors the engine's movement phase.
+		for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
+			if ta.slot_has_facing(slot):
+				facing = ta.slot_facing(slot)
+		# Attacks turn toward their target (engine attack phase).
 		for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
 			var card := ta.slot_card(slot)
 			if card == null or not ta.slot_has_target(slot) or TickEngine.is_move_card(card):
 				continue
-			if card.card_name == "Look" or card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED:
+			if card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED:
 				var dir := TickEngine.attack_direction(moved_to, ta.slot_target(slot))
 				if dir != -1:
 					facing = dir
@@ -1205,27 +1211,29 @@ func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
 				continue
 
 		# Advance on a seen enemy, else on the nearest radar contact, while
-		# keeping eyes on it (Look is free and fits the Sub slot).
+		# keeping eyes on it (a facing override on the Sub slot is free).
 		var goal := target if target != null else _pick_target(pos, seen, false)
 		if goal != null and move_card != null and floor == 0 and HexCoord.distance(pos, goal.hex) > 1:
 			var step := _next_step(pos, goal.hex)
 			if step != pos and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, move_card):
 				_enemy_plan.set_target(i, tick, step)
 				pos = step
-				_watch(i, tick, goal.hex)
+				_watch(i, tick, pos, goal.hex)
 				continue
 
 		# Fallback: raise shield (more AT lets later ticks do other things).
 		if shield != null:
 			_enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, shield)
 		if goal != null:
-			_watch(i, tick, goal.hex)
+			_watch(i, tick, pos, goal.hex)
 
 
-## Free Look toward `hex` in the Sub slot (keeps the AI's vision on threats).
-func _watch(i: int, tick: int, hex: Vector2i) -> void:
-	if _enemy_plan.assign(i, tick, TurnPlan.SUB_SLOT, TriggerLibrary.get_look_card()):
-		_enemy_plan.set_target(i, tick, hex, 0, TurnPlan.SUB_SLOT)
+## Faces the AI unit toward `to` from `from` via a free facing override on the
+## Sub slot (replaces the old free "Look" card).
+func _watch(i: int, tick: int, from: Vector2i, to: Vector2i) -> void:
+	var dir := TickEngine.attack_direction(from, to)
+	if dir != -1:
+		_enemy_plan.set_facing(i, tick, TurnPlan.SUB_SLOT, dir)
 
 
 ## Assigns Main+Sub shield in one tick (Full Guard, 4 AT) if affordable.

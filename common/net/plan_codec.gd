@@ -80,6 +80,8 @@ static func encode_plan(plan: TurnPlan) -> Dictionary:
 				"target_floor": ta.target_floor,
 				"sub_target": [ta.sub_target_hex.x, ta.sub_target_hex.y] if ta.sub_has_target else null,
 				"sub_target_floor": ta.sub_target_floor,
+				"facing": ta.main_facing,
+				"sub_facing": ta.sub_facing,
 			})
 		units.append(ticks)
 	return { "units": units }
@@ -107,6 +109,9 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 				var target: Variant = tdata.get(prefix + "target")
 				if target != null:
 					plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get(prefix + "target_floor", 0)), slot)
+				var facing: Variant = tdata.get(prefix + "facing", TickAction.NO_FACING)
+				if facing != null and int(facing) >= 0:
+					plan.set_facing(u, t, slot, int(facing))
 	return plan
 
 
@@ -215,6 +220,14 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictio
 				if not _is_number(target_floor) or int(target_floor) < 0:
 					return { "plan": null, "error": "unit %d tick %d: malformed target floor" % [u, t] }
 				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor), slot)
+			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
+				var prefix := "sub_" if slot == TurnPlan.SUB_SLOT else ""
+				var facing: Variant = tdata.get(prefix + "facing", TickAction.NO_FACING)
+				if facing == null or int(facing) == TickAction.NO_FACING:
+					continue
+				if not _is_number(facing) or int(facing) < 0 or int(facing) > 5:
+					return { "plan": null, "error": "unit %d tick %d: malformed facing" % [u, t] }
+				plan.set_facing(u, t, slot, int(facing))
 	return { "plan": plan, "error": "" }
 
 

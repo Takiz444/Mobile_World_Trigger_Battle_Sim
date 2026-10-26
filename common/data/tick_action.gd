@@ -18,6 +18,12 @@ var sub_target_hex: Vector2i
 var sub_target_floor: int = 0
 var sub_has_target: bool = false
 
+## Optional per-slot facing override (0..5 hex edge). Replaces the old free
+## "Look" card: a slot may pick a direction to face without spending AT.
+const NO_FACING := -1
+var main_facing: int = NO_FACING
+var sub_facing: int = NO_FACING
+
 const MAIN := 0
 const SUB := 1
 
@@ -47,6 +53,28 @@ func set_slot_target(slot: int, hex: Vector2i, floor: int = 0) -> void:
 		target_hex = hex
 		target_floor = floor
 		has_target = true
+
+
+func slot_facing(slot: int) -> int:
+	return sub_facing if slot == SUB else main_facing
+
+
+func slot_has_facing(slot: int) -> bool:
+	return slot_facing(slot) != NO_FACING
+
+
+func set_slot_facing(slot: int, facing: int) -> void:
+	if slot == SUB:
+		sub_facing = posmod(facing, 6)
+	else:
+		main_facing = posmod(facing, 6)
+
+
+func clear_slot_facing(slot: int) -> void:
+	if slot == SUB:
+		sub_facing = NO_FACING
+	else:
+		main_facing = NO_FACING
 
 
 ## Both slots used by real actions (free actions like Look add no Mental Load).

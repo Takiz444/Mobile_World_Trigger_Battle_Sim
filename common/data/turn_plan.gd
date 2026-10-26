@@ -52,6 +52,30 @@ func set_target(unit: int, tick: int, target_hex: Vector2i, target_floor: int = 
 	ta.set_slot_target(slot, target_hex, target_floor)
 
 
+## Sets the facing override (0..5 hex edge) for one slot of a tick. This
+## replaces the old free "Look" card: a slot can choose which way to face
+## without spending AT or a card slot.
+func set_facing(unit: int, tick: int, slot: int, facing: int) -> void:
+	var ta := _ticks[unit][tick] as TickAction
+	ta.set_slot_facing(slot, facing)
+
+
+func clear_facing(unit: int, tick: int, slot: int) -> bool:
+	var ta := _ticks[unit][tick] as TickAction
+	if not ta.slot_has_facing(slot):
+		return false
+	ta.clear_slot_facing(slot)
+	return true
+
+
+func slot_facing(unit: int, tick: int, slot: int) -> int:
+	return (_ticks[unit][tick] as TickAction).slot_facing(slot)
+
+
+func slot_has_facing(unit: int, tick: int, slot: int) -> bool:
+	return (_ticks[unit][tick] as TickAction).slot_has_facing(slot)
+
+
 # --- Assignment -------------------------------------------------------------
 
 ## Validates a card placement against slot restrictions and the AT budget.
@@ -167,9 +191,9 @@ func is_all_valid() -> bool:
 func get_available_actions(unit: int) -> Array[TriggerCard]:
 	var result: Array[TriggerCard] = []
 	var seen := {}
-	for basic in [TriggerLibrary.get_move_card(), TriggerLibrary.get_look_card()]:
-		result.append(basic)
-		seen[basic.card_name] = true
+	var move := TriggerLibrary.get_move_card()
+	result.append(move)
+	seen[move.card_name] = true
 
 	var u := units[unit]
 	for card in u.main_trigger_slots:

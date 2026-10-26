@@ -185,6 +185,10 @@ func _test_split_targets() -> void:
 	var ta := round_trip.get_tick(0, 0)
 	_check(ta.slot_target(TurnPlan.SUB_SLOT) == Vector2i(0, 3) and ta.slot_target(TurnPlan.MAIN_SLOT) == Vector2i(-1, 0),
 		"per-slot targets survive JSON encoding")
+	p0.set_facing(0, 0, TurnPlan.SUB_SLOT, 2)
+	var rt2 := PlanCodec.decode_plan(PlanCodec.encode_plan(p0), p0.units).get_tick(0, 0)
+	_check(rt2.slot_facing(TurnPlan.SUB_SLOT) == 2 and not rt2.slot_has_facing(TurnPlan.MAIN_SLOT),
+		"per-slot facing overrides survive JSON encoding")
 
 
 func _test_bagworm_cost() -> void:
@@ -472,16 +476,15 @@ func _test_interior_vision() -> void:
 func _test_look_and_attack_facing() -> void:
 	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 4), 0]])
 	var plan := _plan(ms, 0)
-	var look := TriggerLibrary.get_look_card()
 	var ok_move := plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
 	plan.set_target(0, 0, Vector2i(1, 0))
-	var ok_look := plan.assign(0, 0, TurnPlan.SUB_SLOT, look)
-	plan.set_target(0, 0, Vector2i(-3, 0), 0, TurnPlan.SUB_SLOT)
-	_check(ok_move and ok_look and plan.get_at_spent(0) == 1, "Look is free and adds no Mental Load")
+	# Facing override on the Sub slot (no card needed) replaces the old Look.
+	plan.set_facing(0, 0, TurnPlan.SUB_SLOT, TickEngine.attack_direction(Vector2i(1, 0), Vector2i(-3, 0)))
+	_check(ok_move and plan.get_at_spent(0) == 1, "facing override is free and adds no AT")
 	TickEngine.new().resolve_tick(ms, plan, _plan(ms, 1), 0)
 	var u: UnitState = ms.teams[0][0]
 	_check(u.hex == Vector2i(1, 0) and u.facing == TickEngine.attack_direction(Vector2i(1, 0), Vector2i(-3, 0)),
-		"move, then Look turns to watch the chosen hex")
+		"move, then facing override turns to watch the chosen edge")
 
 	ms = _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
 	_fire(ms, "Asteroid", Vector2i(0, 3))

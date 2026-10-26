@@ -173,6 +173,10 @@ func _refresh_timeline_cards() -> void:
 				s.set_target(ta.slot_target(slot), ta.slot_target_floor(slot))
 			else:
 				s.clear_target()
+			if ta.slot_has_facing(slot):
+				s.set_facing(ta.slot_facing(slot))
+			else:
+				s.clear_facing()
 			s.set_selected(s == _selected_slot)
 
 
@@ -218,6 +222,16 @@ func set_target_for_selected_slot(hex: Vector2i, floor: int = 0) -> void:
 	if _selected_slot == null:
 		return
 	_plan.set_target(_selected_slot.unit_index, _selected_slot.tick_index, hex, floor, _selected_slot.slot_id)
+	_refresh_timeline_cards()
+	targeting_changed.emit()
+
+
+## Sets the facing override (0..5 hex edge) for the currently selected slot.
+## Works even on empty slots — it replaces the old free "Look" card.
+func set_facing_for_selected_slot(facing: int) -> void:
+	if _selected_slot == null:
+		return
+	_plan.set_facing(_selected_slot.unit_index, _selected_slot.tick_index, _selected_slot.slot_id, facing)
 	_refresh_timeline_cards()
 	targeting_changed.emit()
 
@@ -288,7 +302,9 @@ func _on_slot_dropped(slot: TimelineSlot, data: Dictionary) -> void:
 
 
 func _on_slot_clear(slot: TimelineSlot) -> void:
-	if _plan.clear(slot.unit_index, slot.tick_index, slot.slot_id):
+	var cleared := _plan.clear(slot.unit_index, slot.tick_index, slot.slot_id)
+	cleared = _plan.clear_facing(slot.unit_index, slot.tick_index, slot.slot_id) or cleared
+	if cleared:
 		_refresh_timeline_cards()
 		_refresh_at()
 		targeting_changed.emit()

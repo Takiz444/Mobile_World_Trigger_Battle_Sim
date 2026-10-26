@@ -16,6 +16,10 @@ var is_selected: bool = false
 var target_hex: Vector2i = Vector2i.ZERO
 var target_floor: int = 0
 var has_target: bool = false
+var facing: int = -1   # 0..5 hex edge, -1 = none
+
+## Compact compass glyphs for the 6 hex edges (SE, NE, N, NW, SW, S).
+const FACING_GLYPHS: Array[String] = ["↘", "↗", "↑", "↖", "↙", "↓"]
 
 var _label: Label
 
@@ -54,6 +58,16 @@ func clear_target() -> void:
 	refresh()
 
 
+func set_facing(f: int) -> void:
+	facing = f
+	refresh()
+
+
+func clear_facing() -> void:
+	facing = -1
+	refresh()
+
+
 func set_selected(sel: bool) -> void:
 	is_selected = sel
 	refresh()
@@ -68,6 +82,8 @@ func refresh() -> void:
 				_label.text += "·f%d" % target_floor
 	else:
 		_label.text = "--"
+	if facing >= 0 and facing < FACING_GLYPHS.size():
+		_label.text += "  %s" % FACING_GLYPHS[facing]
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.14, 0.2, 0.3, 0.95) if slot_id == 0 else Color(0.11, 0.15, 0.23, 0.95)
 	if is_selected:
@@ -105,12 +121,12 @@ func _drop_data(_at_position: Vector2, data: Variant) -> void:
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		# Double-tap clears on touch screens (no right button there).
-		if event.button_index == MOUSE_BUTTON_LEFT and event.double_click and card != null:
+		if event.button_index == MOUSE_BUTTON_LEFT and event.double_click and (card != null or facing >= 0):
 			clear_requested.emit(self)
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			selected.emit(self)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			if card != null:
+			if card != null or facing >= 0:
 				clear_requested.emit(self)
 				accept_event()

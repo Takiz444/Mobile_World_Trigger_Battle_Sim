@@ -11,7 +11,6 @@ const STANDARD_RATING := 5
 const STANDARD_TRION_CAPACITY := 100
 
 static var _move_card: TriggerCard
-static var _look_card: TriggerCard
 
 
 static func get_move_card() -> TriggerCard:
@@ -25,20 +24,6 @@ static func get_move_card() -> TriggerCard:
 		_move_card = c
 	return _move_card
 
-
-## Free "Look" action: turn to face a hex (sets the vision cone and shield
-## arc). Always in the hand, costs no AT, usable in either slot.
-static func get_look_card() -> TriggerCard:
-	if _look_card == null:
-		var c := TriggerCard.new()
-		c.card_name = "Look"
-		c.action_at_cost = 0
-		c.trion_equip_cost = 0
-		c.is_dual_slot_compatible = true
-		c.card_type = TriggerCard.CardType.UTILITY
-		c.free_action = true
-		_look_card = c
-	return _look_card
 
 
 static func make_card(card_name: String, at_cost: int, trion_cost: int, type: int, dual_slot: bool, power: int = 0) -> TriggerCard:
@@ -87,8 +72,6 @@ static func _traits(c: TriggerCard, props: Dictionary) -> TriggerCard:
 static func get_card(card_name: String) -> TriggerCard:
 	if card_name == "Move":
 		return get_move_card()
-	if card_name == "Look":
-		return get_look_card()
 	var c: TriggerCard = sample_cards().get(card_name)
 	return c
 
