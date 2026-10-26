@@ -83,16 +83,27 @@ func _check_preview() -> void:
 
 	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
 	_controller._update_targeting()
-	_check(_board._highlighted.size() >= 3, "ranged preview shows a trajectory line (yellow)")
-	_check(_controller._fx._preview != null and _controller._fx._preview_kind == "path",
-		"ranged preview animates a bullet path")
+	_check(_board._highlighted.is_empty(), "ranged preview fills no tiles")
+	_check(_controller._fx._preview != null and _controller._fx._preview_kind == "line",
+		"ranged preview draws a bullet line")
+	_check(_controller._fx._preview_hexes.size() >= 3, "bullet line marks each hex it crosses")
 
 	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
 	_controller._update_targeting()
 	_check(_board._effect_hexes.size() > 0, "move preview shows reachable hexes (orange)")
 	_check(_controller._fx._preview == null, "move preview has no attack animation")
 
+	# Empty slot: clicking a hex sets the look direction (no edge clicking).
 	plan.clear(0, 0, TurnPlan.MAIN_SLOT)
+	_timeline._on_slot_selected(slot)
+	_controller._update_targeting()
+	var ahead := HexCoord.neighbor(u.hex, u.facing)
+	_controller._on_tile_selected(ahead)
+	_check(plan.slot_has_facing(0, 0, TurnPlan.MAIN_SLOT),
+		"empty slot: clicking a hex sets a look direction")
+	_check(plan.slot_facing(0, 0, TurnPlan.MAIN_SLOT) == u.facing,
+		"look direction points at the clicked hex")
+	plan.clear_facing(0, 0, TurnPlan.MAIN_SLOT)
 	_controller._update_targeting()
 
 

@@ -31,8 +31,8 @@ var _preview_key := ""
 var _preview_time := 0.0
 var _preview_mat: StandardMaterial3D = null
 var _preview_base_yaw := 0.0
-var _preview_a := Vector3.ZERO
-var _preview_b := Vector3.ZERO
+var _preview_hexes: Array[Vector2i] = []
+var _preview_floor := 0
 var _preview_pulse: Node3D = null
 var _preview_dots: Array[Node3D] = []
 
@@ -50,20 +50,27 @@ func _process(delta: float) -> void:
 		if _preview_mat != null:
 			_preview_mat.albedo_color.a = 0.22 + 0.16 * (0.5 + 0.5 * sin(_preview_time * 4.2))
 		_preview.rotation.y = _preview_base_yaw + deg_to_rad(13.0) * sin(_preview_time * 2.6)
-	elif _preview_kind == "path":
-		var t := fmod(_preview_time * 1.5, 1.0)
+	elif _preview_kind == "line":
+		var n := _preview_hexes.size()
+		if n == 0:
+			return
+		var segs := maxi(1, n - 1)
+		var t := fmod(_preview_time * 1.1, 1.0)
+		var f := t * float(segs)
+		var i := clampi(int(floor(f)), 0, segs - 1)
+		var frac := f - float(i)
+		var a := _hex_pos(_preview_hexes[i], _preview_floor)
+		var b := _hex_pos(_preview_hexes[mini(i + 1, n - 1)], _preview_floor)
 		if _preview_pulse != null:
-			_preview_pulse.position = _preview_a.lerp(_preview_b, t)
-			_preview_pulse.visible = true
-		# Dots light up as the pulse passes them.
-		for i in _preview_dots.size():
-			var node := _preview_dots[i]
-			var mat := node.get_meta(&"mat", null) as StandardMaterial3D
+			_preview_pulse.position = a.lerp(b, frac)
+		# Hex markers light up as the pulse passes over them.
+		for k in _preview_dots.size():
+			var mat := _preview_dots[k].get_meta(&"mat", null) as StandardMaterial3D
 			if mat == null:
 				continue
-			var phase := fmod(_preview_time * 1.5 + float(i) * 0.12, 1.0)
-			var glow := 0.25 + 0.55 * maxf(0.0, 1.0 - absf(phase - 0.5) * 2.0)
-			mat.albedo_color.a = glow
+			var at := float(k) / float(segs)
+			var lit := maxf(0.0, 1.0 - absf(at - t) * 3.5)
+			mat.albedo_color.a = 0.2 + 0.6 * lit
 
 
 # --- One-shot animations ----------------------------------------------------
@@ -95,27 +102,18 @@ func play_slash(hex: Vector2i, floor: int, facing: int) -> void:
 	tw.finished.connect(root.queue_free)
 
 
-## Bullet travelling from `from_hex` to `to_hex` along a fading beam.
-func play_bullet_path(from_hex: Vector2i, to_hex: Vector2i, floor: int) -> void:
-	var a := _hex_pos(from_hex, floor)
-	var b := _hex_pos(to_hex, floor)
-	if a.distance_to(b) < 0.001:
-		play_impact(to_hex, floor)
+## Bullet flying along a hex path (each hex the line crosses), leaving fading
+## beam segments and bursting on the final hex.
+func play_bullet_path(path: Array[Vector2i], floor: int) -> void:
+	if path.is_empty():
+		return
+	if path.size() == 1:
+		play_impact(path[0], floor)
 		return
 
-	# Beam: a thin cylinder stretched along the trajectory, fading out.
-	var beam_mat := _additive(BULLET_COLOR, 0.42)
-	var beam := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius = hex_size * 0.045
-	cyl.bottom_radius = hex_size * 0.045
-	cyl.height = a.distance_to(b)
-	cyl.radial_segments = 6
-	beam.mesh = cyl
-	beam.material_override = beam_mat
-	beam.look_at_from_position((a + b) * 0.5, b, Vector3.UP)
-	beam.rotate_object_local(Vector3.RIGHT, -PI * 0.5)
-	add_child(beam)
+	var beams: Array[MeshInstance3D] = []
+	for i in range(1, path.size()):
+		beams.append(_make_beam(_hex_pos(path[i - 1], floor), _hex_pos(path[i], floor), 0.4))
 
 	# Bullet head.
 	var dot := MeshInstance3D.new()
@@ -124,17 +122,30 @@ func play_bullet_path(from_hex: Vector2i, to_hex: Vector2i, floor: int) -> void:
 	orb.height = hex_size * 0.3
 	dot.mesh = orb
 	dot.material_override = _additive(BULLET_COLOR, 1.0)
-	dot.position = a
+	dot.position = _hex_pos(path[0], floor)
 	add_child(dot)
 
-	var dur := maxf(0.1, a.distance_to(b) / (BULLET_SPEED_HEX * hex_size))
 	var tw := create_tween()
-	tw.tween_property(dot, "position", b, dur).set_ease(Tween.EASE_IN)
-	tw.parallel().tween_property(beam_mat, "albedo_color:a", 0.0, dur).set_ease(Tween.EASE_IN)
+	var total := 0.0
+	for i in range(1, path.size()):
+		var a := _hex_pos(path[i - 1], floor)
+		var b := _hex_pos(path[i], floor)
+		var d := maxf(0.03, a.distance_to(b) / (BULLET_SPEED_HEX * hex_size))
+		total += d
+		tw.tween_property(dot, "position", b, d).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func() -> void:
-		play_impact(to_hex, floor)
-		dot.queue_free()
-		beam.queue_free())
+		play_impact(path[path.size() - 1], floor)
+		dot.queue_free())
+
+	# Beams fade out behind the bullet.
+	for bm in beams:
+		var mat := bm.material_override as StandardMaterial3D
+		if mat == null:
+			continue
+		var ft := create_tween()
+		ft.tween_interval(total * 0.6)
+		ft.tween_property(mat, "albedo_color:a", 0.0, total * 0.4)
+		ft.tween_callback(bm.queue_free)
 
 
 ## Expanding ring burst at a hex (hit feedback).
@@ -193,7 +204,7 @@ func play_attack(card_type: int, from_hex: Vector2i, to_hex: Vector2i, floor: in
 		var facing := TickEngine.attack_direction(from_hex, to_hex)
 		play_slash(from_hex, floor, facing if facing != -1 else 0)
 	elif card_type == TriggerCard.CardType.RANGED:
-		play_bullet_path(from_hex, to_hex, floor)
+		play_bullet_path(HexCoord.line(from_hex, to_hex), floor)
 
 
 # --- Looping planning preview ----------------------------------------------
@@ -221,41 +232,47 @@ func show_slash_preview(origin: Vector2i, floor: int, facing: int) -> void:
 	add_child(_preview)
 
 
-## Marching dotted path from `origin` along `facing` for `length` hexes.
-func show_path_preview(origin: Vector2i, floor: int, facing: int, length: int) -> void:
-	var key := "path:%d:%d:%d:%d:%d" % [origin.x, origin.y, floor, facing, length]
+## Animated bullet line along a hex path: a thin beam through the crossed
+## hexes, a ring marker on each hex the line touches, and a travelling pulse.
+## (No filled tiles — the path itself is the preview.)
+func show_line_preview(path: Array[Vector2i], floor: int) -> void:
+	if path.is_empty():
+		clear_preview()
+		return
+	var key := "line:%d:" % floor
+	for h in path:
+		key += "%d,%d;" % [h.x, h.y]
 	if _preview != null and _preview_key == key:
 		return
 	_clear_preview_nodes()
 	_preview_key = key
-	_preview_kind = "path"
+	_preview_kind = "line"
 	_preview_time = 0.0
+	_preview_hexes = path.duplicate()
+	_preview_floor = floor
 	_preview = Node3D.new()
 	add_child(_preview)
 
-	var dir := posmod(facing, 6)
-	var hex := origin
-	_preview_a = _hex_pos(origin, floor)
-	for i in maxi(1, length):
-		hex = HexCoord.neighbor(hex, dir)
-		var pos := _hex_pos(hex, floor)
-		_preview_b = pos
-		var dot := MeshInstance3D.new()
-		var disc := CylinderMesh.new()
-		disc.top_radius = hex_size * 0.13
-		disc.bottom_radius = hex_size * 0.13
-		disc.height = 0.02
-		disc.radial_segments = 10
-		dot.mesh = disc
-		var m := _additive(Color(BULLET_COLOR, 1.0), 0.4)
-		dot.material_override = m
-		dot.set_meta(&"mat", m)
-		dot.position = pos
-		_preview.add_child(dot)
-		_preview_dots.append(dot)
+	# Beam segments between consecutive hex centres.
+	for i in range(1, path.size()):
+		_preview.add_child(_make_beam(_hex_pos(path[i - 1], floor), _hex_pos(path[i], floor), 0.3))
 
-	if _preview_b == _preview_a:
-		_preview_b = _preview_a + _dir_vector(dir) * hex_size
+	# A flat ring on every hex the line crosses (replaces the old tile fill).
+	for h in path:
+		var ring := MeshInstance3D.new()
+		var torus := TorusMesh.new()
+		torus.inner_radius = hex_size * 0.42
+		torus.outer_radius = hex_size * 0.5
+		torus.rings = 6
+		torus.ring_segments = 6
+		ring.mesh = torus
+		var m := _additive(Color(BULLET_COLOR, 1.0), 0.3)
+		ring.material_override = m
+		ring.set_meta(&"mat", m)
+		ring.rotation_degrees.x = 90.0
+		ring.position = _hex_pos(h, floor)
+		_preview.add_child(ring)
+		_preview_dots.append(ring)
 
 	# Travelling pulse that loops from the unit to the end of the path.
 	_preview_pulse = MeshInstance3D.new()
@@ -264,7 +281,7 @@ func show_path_preview(origin: Vector2i, floor: int, facing: int, length: int) -
 	orb.height = hex_size * 0.24
 	(_preview_pulse as MeshInstance3D).mesh = orb
 	(_preview_pulse as MeshInstance3D).material_override = _additive(Color(BULLET_COLOR, 1.0), 1.0)
-	_preview_pulse.position = _preview_a
+	_preview_pulse.position = _hex_pos(path[0], floor)
 	_preview.add_child(_preview_pulse)
 
 
@@ -280,7 +297,26 @@ func _clear_preview_nodes() -> void:
 	_preview_key = ""
 	_preview_mat = null
 	_preview_pulse = null
+	_preview_hexes.clear()
 	_preview_dots.clear()
+
+
+## Thin additive cylinder stretched between two world points (a beam).
+func _make_beam(a: Vector3, b: Vector3, alpha: float) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = hex_size * 0.035
+	cyl.bottom_radius = hex_size * 0.035
+	cyl.height = maxf(0.001, a.distance_to(b))
+	cyl.radial_segments = 6
+	mi.mesh = cyl
+	mi.material_override = _additive(Color(BULLET_COLOR, 1.0), alpha)
+	if a.distance_to(b) > 0.001:
+		mi.look_at_from_position((a + b) * 0.5, b, Vector3.UP)
+		mi.rotate_object_local(Vector3.RIGHT, -PI * 0.5)
+	else:
+		mi.position = a
+	return mi
 
 
 # --- Helpers ----------------------------------------------------------------

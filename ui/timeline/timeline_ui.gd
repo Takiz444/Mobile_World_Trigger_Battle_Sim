@@ -92,7 +92,7 @@ func _build_layout() -> void:
 	vbox.add_child(at_row)
 
 	var hint := Label.new()
-	hint.text = "Drag cards into slots  ·  right-click or double-tap a slot to clear"
+	hint.text = "Drag cards into slots  ·  click a hex to aim or look  ·  right-click/double-tap a slot to clear"
 	hint.modulate = Color(0.7, 0.75, 0.85)
 	at_row.add_child(hint)
 

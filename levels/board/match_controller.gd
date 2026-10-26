@@ -86,7 +86,6 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_build_overlay(ui_layer)
 
 	_board.tile_selected.connect(_on_tile_selected)
-	_board.tile_edge_selected.connect(_on_tile_edge_selected)
 	_board.tile_hovered.connect(_on_tile_hovered)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
 	_timeline.unit_selected.connect(_on_unit_selected)
@@ -223,13 +222,45 @@ func _setup_online() -> void:
 
 
 func _on_tile_selected(hex: Vector2i) -> void:
+	var info := _timeline.get_selected_target_info()
+	if info.is_empty():
+		return
+	# Slots that do not aim at a hex (empty slots, Shield, Bagworm) use the
+	# click to look that way: pick the hexagon to watch, no edge clicking.
+	if not _card_needs_target(info.get("card")):
+		_face_selected_slot_toward(hex)
+		return
 	_timeline.set_target_for_selected_slot(hex, _target_floor_for_click(hex))
 
 
-## A hex edge was clicked: set the selected slot's facing override (the
-## direction the unit should look after that slot's action).
-func _on_tile_edge_selected(_hex: Vector2i, direction: int) -> void:
-	_timeline.set_facing_for_selected_slot(direction)
+## Cards that aim at a hex (so a board click sets their target). Anything
+## else (empty slot, Shield, Bagworm) uses the click to look that way.
+func _card_needs_target(card: TriggerCard) -> bool:
+	if card == null:
+		return false
+	if TickEngine.is_move_card(card):
+		return true
+	if card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED:
+		return true
+	return card.card_name == "Spider"
+
+
+## Points the selected slot's facing at `hex`: the unit looks toward that
+## hexagon from where it will be when the slot fires.
+func _face_selected_slot_toward(hex: Vector2i) -> void:
+	var info := _timeline.get_selected_target_info()
+	if info.is_empty():
+		return
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	if unit_index < 0 or tick < 0:
+		return
+	var origin := _projected_hex(unit_index, tick)
+	if hex == origin:
+		return
+	var dir := TickEngine.attack_direction(origin, hex)
+	if dir != -1:
+		_timeline.set_facing_for_selected_slot(dir)
 
 
 ## Picks the destination floor for a clicked hex. Movement cards may climb or
@@ -737,6 +768,7 @@ func _compute_preview(info: Dictionary) -> Dictionary:
 	var origin := HexBoard.INVALID_HEX
 	var base: Array[Vector2i] = []
 	var choice: Array[Vector2i] = []
+	var path: Array[Vector2i] = []
 	var unit_index: int = info.get("unit", -1)
 	var card: TriggerCard = info.get("card")
 	var tick: int = info.get("tick", -1)
@@ -756,21 +788,47 @@ func _compute_preview(info: Dictionary) -> Dictionary:
 						if _board.has_tile(h):
 							base.append(h)
 			elif card.card_type == TriggerCard.CardType.RANGED:
-				var facing := _preview_attack_dir(info, origin)
-				if facing != -1:
-					var h := origin
-					for _i in card.attack_range:
-						h = HexCoord.neighbor(h, facing)
-						if not _board.has_tile(h):
-							break
-						base.append(h)
+				# Projectiles show no filled area: the FX layer draws the bullet
+				# line and marks each hex it crosses (see _shot_path).
+				path = _shot_path(origin, info, card)
 			elif card.card_name == "Spider":
 				for hex in HexCoord.spiral(origin, 3):
 					if _board.has_tile(hex):
 						choice.append(hex)
 			elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
 				base.append(origin)
-	return { "origin": origin, "base": base, "choice": choice }
+	return { "origin": origin, "base": base, "choice": choice, "path": path }
+
+
+## Hexes a projectile crosses on its way to the aimed hex: the hex line from
+## `origin`, clipped to the card's range and to the board. With no aim point it
+## runs straight along the unit's facing to full range.
+func _shot_path(origin: Vector2i, info: Dictionary, card: TriggerCard) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	var target := _target_hex_for(info)
+	if target == HexBoard.INVALID_HEX:
+		target = _hovered_hex
+	if target == HexBoard.INVALID_HEX or target == origin:
+		var facing := _preview_attack_dir(info, origin)
+		if facing == -1:
+			return out
+		var h := origin
+		for _i in card.attack_range:
+			h = HexCoord.neighbor(h, facing)
+			if not _board.has_tile(h):
+				break
+			out.append(h)
+		return out
+
+	var line := HexCoord.line(origin, target)
+	for i in range(1, line.size()):
+		if i > card.attack_range:
+			break
+		var h := line[i]
+		if not _board.has_tile(h):
+			break
+		out.append(h)
+	return out
 
 
 ## Direction a strike from `origin` would face: toward the locked target, else
@@ -802,8 +860,14 @@ func _update_fx_preview(info: Dictionary, pv: Dictionary) -> void:
 	if card.card_type == TriggerCard.CardType.MELEE:
 		_fx.show_slash_preview(origin, floor, _preview_attack_dir(info, origin))
 	elif card.card_type == TriggerCard.CardType.RANGED:
-		var length := maxi(1, (pv["base"] as Array).size())
-		_fx.show_path_preview(origin, floor, _preview_attack_dir(info, origin), length)
+		var path: Array[Vector2i] = []
+		var raw: Variant = pv.get("path", null)
+		if raw is Array:
+			path.assign(raw)
+		if path.is_empty():
+			_fx.clear_preview()
+		else:
+			_fx.show_line_preview(path, floor)
 	else:
 		_fx.clear_preview()
 
