@@ -18,9 +18,13 @@ signal tile_edge_selected(hex: Vector2i, direction: int)
 @export var tile_height: float = HexCoord.GROUND_Y * 2.0
 
 @export var hover_color: Color = Color(0.25, 0.85, 1.0)
-@export var selected_color: Color = Color(1.0, 0.82, 0.2)
-@export var highlight_color: Color = Color(0.3, 1.0, 0.5)
-@export var effect_color: Color = Color(1.0, 0.5, 0.15)
+@export var selected_color: Color = Color(0.88, 0.95, 1.0)
+## Base attack area / trajectory (design-doc yellow).
+@export var highlight_color: Color = Color(1.0, 0.82, 0.18)
+## Optional picks: move destinations, trap spots, shield spots (doc orange).
+@export var effect_color: Color = Color(1.0, 0.69, 0.25)
+## The acting unit's own hex (doc blue).
+@export var origin_color: Color = Color(0.12, 0.5, 0.98)
 @export var wire_color: Color = Color(1.0, 0.6, 0.2)
 
 var _mesh: ArrayMesh
@@ -33,6 +37,7 @@ var _hover_material: StandardMaterial3D
 var _selected_material: StandardMaterial3D
 var _highlight_material: StandardMaterial3D
 var _effect_material: StandardMaterial3D
+var _origin_material: StandardMaterial3D
 var _wire_material: StandardMaterial3D
 
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
@@ -50,6 +55,8 @@ var _selected: Vector2i = INVALID_HEX
 var _has_selection := false
 var _highlighted: Dictionary = {}  # Vector2i -> true (range / valid destinations)
 var _effect_hexes: Dictionary = {} # Vector2i -> true (action effect area)
+var _origin_hex: Vector2i = INVALID_HEX
+var _has_origin := false
 var _wire_hexes: Dictionary = {}   # Vector2i -> true
 
 
@@ -64,6 +71,7 @@ func _ready() -> void:
 	_selected_material = _make_material(selected_color)
 	_highlight_material = _make_material(highlight_color)
 	_effect_material = _make_material(effect_color)
+	_origin_material = _make_material(origin_color)
 	_wire_material = _make_material(wire_color)
 	_build_board()
 
@@ -118,6 +126,7 @@ func set_map(tiles: Dictionary) -> void:
 	_effect_hexes.clear()
 	_has_hover = false
 	_has_selection = false
+	_has_origin = false
 	for hex in tiles.keys():
 		_spawn_tile(hex)
 
@@ -246,6 +255,20 @@ func highlight_effects(hexes: Array) -> void:
 func clear_highlights() -> void:
 	highlight_hexes([])
 	highlight_effects([])
+	highlight_origin(INVALID_HEX)
+
+
+## Marks the acting unit's own hex (design-doc blue). Pass INVALID_HEX to
+## clear it.
+func highlight_origin(hex: Vector2i) -> void:
+	var old := _origin_hex if _has_origin else INVALID_HEX
+	var has := _tiles.has(hex)
+	_has_origin = has
+	_origin_hex = hex if has else INVALID_HEX
+	if old != INVALID_HEX:
+		_apply(old)
+	if has:
+		_apply(hex)
 
 
 ## Sets the hexes carrying spider wires (visual tint only; the engine tracks
@@ -566,6 +589,8 @@ func _apply(hex: Vector2i) -> void:
 
 
 func _resolve_material(hex: Vector2i) -> Material:
+	if _has_origin and hex == _origin_hex:
+		return _origin_material
 	if _has_selection and hex == _selected:
 		return _selected_material
 	if _has_hover and hex == _hovered:

@@ -41,6 +41,19 @@ func _ready() -> void:
 			(main.get_node("UILayer") as CanvasLayer).visible = false
 			# Light up nearby hexes so roof-cap clipping is visible.
 			(main.get_node("HexBoard") as HexBoard).highlight_hexes(HexCoord.spiral(u.hex, 3))
+		elif args.size() > 4 and args[4].begins_with("preview"):
+			# Zoom to unit 0 with an attack card selected so the new area-of-
+			# effect preview + looping FX are visible in the shot.
+			var ctl2 := main.get_node("MatchController") as MatchController
+			var u2: UnitState = ctl2._player_states[0]
+			cam.screen_offset_px = Vector2.ZERO
+			cam.recenter(HexCoord.axial_to_world(u2.hex, 1.0) + Vector3(1.5, 0, -2.5))
+			(main.get_node("UILayer") as CanvasLayer).visible = false
+			var timeline := main.get_node("UILayer/TimelineUI") as TimelineUI
+			var card_name := "Asteroid" if args[4] == "preview_ranged" else "Kogetsu"
+			timeline.get_plan().assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card(card_name))
+			timeline._on_slot_selected(timeline._current_slots[0][0])
+			ctl2._update_targeting()
 		elif args.size() > 4 and args[4] == "center":
 			var board := main.get_node("HexBoard") as HexBoard
 			cam.screen_offset_px = Vector2.ZERO

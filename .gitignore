@@ -2,3 +2,6 @@
 .godot/
 /android/
 deploy/.env
+
+# Rendered QA screenshots
+/screenshots/

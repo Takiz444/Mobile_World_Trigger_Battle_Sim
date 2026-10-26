@@ -23,6 +23,7 @@ var _board: HexBoard
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _units_view: BoardUnits
+var _fx: CombatFx
 var _camera: BoardCamera
 var _engine := TickEngine.new()
 
@@ -75,6 +76,11 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_units_view = BoardUnits.new()
 	_units_view.name = "BoardUnits"
 	_board.add_child(_units_view)
+
+	_fx = CombatFx.new()
+	_fx.name = "CombatFx"
+	_board.add_child(_fx)
+	_fx.setup(_board.hex_size)
 
 	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
@@ -432,11 +438,20 @@ func _animate_frame(snapshots: Dictionary, events: Array) -> void:
 	for u in _ms.all_units():
 		by_name[u.display_name()] = u
 	for ev in events:
-		if int(ev.get("phase", -1)) != CombatEvent.Phase.RESOLUTION or int(ev.get("damage", 0)) <= 0:
+		var phase := int(ev.get("phase", -1))
+		if phase == CombatEvent.Phase.ATTACK:
+			var from: Variant = ev.get("from")
+			var to: Variant = ev.get("to")
+			var actor: UnitState = by_name.get(str(ev.get("actor", "")))
+			if from != null and to != null and actor != null:
+				_fx.play_attack(int(ev.get("card_type", -1)), Vector2i(int(from[0]), int(from[1])), Vector2i(int(to[0]), int(to[1])), actor.floor)
+			continue
+		if phase != CombatEvent.Phase.RESOLUTION or int(ev.get("damage", 0)) <= 0:
 			continue
 		var target: UnitState = by_name.get(str(ev.get("target", "")))
 		if target == null:
 			continue
+		_fx.play_impact(target.hex, target.floor)
 		if target.is_bailed:
 			_units_view.play_bail(target)
 		else:
@@ -471,6 +486,8 @@ func _begin_replay() -> void:
 	_units_view.clear_ghost()
 	_units_view.clear_vision()
 	_units_view.set_selected(null)
+	if _fx != null:
+		_fx.clear_preview()
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
@@ -557,7 +574,10 @@ func _animate_moves(snapshots: Dictionary) -> void:
 func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> void:
 	_animate_moves(snapshots)
 	for ev in events:
-		if ev.phase == CombatEvent.Phase.RESOLUTION and ev.damage > 0 and ev.target != null:
+		if ev.phase == CombatEvent.Phase.ATTACK and ev.has_line and ev.actor != null:
+			_fx.play_attack(ev.card_type, ev.from_hex, ev.to_hex, ev.actor.floor)
+		elif ev.phase == CombatEvent.Phase.RESOLUTION and ev.damage > 0 and ev.target != null:
+			_fx.play_impact(ev.target.hex, ev.target.floor)
 			if ev.target.is_bailed:
 				_units_view.play_bail(ev.target)
 			else:
@@ -574,10 +594,13 @@ func _on_unit_selected(i: int) -> void:
 
 func _update_targeting() -> void:
 	var info := _timeline.get_selected_target_info()
-	_board.highlight_hexes(_compute_range_hexes(info))
-	_board.highlight_effects(_compute_effect_hexes(info))
+	var pv := _compute_preview(info)
+	_board.highlight_origin(pv["origin"])
+	_board.highlight_hexes(pv["base"])
+	_board.highlight_effects(pv["choice"])
 	_update_ghost(info)
 	_update_prediction(info)
+	_update_fx_preview(info, pv)
 	var idx := _timeline.get_current_unit()
 	if idx >= 0 and idx < _player_states.size():
 		_units_view.set_selected(_player_states[idx])
@@ -706,60 +729,83 @@ func _format_prediction(card: TriggerCard, attacker: UnitState, target: UnitStat
 	return "%s → %s — %d%% hit · %d dmg%s" % [cname, tname, hit, dmg, note]
 
 
-## Green tiles the player may click for the selected slot's card. Only
-## movement destinations live here; attack/trap areas use effect highlights.
-func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
-	if info.is_empty():
-		return []
+## Preview tiles following the design doc's visual language:
+##   origin (blue)   = the acting unit's projected hex
+##   base   (yellow) = the attack area / trajectory
+##   choice (orange) = movement reach, trap spots, shield placement
+func _compute_preview(info: Dictionary) -> Dictionary:
+	var origin := HexBoard.INVALID_HEX
+	var base: Array[Vector2i] = []
+	var choice: Array[Vector2i] = []
 	var unit_index: int = info.get("unit", -1)
 	var card: TriggerCard = info.get("card")
-	if card == null or unit_index < 0 or unit_index >= _player_states.size():
-		return []
-
 	var tick: int = info.get("tick", -1)
-	var result: Array[Vector2i] = []
+	if not info.is_empty() and unit_index >= 0 and unit_index < _player_states.size() and tick >= 0:
+		origin = _projected_hex(unit_index, tick)
+		if card != null:
+			if TickEngine.is_move_card(card):
+				var reach := maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE)
+				for hex in HexCoord.spiral(_projected_hex(unit_index, tick - 1), reach):
+					if not _move_floors(info, hex).is_empty():
+						choice.append(hex)
+			elif card.card_type == TriggerCard.CardType.MELEE:
+				var facing := _preview_attack_dir(info, origin)
+				if facing != -1:
+					for d in [-1, 0, 1]:
+						var h := HexCoord.neighbor(origin, posmod(facing + d, 6))
+						if _board.has_tile(h):
+							base.append(h)
+			elif card.card_type == TriggerCard.CardType.RANGED:
+				var facing := _preview_attack_dir(info, origin)
+				if facing != -1:
+					var h := origin
+					for _i in card.attack_range:
+						h = HexCoord.neighbor(h, facing)
+						if not _board.has_tile(h):
+							break
+						base.append(h)
+			elif card.card_name == "Spider":
+				for hex in HexCoord.spiral(origin, 3):
+					if _board.has_tile(hex):
+						choice.append(hex)
+			elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
+				base.append(origin)
+	return { "origin": origin, "base": base, "choice": choice }
 
-	if TickEngine.is_move_card(card):
-		var origin := _projected_hex(unit_index, tick - 1)
-		for hex in HexCoord.spiral(origin, maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE)):
-			if not _move_floors(info, hex).is_empty():
-				result.append(hex)
 
-	return result
+## Direction a strike from `origin` would face: toward the locked target, else
+## the hovered hex, else the unit's projected facing.
+func _preview_attack_dir(info: Dictionary, origin: Vector2i) -> int:
+	var target_hex := _target_hex_for(info)
+	if target_hex == HexBoard.INVALID_HEX:
+		target_hex = _hovered_hex
+	if target_hex != HexBoard.INVALID_HEX and target_hex != origin:
+		var dir := TickEngine.attack_direction(origin, target_hex)
+		if dir != -1:
+			return dir
+	return _projected_facing(int(info.get("unit", 0)), int(info.get("tick", -1)))
 
 
-## Orange tiles the selected slot's card affects: attack targets, Spider wire
-## area, or the unit's own hex for self-buffs (Shield / Bagworm). Origins use
-## the unit's projected position (after this tick's move, per the engine order).
-func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
-	if info.is_empty():
-		return []
-	var unit_index: int = info.get("unit", -1)
+## Looping attack preview: a breathing slash arc for melee, a marching dotted
+## path for ranged. Purely cosmetic.
+func _update_fx_preview(info: Dictionary, pv: Dictionary) -> void:
+	if _resolving or info.is_empty() or _fx == null:
+		_fx.clear_preview()
+		return
 	var card: TriggerCard = info.get("card")
-	if card == null or unit_index < 0 or unit_index >= _player_states.size():
-		return []
-
+	var origin: Vector2i = pv["origin"]
+	if card == null or origin == HexBoard.INVALID_HEX:
+		_fx.clear_preview()
+		return
 	var tick: int = info.get("tick", -1)
-	var origin := _projected_hex(unit_index, tick)
-	var origin_floor := _projected_floor(unit_index, tick)
-	var result: Array[Vector2i] = []
-
+	var floor := _projected_floor(int(info.get("unit", 0)), tick)
 	if card.card_type == TriggerCard.CardType.MELEE:
-		for e in _enemy_states:
-			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) == 1 and e.floor == origin_floor:
-				result.append(e.hex)
+		_fx.show_slash_preview(origin, floor, _preview_attack_dir(info, origin))
 	elif card.card_type == TriggerCard.CardType.RANGED:
-		for e in _enemy_states:
-			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) <= card.attack_range:
-				result.append(e.hex)
-	elif card.card_name == "Spider":
-		for hex in HexCoord.spiral(origin, 3):
-			if _board.has_tile(hex):
-				result.append(hex)
-	elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
-		result.append(origin)
-
-	return result
+		var length := maxi(1, (pv["base"] as Array).size())
+		_fx.show_path_preview(origin, floor, _preview_attack_dir(info, origin), length)
+	else:
+		_fx.clear_preview()
 
 
 ## Shows a translucent "ghost" of the selected unit's position for the current

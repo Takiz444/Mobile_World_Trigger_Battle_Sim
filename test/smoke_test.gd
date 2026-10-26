@@ -43,8 +43,10 @@ func _run() -> void:
 	_check(_controller._ms.all_units().size() == 8, "8 units placed on board")
 	_check(not _controller._overlay.visible, "overlay hidden at match start")
 	_check(_controller._ms.buildings.size() > 0, "city map buildings placed on board")
+
 	_controller._update_targeting()
 	await _check_physics_matches_rules()
+	_check_preview()
 
 	for turn in range(3):
 		if _controller._overlay.visible:
@@ -58,6 +60,40 @@ func _run() -> void:
 
 	print("SMOKE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
+
+
+## Preview layers follow the design doc: blue origin, yellow base area /
+## trajectory, orange choices, plus a looping FX preview for attacks.
+func _check_preview() -> void:
+	var plan := _timeline.get_plan()
+	var slot: TimelineSlot = _timeline._current_slots[0][0]
+	var u: UnitState = _controller._player_states[0]
+
+	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Kogetsu"))
+	_timeline._on_slot_selected(slot)
+	_controller._update_targeting()
+	_check(_board._origin_hex == u.hex, "preview marks the acting unit's hex (blue)")
+	var arc_ok := _board._highlighted.size() >= 2
+	for h in _board._highlighted.keys():
+		if HexCoord.distance(h, u.hex) != 1:
+			arc_ok = false
+	_check(arc_ok, "melee preview shows an adjacent front arc (yellow, got %d)" % _board._highlighted.size())
+	_check(_controller._fx._preview != null and _controller._fx._preview_kind == "slash",
+		"melee preview animates a slash arc")
+
+	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
+	_controller._update_targeting()
+	_check(_board._highlighted.size() >= 3, "ranged preview shows a trajectory line (yellow)")
+	_check(_controller._fx._preview != null and _controller._fx._preview_kind == "path",
+		"ranged preview animates a bullet path")
+
+	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
+	_controller._update_targeting()
+	_check(_board._effect_hexes.size() > 0, "move preview shows reachable hexes (orange)")
+	_check(_controller._fx._preview == null, "move preview has no attack animation")
+
+	plan.clear(0, 0, TurnPlan.MAIN_SLOT)
+	_controller._update_targeting()
 
 
 ## The rendered city's physics solids and the engine's line-of-sight rules
