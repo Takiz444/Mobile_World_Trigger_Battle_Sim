@@ -56,6 +56,11 @@ var _opponent_locked := false
 var _over_shown := false
 var _clock_label: Label
 
+# Surrender (all modes): two taps within SURRENDER_CONFIRM_MS.
+const SURRENDER_CONFIRM_MS := 3000
+var _surrender_btn: Button
+var _surrender_armed_until := 0
+
 # Match-over / waiting overlay
 var _overlay: Control
 var _result_label: Label
@@ -78,6 +83,7 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 
 	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
+	_build_surrender_button(ui_layer)
 
 	_board.tile_selected.connect(_on_tile_selected)
 	_board.tile_hovered.connect(_on_tile_hovered)
@@ -103,6 +109,8 @@ func _start_match() -> void:
 		_prediction_label.visible = false
 	_turn = 1
 	_over_shown = false
+	_live_over = {}
+	_reset_surrender_button()
 	_overlay.visible = false
 	_btn_row.visible = true
 	_event_log.set_turn(_turn)
@@ -510,6 +518,10 @@ func _known_unit_at(hex: Vector2i, floor: int) -> UnitState:
 
 
 func _after_resolution(winner: int) -> void:
+	if _over_shown:
+		# Ended while the replay ran (e.g. a surrender): stay on the result.
+		_resolving = false
+		return
 	if winner != -1:
 		_show_match_over(winner)
 		_resolving = false
@@ -976,6 +988,7 @@ func _show_match_over(winner: int) -> void:
 		_turn_info.text += _live_result_text(_live_over)
 	if _clock_label != null:
 		_clock_label.visible = false
+	_surrender_btn.visible = false
 	# Rematch replays the local AI match; online matches go back to the Hangar.
 	_rematch_btn.visible = not _online
 	_btn_row.visible = true
@@ -1150,6 +1163,77 @@ func _build_clock_label() -> void:
 func _fit_clock_label() -> void:
 	_clock_label.position = Vector2(0, 84)
 	_clock_label.size = Vector2(get_viewport().get_visible_rect().size.x, 28)
+
+
+# --- Surrender --------------------------------------------------------------
+
+func _build_surrender_button(ui_layer: CanvasLayer) -> void:
+	_surrender_btn = Button.new()
+	_surrender_btn.name = "SurrenderButton"
+	_surrender_btn.custom_minimum_size = Vector2(150, 40)
+	# Top-left, under the unit bar (the event log owns the top-right).
+	_surrender_btn.position = Vector2(12, 52)
+	_surrender_btn.icon = _white_flag_icon()
+	_surrender_btn.pressed.connect(_on_surrender_pressed)
+	ui_layer.add_child(_surrender_btn)
+	_reset_surrender_button()
+
+
+## A small white flag on a pole, drawn in code (no asset needed).
+static func _white_flag_icon() -> ImageTexture:
+	var img := Image.create(20, 20, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	img.fill_rect(Rect2i(3, 2, 2, 17), Color(0.75, 0.75, 0.78))     # pole
+	for y in range(2, 11):
+		# Flag with a notched (swallowtail) fly end.
+		var notch := 3 - absi(y - 6) if absi(y - 6) < 3 else 0
+		img.fill_rect(Rect2i(5, y, 13 - notch, 1), Color(0.97, 0.97, 0.97))
+	return ImageTexture.create_from_image(img)
+
+
+func _reset_surrender_button() -> void:
+	if _surrender_btn == null:
+		return
+	_surrender_btn.text = "Surrender"
+	_surrender_btn.disabled = false
+	_surrender_btn.visible = true
+	_surrender_btn.modulate = Color(1, 1, 1)
+	_surrender_armed_until = 0
+
+
+## First tap arms the button; a second tap within SURRENDER_CONFIRM_MS
+## concedes. Online, the server ends the match (trophies apply) and pushes or
+## returns the result.
+func _on_surrender_pressed() -> void:
+	if _over_shown:
+		return
+	var now := Time.get_ticks_msec()
+	if now > _surrender_armed_until:
+		_surrender_armed_until = now + SURRENDER_CONFIRM_MS
+		_surrender_btn.text = "Tap again to confirm"
+		_surrender_btn.modulate = Color(1.0, 0.55, 0.5)
+		await get_tree().create_timer(SURRENDER_CONFIRM_MS / 1000.0).timeout
+		if not _over_shown and Time.get_ticks_msec() >= _surrender_armed_until:
+			_reset_surrender_button()
+		return
+	_surrender_btn.disabled = true
+	if not _online:
+		_live_over = { "winner": 1 - _team, "reason": "forfeit" }
+		_show_match_over(1 - _team)
+		return
+	if _live != null and _live.is_open():
+		_live.forfeit()   # match_over arrives over the live channel
+		return
+	var res := await _backend.forfeit(_match_id, _token)
+	if not res.get("success", false) and int(res.get("status", 0)) != 409:
+		_event_log.add_message("Surrender failed: %s" % str(res.get("error", "?")), Color(1.0, 0.4, 0.4))
+		_reset_surrender_button()
+		return
+	var info := await _backend.get_match(_match_id, _token)
+	var body: Dictionary = info.get("body", {})
+	_live_over = { "winner": int(body.get("winner", 1 - _team)), "reason": body.get("end_reason", "forfeit"),
+		"trophy_change": body.get("trophy_change", [0, 0]) }
+	_show_match_over(int(_live_over["winner"]))
 
 
 # --- Enemy AI (local mode only) --------------------------------------------

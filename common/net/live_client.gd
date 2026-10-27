@@ -15,6 +15,12 @@ signal presence_changed(connected: Array)
 signal connection_changed(connected: bool)
 
 const RECONNECT_DELAYS := [0.5, 1.0, 2.0, 4.0, 8.0]
+## Keepalive: ping this often; reconnect if the server is silent for
+## SILENCE_TIMEOUT (mobile links die without a TCP close).
+const PING_INTERVAL := 15.0
+const SILENCE_TIMEOUT := 40.0
+
+signal outdated()
 
 var url := ""
 var match_id := ""
@@ -25,6 +31,8 @@ var _open := false
 var _attempt := 0
 var _retry_at := -1.0
 var _closed_by_us := false
+var _last_heard := 0.0
+var _last_ping := 0.0
 
 
 ## Derives the live URL from the REST server URL when the server doesn't
@@ -99,11 +107,27 @@ func _process(_delta: float) -> void:
 		return
 	_ws.poll()
 	var state := _ws.get_ready_state()
+	var now := Time.get_ticks_msec() / 1000.0
 	if state == WebSocketPeer.STATE_OPEN and not _open:
 		_open = true
 		_attempt = 0
-		_send({ "type": "hello", "match_id": match_id, "token": token })
+		_last_heard = now
+		_last_ping = now
+		_send({ "type": "hello", "match_id": match_id, "token": token, "protocol": NetProtocol.VERSION })
 		connection_changed.emit(true)
+	elif state == WebSocketPeer.STATE_OPEN:
+		if now - _last_heard > SILENCE_TIMEOUT:
+			# Dead link: a polite close could hang waiting for a reply, so
+			# drop the socket and reconnect right away.
+			_ws.close()
+			_ws = null
+			_open = false
+			connection_changed.emit(false)
+			_schedule_retry()
+			return
+		elif now - _last_ping > PING_INTERVAL:
+			_last_ping = now
+			_send({ "type": "ping" })
 	elif state == WebSocketPeer.STATE_CLOSED:
 		_ws = null
 		if _open:
@@ -111,6 +135,8 @@ func _process(_delta: float) -> void:
 			connection_changed.emit(false)
 		_schedule_retry()
 		return
+	if _ws.get_available_packet_count() > 0:
+		_last_heard = now
 	while _ws.get_available_packet_count() > 0:
 		var parsed: Variant = JSON.parse_string(_ws.get_packet().get_string_from_utf8())
 		if parsed is Dictionary:
@@ -132,4 +158,7 @@ func _dispatch(msg: Dictionary) -> void:
 		"presence":
 			presence_changed.emit(msg.get("connected", [false, false]))
 		"error":
+			if str(msg.get("code", "")) == "outdated":
+				_closed_by_us = true   # reconnecting won't help
+				outdated.emit()
 			push_warning("Live server error: %s" % str(msg.get("error", "?")))

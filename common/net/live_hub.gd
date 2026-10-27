@@ -8,8 +8,19 @@ extends RefCounted
 ## Runs on its own port (MatchServer.live_port); in production a reverse
 ## proxy terminates TLS and routes wss://<host>/live to it (deploy/Caddyfile).
 ##
-## Each connection is a Dictionary {id, ws, match_id, team, token} that the
-## message handler may fill in (on "hello") to subscribe it to a match.
+## Each connection is a Dictionary {id, ws, match_id, team, token, seen} that
+## the message handler may fill in (on "hello") to subscribe it to a match.
+##
+## Mobile networks often drop TCP silently, so clients ping every
+## LiveClient.PING_INTERVAL; a connection quiet for IDLE_TIMEOUT_MS is closed
+## (and its player shown as reconnecting).
+
+## Full-state messages (a reconnect late in a match carries every turn's
+## replay frames) exceed WebSocketPeer's 64 KB default.
+const OUTBOUND_BUFFER := 4 * 1024 * 1024
+const INBOUND_BUFFER := 256 * 1024
+const IDLE_TIMEOUT_MS := 45000
+const MAX_CONNECTIONS := 4096
 
 var _tcp := TCPServer.new()
 var _on_message: Callable   # (conn: Dictionary, msg: Dictionary) -> void
@@ -36,13 +47,20 @@ func poll() -> void:
 		var stream := _tcp.take_connection()
 		if stream == null:
 			continue
+		if _conns.size() >= MAX_CONNECTIONS:
+			stream.disconnect_from_host()
+			continue
 		var ws := WebSocketPeer.new()
+		ws.outbound_buffer_size = OUTBOUND_BUFFER
+		ws.inbound_buffer_size = INBOUND_BUFFER
 		if ws.accept_stream(stream) != OK:
 			continue
-		_conns.append({ "id": _next_id, "ws": ws, "match_id": "", "team": -1, "token": "" })
+		_conns.append({ "id": _next_id, "ws": ws, "match_id": "", "team": -1, "token": "",
+			"seen": Time.get_ticks_msec() })
 		_next_id += 1
 
 	var closed: Array[Dictionary] = []
+	var now := Time.get_ticks_msec()
 	for c in _conns:
 		var ws: WebSocketPeer = c["ws"]
 		ws.poll()
@@ -50,8 +68,15 @@ func poll() -> void:
 		if state == WebSocketPeer.STATE_CLOSED:
 			closed.append(c)
 			continue
+		if now - int(c["seen"]) > IDLE_TIMEOUT_MS:
+			# Dead link: drop it now rather than waiting for TCP to notice.
+			ws.close(4000, "idle")
+			closed.append(c)
+			continue
 		if state != WebSocketPeer.STATE_OPEN:
 			continue
+		if ws.get_available_packet_count() > 0:
+			c["seen"] = now
 		while ws.get_available_packet_count() > 0:
 			var parsed: Variant = JSON.parse_string(ws.get_packet().get_string_from_utf8())
 			if parsed is Dictionary:

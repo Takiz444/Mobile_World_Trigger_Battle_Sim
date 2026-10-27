@@ -119,8 +119,78 @@ func _run() -> void:
 	var board := await b0.leaderboard()
 	_check((board["body"].get("players", []) as Array).size() == 2, "leaderboard lists registered players")
 
+	await _test_connection_layer(b0)
+
 	print("NET TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
+
+
+## Version handshake, offline/outdated status, request limits, overlapping
+## requests, account recovery, and the live channel's version check.
+func _test_connection_layer(b: HttpBackend) -> void:
+	var health := await b.health()
+	_check(int(health["body"].get("protocol", 0)) == NetProtocol.VERSION
+		and health["body"].has("server_time"), "health reports the protocol version")
+
+	var conn := GameConnection.new()
+	add_child(conn)
+	_check(await conn.connect_to("http://127.0.0.1:18080") == GameConnection.Status.ONLINE, "connection goes online")
+	var old := GameConnection.new()
+	old.client_protocol = NetProtocol.MIN_SUPPORTED - 1
+	add_child(old)
+	_check(await old.connect_to("http://127.0.0.1:18080") == GameConnection.Status.OUTDATED, "an old build is told to update")
+	var nowhere := GameConnection.new()
+	add_child(nowhere)
+	_check(await nowhere.connect_to("http://127.0.0.1:1") == GameConnection.Status.OFFLINE, "unreachable server reads as offline")
+
+	# Account recovery: a server that forgot the account gets a fresh one.
+	AccountStore.clear_for(conn.server_url)
+	var acc := await conn.ensure_account("Hyuse")
+	_check(not acc.is_empty() and str(acc.get("name")) == "Hyuse", "connection registers an account")
+	_server._accounts.erase(acc["player_id"])
+	var again := await conn.ensure_account("Hyuse")
+	_check(not again.is_empty() and again["player_id"] != acc["player_id"], "forgotten account is re-registered")
+	AccountStore.clear_for(conn.server_url)
+
+	# Overlapping calls on one backend (used to fail with ERR_BUSY).
+	var results: Array = []
+	var fire := func() -> void: results.append(await b.leaderboard())
+	fire.call()
+	fire.call()
+	var end := Time.get_ticks_msec() + 3000
+	while results.size() < 2 and Time.get_ticks_msec() < end:
+		await get_tree().process_frame
+	_check(results.size() == 2 and results.all(func(r: Dictionary) -> bool: return r.get("success", false)),
+		"overlapping requests both succeed")
+
+	var huge := "x".repeat(HttpServer.MAX_BODY_BYTES + 10)
+	var big := await b.request("POST", "/account/register", { "name": huge })
+	_check(int(big.get("status", 0)) == 413, "oversized request bodies are refused")
+
+	var limiter := HttpServer.new()
+	limiter.rate_burst = 3.0
+	limiter.rate_per_sec = 0.001
+	var allowed := [limiter._allow("203.0.113.5"), limiter._allow("203.0.113.5"),
+		limiter._allow("203.0.113.5"), limiter._allow("203.0.113.5")]
+	_check(allowed == [true, true, true, false] and limiter._allow("203.0.113.9"),
+		"per-client rate limit (other clients unaffected)")
+	_check(limiter._allow("127.0.0.1") and limiter._allow("127.0.0.1"), "loopback is exempt (local dev)")
+
+	# Live hello from an old build gets "outdated", not a session.
+	var ws := LiveClient.new()
+	add_child(ws)
+	var got := [false]
+	ws.outdated.connect(func() -> void: got[0] = true)
+	ws.open("ws://127.0.0.1:18081", "nope", "nope")
+	end = Time.get_ticks_msec() + 3000
+	while not ws.is_open() and Time.get_ticks_msec() < end:
+		await get_tree().process_frame
+	ws._send({ "type": "hello", "match_id": "x", "token": "y", "protocol": 1 })
+	end = Time.get_ticks_msec() + 3000
+	while not got[0] and Time.get_ticks_msec() < end:
+		await get_tree().process_frame
+	_check(got[0], "live channel rejects an outdated client")
+	ws.close()
 
 
 func _shield_plan(units: Array[UnitData]) -> TurnPlan:

@@ -21,7 +21,7 @@ about **6–8 minutes**.
 |---|---|---|---|---|
 | **Live Battle** (main mode) | matchmade | 60 s turn 1, 40 s after, 8-turn cap | trophies + hidden MMR | ✅ |
 | **Async Ranked** | matchmade | 12 h per turn | hidden MMR only | ✅ (existing) |
-| **Friendly Battle** | match code | live or async (host picks) | never | ✅ server, **TODO** host toggle in UI |
+| **Friendly Battle** | match code | live or async (host picks) | never | ✅ |
 | **Practice** | vs AI | none | never | ✅ (existing local mode) |
 
 ### Live match timeline
@@ -35,7 +35,7 @@ matched ─► load (15 s grace) ─► Turn 1 plan (60 s) ─► replay (~4–6
 * **Early lock-in:** the turn resolves as soon as both plans are in. Fast players get fast games.
 * **Buzzer:** 1.5 s before the deadline, the client submits whatever is planned. A client that is gone gets the GDD 3.1 "Stand Ground + Shield" fallback from the server.
 * **Ending:** a squad is fully bailed out, **or** the turn cap is reached. At the cap, the side with more units standing wins, then the side with more remaining Trion (as a share of the squad total), else it's a **draw**.
-* **Surrender:** a player can forfeit at any time.
+* **Surrender:** a player can forfeit at any time (battle-screen button, two taps to confirm).
 * **AFK:** a player auto-filled for **2 turns in a row** forfeits. If both players are AFK, the match is a draw.
 * **Disconnects:** the client reconnects with backoff, and the server resends full state on every `hello`. While a player is away, the clock keeps running, so the AFK rule covers players who never come back. The opponent sees "opponent reconnecting…".
 
@@ -89,7 +89,7 @@ gap. The matchmaker runs every second. Live and async queues are separate.
           ├─ Visibility               fog of war enforced server-side
           ├─ LiveHub                  WebSocket push (common/net/live_hub.gd)
           ├─ Ladder                   trophies, arenas, clock, search window
-          └─ JSON store (/data)       atomic write-then-rename
+          └─ GameStore (server/db)    json file | dir (file per record) | Postgres via PostgREST
 ```
 
 **Why it's cheat-resistant by design:**
@@ -112,10 +112,10 @@ The server sends `seconds_left` rather than an absolute time, so device clock sk
 
 ### Scaling path
 
-Today, one process holds everything in memory and rewrites one JSON file on each change. That is fine for
-a closed beta (hundreds of concurrent players), but not for launch. Steps:
+One process holds live state in memory and writes only changed records to its store (`TT_STORE`: a directory of files, or Postgres via PostgREST).
+That is fine for a closed beta and a soft launch on one machine. Steps beyond that:
 
-1. **Database.** Move accounts, the match index, and history into Postgres. Keep live match state in memory on the owning server, with a snapshot to the DB after each turn (`PlanCodec.encode_state` already exists).
+1. **Database** ✅ drafted: `PostgrestStore` + `deploy/db/00-schema.sql`. Records are JSONB documents with indexed columns for leaderboards and match history. Every match is written after each turn, so a restart resumes it. **TODO:** run it against real Postgres in staging, and set up backups (`pg_dump` or managed Postgres).
 2. **Split services.**
    * A stateless **account/queue API** (any language).
    * N **match workers**, each running the Godot headless resolver.
@@ -154,6 +154,7 @@ All existing tests still pass. Older match stores still load: missing fields get
 - [ ] App Tracking Transparency prompt **only** if we add ad attribution. Avoid it at launch.
 
 **Networking**
+- [x] Protocol versioning: old builds are told to update (`NetProtocol`, bump on breaking changes).
 - [ ] **HTTPS/WSS only.** App Transport Security blocks `http://` and `ws://`. Ship the production URL as the default; the Hangar default is currently `http://127.0.0.1:8080`, and the URL field should be hidden in release builds.
 - [ ] Export compliance: HTTPS only → set `ITSAppUsesNonExemptEncryption = NO`.
 - [ ] Handle app backgrounding mid-match. iOS suspends the socket; LiveClient reconnects and resyncs on resume. Test this on real devices.

@@ -1,26 +1,33 @@
-# Single-host production stack: the game server behind Caddy (automatic
-# HTTPS certificates, WebSocket proxying).
+# Production stack: the game server behind Caddy (automatic HTTPS
+# certificates, WebSocket proxying), with one of two stores:
 #
-#   cp deploy/.env.example deploy/.env    # then edit it
-#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#   File store (default, simplest; one file per record on the trion-data volume):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#
+#   Postgres (TT_STORE=postgrest in deploy/.env, plus the postgres profile):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile postgres up -d --build
 #
 # Clients then use:  Server URL  https://$TT_DOMAIN
 #                    live URL    wss://$TT_DOMAIN/live  (advertised by the server)
 #
-# One server process holds all live state in memory, so run exactly one
-# replica. See docs/multiplayer/LAUNCH_PLAN.md ("Scaling path") for the
-# multi-instance design.
+# The server holds live match state in memory, so run exactly one replica,
+# even with Postgres. See docs/multiplayer/LAUNCH_PLAN.md ("Scaling path").
 
 services:
   server:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    # Exits if its store is unreachable (e.g. Postgres still starting); retried.
     restart: unless-stopped
     environment:
       TT_PORT: "8080"
       TT_LIVE_PORT: "8081"
-      TT_DATA_FILE: /data/matches.json
+      TT_STORE: ${TT_STORE:-dir}
+      TT_DATA_DIR: /data/store
+      TT_DB_URL: http://postgrest:3000
+      TT_DB_TOKEN: ${TT_DB_TOKEN:-}
+      TT_TRUST_PROXY: "1"
       TT_TURN_TIMEOUT_SEC: ${TT_TURN_TIMEOUT_SEC:-43200}
       TT_PUBLIC_LIVE_URL: wss://${TT_DOMAIN}/live
       TT_ADMIN_KEY: ${TT_ADMIN_KEY:-}
@@ -45,7 +52,40 @@ services:
       - caddy-data:/data
       - caddy-config:/config
 
+  db:
+    profiles: [postgres]
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trion
+      POSTGRES_USER: trion_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      PGRST_AUTHENTICATOR_PASSWORD: ${PGRST_AUTHENTICATOR_PASSWORD:-}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trion_admin -d trion"]
+      interval: 5s
+      retries: 20
+
+  # Internal only: no ports are published, so only the game server reaches it.
+  postgrest:
+    profiles: [postgres]
+    image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${PGRST_AUTHENTICATOR_PASSWORD}@db:5432/trion
+      PGRST_DB_SCHEMAS: api
+      PGRST_DB_ANON_ROLE: game_server
+    expose:
+      - "3000"
+
 volumes:
   trion-data:
   caddy-data:
   caddy-config:
+  pg-data:

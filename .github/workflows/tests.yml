@@ -31,6 +31,8 @@ jobs:
         run: godot --headless --path . res://test/online_test.tscn
       - name: Live play
         run: godot --headless --path . res://test/live_test.tscn
+      - name: Persistence
+        run: godot --headless --path . res://test/store_test.tscn
       - name: Local smoke
         run: godot --headless --path . res://test/smoke_test.tscn
 

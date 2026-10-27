@@ -127,6 +127,26 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   (App Store requirement).
 - Launch plan, App Store checklist, and scaling path:
   `docs/multiplayer/LAUNCH_PLAN.md`.
+- **Surrender** button in battle (two taps to confirm) in every mode.
+
+### Persistence — `server/db/`
+- `GameStore` interface; the server keeps live state in memory and writes
+  only changed records behind itself. Pick a backend with `TT_STORE`:
+  `json` (one file, default for dev), `dir` (one file per record, the
+  single-server production default), `postgrest` (Postgres through PostgREST;
+  schema in `deploy/db/`). Postgres writes are batched, coalesced, and
+  retried through outages.
+- Old tickets and unjoined matches are pruned; finished matches leave memory
+  after `TT_MATCH_RETENTION_SEC` (default 24 h) but stay in the store.
+
+### Connection layer — `common/net/`
+- `GameConnection` (client): server choice, version handshake against
+  `NetProtocol` (old builds are told to update), Online / Offline / Update
+  status, account recovery, and the matchmaking flow. `HttpBackend` is the
+  transport: concurrent requests, timeouts, GET retries.
+- Server hardening (`HttpServer`, `LiveHub`): body/header size limits,
+  request timeouts, per-client rate limit (`TT_TRUST_PROXY=1` behind Caddy),
+  WebSocket keepalive with dead-link detection, 4 MB resync buffers.
 
 ### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
 - Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
@@ -193,6 +213,7 @@ godot --headless --path . res://server/server.tscn
 #   TT_LIVE_PORT=8081          live WebSocket port (default TT_PORT + 1)
 #   TT_PUBLIC_LIVE_URL=wss://play.example.com/live   advertised to clients
 #   TT_ADMIN_KEY=<secret>      enables /admin endpoints (season reset)
+#   TT_STORE=dir TT_DATA_DIR=store   one file per record (or postgrest + TT_DB_URL)
 ```
 
 **Production:** `deploy/` has a Docker image and a Compose stack with Caddy
@@ -217,7 +238,8 @@ godot --headless --path . res://test/rules_test.tscn   # combat rules + server v
 godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow
-godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies
+godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies, surrender
+godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres (fake), outage
 ```
 
 CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.

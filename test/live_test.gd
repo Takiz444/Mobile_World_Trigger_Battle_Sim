@@ -36,6 +36,7 @@ func _run() -> void:
 	await _test_turn_cap()
 	await _test_forfeit_and_delete()
 	await _test_controller_buzzer()
+	await _test_surrender_button()
 
 	print("LIVE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
@@ -220,6 +221,61 @@ func _test_controller_buzzer() -> void:
 	_check(controller._turn >= 2, "pushed result replayed and the next turn began")
 	controller._live.close()
 	MatchSession.live = false
+
+
+## The Surrender button: two taps concede. Local = instant defeat; live =
+## the server records a forfeit and pushes the result back.
+func _test_surrender_button() -> void:
+	var squad := TriggerLibrary.sample_units()
+	MatchSession.mode = MatchSession.Mode.LOCAL
+	MatchSession.live = false
+	var local := _controller(squad)
+	local._on_surrender_pressed()
+	_check(not local._over_shown and local._surrender_btn.text.begins_with("Tap again"), "first tap only arms surrender")
+	local._on_surrender_pressed()
+	_check(local._over_shown and local._result_label.text == "DEFEAT" and local._turn_info.text.contains("You surrendered"),
+		"local surrender ends in defeat")
+
+	var b := _backend()
+	var created := await b.request("POST", "/match/create", { "seed": 4, "squad": PlanCodec.encode_squad(squad), "mode": "live" })
+	var match_id := str(created["body"]["match_id"])
+	await b.join_match(match_id, PlanCodec.encode_squad(squad))
+	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.live = true
+	MatchSession.live_url = LIVE_URL
+	MatchSession.server_url = URL
+	MatchSession.match_id = match_id
+	MatchSession.team = 0
+	MatchSession.token = str(created["body"]["token"])
+	var live := _controller(squad)
+	await _wait(func() -> bool: return live._live != null and live._live.is_open(), 3.0)
+	live._on_surrender_pressed()
+	live._on_surrender_pressed()
+	await _wait(func() -> bool: return live._over_shown, 3.0)
+	var m: Dictionary = _server._matches[match_id]
+	_check(int(m["winner"]) == 1 and str(m["end_reason"]) == "forfeit", "live surrender reaches the server")
+	_check(live._over_shown and live._result_label.text == "DEFEAT" and not live._rematch_btn.visible,
+		"live surrender shows the result (no local rematch)")
+	live._live.close()
+	MatchSession.live = false
+	MatchSession.mode = MatchSession.Mode.LOCAL
+
+
+func _controller(squad: Array[UnitData]) -> MatchController:
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	var board := HexBoard.new()
+	board.hex_size = 1.0
+	add_child(board)
+	var timeline := TimelineUI.new()
+	layer.add_child(timeline)
+	timeline.setup(squad)
+	var event_log := EventLogUI.new()
+	layer.add_child(event_log)
+	var controller := MatchController.new()
+	add_child(controller)
+	controller.setup(board, timeline, event_log, layer)
+	return controller
 
 
 # --- Helpers ------------------------------------------------------------------

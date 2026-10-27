@@ -22,11 +22,16 @@ var _name_input: LineEdit
 var _ranked_btn: Button
 var _live_btn: Button
 var _searching := false
+var _host_live: CheckBox
+var _conn: GameConnection
 var _search_mode := ""
 
 
 func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
+	_conn = GameConnection.new()
+	_conn.name = "GameConnection"
+	add_child(_conn)
 	_build_layout()
 	_load_squad()
 
@@ -126,7 +131,7 @@ func _build_layout() -> void:
 
 	# --- Async multiplayer section ---
 	var mp_label := Label.new()
-	mp_label.text = "— Async Multiplayer —"
+	mp_label.text = "— Online —"
 	mp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(mp_label)
 
@@ -145,6 +150,11 @@ func _build_layout() -> void:
 	_host_btn.text = "Host Online Match"
 	_host_btn.pressed.connect(_on_host_online)
 	mp_row.add_child(_host_btn)
+
+	_host_live = CheckBox.new()
+	_host_live.text = "Live clock"
+	_host_live.tooltip_text = "Friendly battle on the live turn clock instead of async turns"
+	mp_row.add_child(_host_live)
 
 	_join_input = LineEdit.new()
 	_join_input.placeholder_text = "Match ID"
@@ -323,24 +333,42 @@ func _on_start_pressed() -> void:
 	_start_match_scene()
 
 
-func _on_host_online() -> void:
-	_net_status.text = ""
+## Connects (or reconnects) the GameConnection to the Server URL field.
+## Returns false and shows why when the server can't be used.
+func _connect_server() -> bool:
+	var url := _server_input.text.strip_edges().rstrip("/")
+	MatchSession.server_url = url
+	if _conn.server_url != url or not _conn.is_online():
+		_net_status.text = "Connecting to %s…" % url
+		await _conn.connect_to(url)
+	if not _conn.is_online():
+		_net_status.text = _conn.last_error if _conn.status == GameConnection.Status.OUTDATED \
+			else "Server unavailable: %s" % _conn.last_error
+		return false
+	return true
+
+
+func _prepare_online_squad() -> void:
 	MatchSession.mode = MatchSession.Mode.ONLINE
-	MatchSession.live = false
-	MatchSession.live_url = ""
-	MatchSession.server_url = _server_input.text.strip_edges()
 	MatchSession.squad = SquadStore.get_squad().duplicate()
+	for u in MatchSession.squad:
+		u.ensure_slot_arrays()
+
+
+func _on_host_online() -> void:
+	if not await _connect_server():
+		return
+	_prepare_online_squad()
 	MatchSession.seed = 12345
-
-	var backend := HttpBackend.new()
-	add_child(backend)
-	backend.server_url = MatchSession.server_url
-	var res := await backend.create_match(MatchSession.seed, PlanCodec.encode_squad(MatchSession.squad))
-	backend.queue_free()
-
+	# Friendly battles: the host picks the live clock or async turns.
+	var mode := "live" if _host_live.button_pressed else "async"
+	var res := await _conn.backend.request("POST", "/match/create",
+		{ "seed": MatchSession.seed, "squad": PlanCodec.encode_squad(MatchSession.squad), "mode": mode })
 	if not res.get("success", false):
 		_net_status.text = "Host failed: %s" % str(res.get("error", "?"))
 		return
+	MatchSession.live = mode == "live"
+	MatchSession.live_url = _conn.live_url
 	MatchSession.match_id = str(res["body"].get("match_id", ""))
 	MatchSession.team = 0
 	MatchSession.token = str(res["body"].get("token", ""))
@@ -349,22 +377,14 @@ func _on_host_online() -> void:
 
 
 func _on_join_online() -> void:
-	_net_status.text = ""
 	var id := _join_input.text.strip_edges()
 	if id == "":
 		_net_status.text = "Enter a match ID to join."
 		return
-
-	MatchSession.mode = MatchSession.Mode.ONLINE
-	MatchSession.server_url = _server_input.text.strip_edges()
-	MatchSession.squad = SquadStore.get_squad().duplicate()
-
-	var backend := HttpBackend.new()
-	add_child(backend)
-	backend.server_url = MatchSession.server_url
-	var res := await backend.join_match(id, PlanCodec.encode_squad(MatchSession.squad))
-	backend.queue_free()
-
+	if not await _connect_server():
+		return
+	_prepare_online_squad()
+	var res := await _conn.backend.join_match(id, PlanCodec.encode_squad(MatchSession.squad))
 	if not res.get("success", false):
 		_net_status.text = "Join failed: %s" % str(res.get("error", "?"))
 		return
@@ -373,74 +393,41 @@ func _on_join_online() -> void:
 	MatchSession.token = str(res["body"].get("token", ""))
 	# The host decides whether a friendly battle runs on the live clock.
 	MatchSession.live = str(res["body"].get("mode", "async")) == "live"
-	MatchSession.live_url = ""
+	MatchSession.live_url = _conn.live_url
 	_net_status.text = "Joined match %s" % id
 	_start_match_scene()
 
 
-## Ranked matchmaking: registers (once per server), joins the `mode` queue
-## ("live" ladder or "async"), and polls until paired. Pressing the button
-## again cancels the search.
+## Ranked matchmaking in `mode` ("live" ladder or "async"): connects,
+## ensures an account, and waits for an opponent. Pressing the button again
+## cancels the search.
 func _on_find_ranked(mode: String) -> void:
 	if _searching:
 		if mode == _search_mode:
 			_searching = false
 		return
 	_search_mode = mode
-	_net_status.text = ""
-	var server := _server_input.text.strip_edges()
-	MatchSession.server_url = server
-	MatchSession.squad = SquadStore.get_squad().duplicate()
-	for u in MatchSession.squad:
-		u.ensure_slot_arrays()
-
-	var backend := HttpBackend.new()
-	add_child(backend)
-	backend.server_url = server
-	var account := await _ensure_account(backend, server)
+	if not await _connect_server():
+		return
+	var account := await _conn.ensure_account(_name_input.text.strip_edges())
 	if account.is_empty():
-		backend.queue_free()
+		_net_status.text = _conn.last_error
 		return
+	_prepare_online_squad()
 
-	var squad := PlanCodec.encode_squad(MatchSession.squad)
-	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
-	if int(res.get("status", 0)) == 403:
-		# The server no longer knows this account (e.g. a fresh server): re-register.
-		AccountStore.clear_for(server)
-		account = await _ensure_account(backend, server)
-		if account.is_empty():
-			backend.queue_free()
-			return
-		res = await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
-	if not res.get("success", false):
-		_net_status.text = "Matchmaking failed: %s" % str(res.get("error", "?"))
-		backend.queue_free()
-		return
-
-	var profile := await backend.get_account(account["player_id"])
-	var trophies := int(profile.get("body", {}).get("trophies", 0))
-	var arena := str(profile.get("body", {}).get("arena", ""))
 	var button := _live_btn if mode == "live" else _ranked_btn
 	var idle_text := button.text
 	_searching = true
 	button.text = "Cancel Search"
-	var ticket: Dictionary = res["body"]
-	while _searching and str(ticket.get("status", "")) == "queued":
-		_net_status.text = "Searching for an opponent…  (%s · %d trophies · %s)" % [account["name"], trophies, arena]
-		await get_tree().create_timer(1.0).timeout
-		var poll := await backend.poll_queue(str(ticket["ticket"]), account["secret"])
-		if poll.get("success", false):
-			ticket = poll["body"]
-	button.text = idle_text
-	if str(ticket.get("status", "")) != "matched":
-		_searching = false
-		await backend.cancel_queue(str(ticket.get("ticket", "")), account["secret"])
-		_net_status.text = "Search cancelled."
-		backend.queue_free()
-		return
+	_net_status.text = "Searching for an opponent…  (%s · %d trophies · %s)" % [
+		account.get("name", ""), int(account.get("trophies", 0)), str(account.get("arena", ""))]
+	var ticket := await _conn.find_match(PlanCodec.encode_squad(MatchSession.squad), mode,
+		func() -> bool: return _searching)
 	_searching = false
-	backend.queue_free()
-	MatchSession.mode = MatchSession.Mode.ONLINE
+	button.text = idle_text
+	if ticket.is_empty():
+		_net_status.text = _conn.last_error
+		return
 	MatchSession.live = mode == "live"
 	MatchSession.live_url = str(ticket.get("live_url", ""))
 	MatchSession.match_id = str(ticket["match_id"])
@@ -448,22 +435,6 @@ func _on_find_ranked(mode: String) -> void:
 	MatchSession.token = str(ticket["token"])
 	_net_status.text = "Opponent found — ranked match %s" % MatchSession.match_id
 	_start_match_scene()
-
-
-## Saved account for `server`, or a newly registered one. {} on failure.
-func _ensure_account(backend: HttpBackend, server: String) -> Dictionary:
-	var account := AccountStore.load_for(server)
-	if not account.is_empty():
-		return account
-	var player_name := _name_input.text.strip_edges()
-	if player_name == "":
-		player_name = "Player"
-	var res := await backend.register_account(player_name)
-	if not res.get("success", false):
-		_net_status.text = "Could not create account: %s" % str(res.get("error", "?"))
-		return {}
-	AccountStore.save_for(server, res["body"])
-	return AccountStore.load_for(server)
 
 
 func _start_match_scene() -> void:

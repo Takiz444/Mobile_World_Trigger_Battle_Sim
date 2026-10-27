@@ -8,10 +8,16 @@ extends Node
 ## Env vars:
 ##   TT_PORT              port to listen on (default 8080)
 ##   TT_TURN_TIMEOUT_SEC  turn timer before auto-fill (default 12h, GDD 3.1)
-##   TT_DATA_FILE         where matches are persisted (default user://matches.json)
+##   TT_STORE             persistence backend: json (default) | dir | postgrest (GameStore)
+##   TT_DATA_FILE         json store file (default user://matches.json)
+##   TT_DATA_DIR          dir store root (default user://store)
+##   TT_DB_URL            postgrest store base URL, e.g. http://postgrest:3000
+##   TT_DB_TOKEN          optional PostgREST JWT
+##   TT_MATCH_RETENTION_SEC  finished matches stay in memory this long (default 24h)
+##   TT_TRUST_PROXY       1 = use X-Forwarded-For for rate limits (behind Caddy)
 ##
 ## Endpoints:
-##   GET  /health
+##   GET  /health                                     -> {ok, protocol, min_protocol, server_time, live_url, season}
 ##   POST /match/create      {seed, squad, mode?}     -> {match_id, team, token}
 ##   POST /match/{id}/join   {squad}                  -> {status, seed, team, token}
 ##   POST /match/{id}/submit {token, turn, plan}
@@ -57,9 +63,21 @@ const DEFAULT_PORT := 8080
 const DEFAULT_TURN_TIMEOUT_SEC := 12 * 60 * 60  # auto-fill deadline (GDD 3.1)
 const DEFAULT_DATA_FILE := "user://matches.json"
 const MATCHMAKER_INTERVAL := 1.0
+const PRUNE_INTERVAL := 60.0
+## Matched / cancelled tickets are dropped this long after queueing.
+const TICKET_TTL_SEC := 60 * 60
+## Hosted matches nobody joined are dropped after this long.
+const UNJOINED_TTL_SEC := 24 * 60 * 60
+const DEFAULT_MATCH_RETENTION_SEC := 24 * 60 * 60
 
-## Set false before adding to the tree to disable disk persistence (tests).
+## Set false before adding to the tree to disable persistence (tests).
 var persist := true
+## Persistence backend; null = chosen from the environment (GameStore.from_env).
+## Set before adding to the tree to inject one (tests).
+var store: GameStore = null
+## Finished matches are kept in memory (for GET / replays) this long, then
+## evicted; they stay in the store.
+var match_retention_sec := DEFAULT_MATCH_RETENTION_SEC
 ## Listening port; TT_PORT overrides it. Tests use their own port so they
 ## never collide with a server you are running.
 var port := DEFAULT_PORT
@@ -86,6 +104,9 @@ var _accounts: Dictionary = {}    # player_id -> {id, name, secret, rating, trop
 var _tickets: Dictionary = {}     # ticket -> {ticket, player_id, status, mode, squad, rating, queued_at, match_id, team, token}
 var _season := 1
 var _mm_timer := 0.0
+var _prune_timer := 0.0
+## Records changed since the last flush: kind -> {id: true (write) / false (delete)}.
+var _dirty := { "accounts": {}, "tickets": {}, "matches": {}, "meta": {} }
 var _crypto := Crypto.new()
 
 
@@ -108,16 +129,28 @@ func _ready() -> void:
 		public_live_url = OS.get_environment("TT_PUBLIC_LIVE_URL")
 	if OS.get_environment("TT_ADMIN_KEY") != "":
 		admin_key = OS.get_environment("TT_ADMIN_KEY")
+	if OS.get_environment("TT_MATCH_RETENTION_SEC") != "":
+		match_retention_sec = int(OS.get_environment("TT_MATCH_RETENTION_SEC"))
+	_http.trust_proxy = OS.get_environment("TT_TRUST_PROXY") == "1"
 	if persist:
-		_load()
+		if store == null:
+			store = GameStore.from_env(data_file)
+		if not await _open_store():
+			# Refuse to serve players without working persistence.
+			push_error("Store %s unavailable; shutting down." % store.describe())
+			get_tree().quit(1)
+			return
 	var ok := _http.start(port, _handle_request)
 	var live_ok := _hub.start(live_port, _on_live_message, _on_live_close)
-	print("Trion Tactics server listening on :%d (start=%s), live :%d (start=%s), turn timeout %ds, %d matches loaded" % [
-		port, ok, live_port, live_ok, turn_timeout_sec, _matches.size()])
+	print("Trion Tactics server listening on :%d (start=%s), live :%d (start=%s), turn timeout %ds, store %s, %d matches / %d accounts loaded" % [
+		port, ok, live_port, live_ok, turn_timeout_sec, store.describe() if store != null else "none",
+		_matches.size(), _accounts.size()])
 
 
 func _exit_tree() -> void:
+	_save()
 	_hub.stop()
+	_http.stop()
 
 
 func _process(delta: float) -> void:
@@ -129,11 +162,19 @@ func _process(delta: float) -> void:
 		_mm_timer = 0.0
 		if _run_matchmaker() > 0:
 			_save()
+	_prune_timer += delta
+	if _prune_timer >= PRUNE_INTERVAL:
+		_prune_timer = 0.0
+		_prune()
 
 
 func _handle_request(method: String, path: String, body: Dictionary) -> Dictionary:
 	if method == "GET" and path == "/health":
-		return _ok({ "ok": true, "matches": _matches.size() })
+		var health := { "ok": true, "protocol": NetProtocol.VERSION, "min_protocol": NetProtocol.MIN_SUPPORTED,
+			"server_time": Time.get_unix_time_from_system(), "season": _season, "matches": _matches.size() }
+		if public_live_url != "":
+			health["live_url"] = public_live_url
+		return _ok(health)
 	if method == "POST" and path == "/match/create":
 		return _create_match(body)
 	if method == "POST" and path.begins_with("/match/") and path.ends_with("/join"):
@@ -210,9 +251,12 @@ func _new_match(squad: Array, seed: int, ranked := false, mode := "async") -> Di
 		"deadline": -1.0,
 		"winner": -1,
 		"end_reason": "",
+		"created_at": Time.get_unix_time_from_system(),
+		"ended_at": 0.0,
 		"history": [],
 	}
 	_matches[id] = m
+	_touch("matches", id)
 	return m
 
 
@@ -229,6 +273,7 @@ func _seat_second(m: Dictionary, squad: Array) -> String:
 ## Starts the planning clock for the match's current turn. Live matches get
 ## Ladder's short planning window (plus `extra` for loading / replay time).
 func _start_turn_clock(m: Dictionary, extra := 0.0) -> void:
+	_touch("matches", m["id"])
 	var now := Time.get_unix_time_from_system()
 	m["turn_started"] = now
 	if m.get("mode", "async") == "live":
@@ -284,6 +329,7 @@ func _submit(id: String, body: Dictionary) -> Dictionary:
 	m["plans"][team] = decoded["plan"]
 	m["submitted"][team] = true
 	m["missed"][team] = 0
+	_touch("matches", m["id"])
 	if bool(m["submitted"][0]) and bool(m["submitted"][1]):
 		_resolve_turn(m)
 		_save()
@@ -352,6 +398,7 @@ func _get_match(id: String, token: String) -> Dictionary:
 ## Resolves the turn tick by tick, recording a fog-filtered replay frame per
 ## tick for each team.
 func _resolve_turn(m: Dictionary) -> void:
+	_touch("matches", m["id"])
 	var ms: MatchState = m["ms"]
 	var turn := int(m["turn"])
 	var engine := TickEngine.new()
@@ -403,6 +450,8 @@ func _end_match(m: Dictionary, winner: int, reason: String) -> void:
 	m["winner"] = winner
 	m["end_reason"] = reason
 	m["deadline"] = -1.0
+	m["ended_at"] = Time.get_unix_time_from_system()
+	_touch("matches", m["id"])
 	if m.get("ranked", false):
 		_apply_elo(m, winner)
 		if m.get("mode", "async") == "live":
@@ -468,50 +517,97 @@ func _check_timeouts() -> void:
 
 
 # --- Persistence ------------------------------------------------------------
+# Live state lives in memory; the store (GameStore) gets only the records that
+# changed. Mutations call _touch()/_drop(); _save() hands those records to the
+# store and flushes.
 
+func _touch(kind: String, id: String) -> void:
+	if persist:
+		_dirty[kind][id] = true
+
+
+func _drop(kind: String, id: String) -> void:
+	if persist:
+		_dirty[kind][id] = false
+
+
+## Writes changed records to the store.
 func _save() -> void:
-	if not persist:
+	if store == null:
 		return
-	var matches := {}
-	for id in _matches:
-		matches[id] = _serialize(_matches[id])
-	var out := { "matches": matches, "accounts": _accounts, "tickets": _tickets, "season": _season }
-	# Write a temp file and rename it over the store, so a crash mid-write
-	# can't leave a truncated store behind.
-	var tmp := data_file + ".tmp"
-	var f := FileAccess.open(tmp, FileAccess.WRITE)
-	if f == null:
-		push_warning("Could not write %s (error %d)" % [tmp, FileAccess.get_open_error()])
-		return
-	f.store_string(JSON.stringify(out))
-	f.close()
-	var err := DirAccess.rename_absolute(tmp, data_file)
-	if err != OK:
-		push_warning("Could not replace %s (error %d)" % [data_file, err])
+	for kind in _dirty:
+		for id in _dirty[kind]:
+			if not _dirty[kind][id]:
+				store.remove(kind, id)
+				continue
+			# Only _drop() deletes: a record that is no longer in memory was
+			# evicted (see _prune), not deleted.
+			var record := _record(kind, id)
+			if not record.is_empty():
+				store.put(kind, id, record)
+		_dirty[kind].clear()
+	store.flush()
 
 
-func _load() -> void:
-	if not FileAccess.file_exists(data_file):
-		return
-	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(data_file))
-	if not (parsed is Dictionary):
-		push_warning("Ignoring unreadable match store %s" % data_file)
-		return
-	# Older stores were a bare {match_id: match} dictionary.
-	var matches: Dictionary = parsed["matches"] if parsed.has("matches") else parsed
-	for id in matches:
-		_matches[id] = _deserialize(matches[id])
-	for id in parsed.get("accounts", {}):
-		var a: Dictionary = parsed["accounts"][id]
-		_accounts[id] = _normalize_account(a)
-	for t in parsed.get("tickets", {}):
-		var ticket: Dictionary = parsed["tickets"][t]
+## The JSON-ready record for (kind, id), or {} if it no longer exists.
+func _record(kind: String, id: String) -> Dictionary:
+	match kind:
+		"matches":
+			return _serialize(_matches[id]) if _matches.has(id) else {}
+		"accounts":
+			return _accounts.get(id, {})
+		"tickets":
+			return _tickets.get(id, {})
+		"meta":
+			return { "season": _season } if id == "server" else {}
+	return {}
+
+
+## Adds the store to the tree, opens it, and loads every record into memory.
+func _open_store() -> bool:
+	if store.get_parent() == null:
+		add_child(store)
+	if not await store.open():
+		return false
+	var cutoff := Time.get_unix_time_from_system() - match_retention_sec
+	var data: Dictionary = await store.load_all(cutoff)
+	for id in data.get("matches", {}):
+		var d: Dictionary = data["matches"][id]
+		if int(d.get("winner", -1)) != -1 and float(d.get("ended_at", 0.0)) < cutoff:
+			continue
+		_matches[id] = _deserialize(d)
+	for id in data.get("accounts", {}):
+		_accounts[id] = _normalize_account(data["accounts"][id])
+	for id in data.get("tickets", {}):
+		var ticket: Dictionary = data["tickets"][id]
 		ticket["team"] = int(ticket.get("team", -1))
 		ticket["rating"] = int(ticket.get("rating", START_RATING))
 		ticket["mode"] = str(ticket.get("mode", "async"))
 		ticket["queued_at"] = float(ticket.get("queued_at", Time.get_unix_time_from_system()))
-		_tickets[t] = ticket
-	_season = int(parsed.get("season", 1))
+		_tickets[id] = ticket
+	_season = int(data.get("meta", {}).get("server", {}).get("season", 1))
+	return true
+
+
+## Keeps memory bounded: drops old tickets (from the store too), hosted
+## matches nobody joined, and finished matches past the retention window
+## (those stay in the store as history).
+func _prune() -> void:
+	_save()   # write anything pending before evicting it from memory
+	var now := Time.get_unix_time_from_system()
+	for id in _tickets.keys():
+		var t: Dictionary = _tickets[id]
+		if t["status"] != "queued" and now - float(t["queued_at"]) > TICKET_TTL_SEC:
+			_tickets.erase(id)
+			_drop("tickets", id)
+	for id in _matches.keys():
+		var m: Dictionary = _matches[id]
+		if m["ms"] == null and now - float(m.get("created_at", now)) > UNJOINED_TTL_SEC:
+			_matches.erase(id)
+			_drop("matches", id)
+		elif int(m["winner"]) != -1 and now - float(m.get("ended_at", now)) > match_retention_sec:
+			_matches.erase(id)
+	_save()
 
 
 ## Fills fields that older stores lack and fixes JSON number types.
@@ -547,6 +643,8 @@ func _serialize(m: Dictionary) -> Dictionary:
 		"deadline": m.get("deadline", -1.0),
 		"winner": m["winner"],
 		"end_reason": m.get("end_reason", ""),
+		"created_at": m.get("created_at", 0.0),
+		"ended_at": m.get("ended_at", 0.0),
 		"players": m.get("players", ["", ""]),
 		"ranked": m.get("ranked", false),
 		"rating_change": m.get("rating_change", [0, 0]),
@@ -592,6 +690,8 @@ func _deserialize(d: Dictionary) -> Dictionary:
 		"deadline": deadline,
 		"winner": int(d["winner"]),
 		"end_reason": str(d.get("end_reason", "")),
+		"created_at": float(d.get("created_at", 0.0)),
+		"ended_at": float(d.get("ended_at", 0.0)),
 		"players": [str(d.get("players", ["", ""])[0]), str(d.get("players", ["", ""])[1])],
 		"ranked": bool(d.get("ranked", false)),
 		"rating_change": [int(d.get("rating_change", [0, 0])[0]), int(d.get("rating_change", [0, 0])[1])],
@@ -608,6 +708,7 @@ func _register(body: Dictionary) -> Dictionary:
 		return _err(400, "name must be 1-%d characters" % NAME_MAX)
 	var id := _new_id()
 	_accounts[id] = _normalize_account({ "id": id, "name": player_name, "secret": _new_token() })
+	_touch("accounts", id)
 	_save()
 	var a: Dictionary = _accounts[id]
 	return _ok({ "player_id": id, "secret": a["secret"], "name": player_name, "rating": a["rating"],
@@ -625,11 +726,13 @@ func _delete_account(body: Dictionary) -> Dictionary:
 	for t in _tickets.values():
 		if t["player_id"] == pid and t["status"] == "queued":
 			t["status"] = "cancelled"
+			_touch("tickets", t["ticket"])
 	for m in _matches.values():
 		var seat: int = (m.get("players", ["", ""]) as Array).find(pid)
 		if seat != -1 and int(m["winner"]) == -1 and m["ms"] != null:
 			_end_match(m, 1 - seat, "forfeit")
 	_accounts.erase(pid)
+	_drop("accounts", pid)
 	_save()
 	return _ok({ "deleted": pid })
 
@@ -640,7 +743,9 @@ func _season_reset(body: Dictionary) -> Dictionary:
 		return _err(403, "forbidden")
 	for a in _accounts.values():
 		a["trophies"] = Ladder.season_reset(int(a["trophies"]))
+		_touch("accounts", a["id"])
 	_season += 1
+	_touch("meta", "server")
 	_save()
 	return _ok({ "season": _season, "players": _accounts.size() })
 
@@ -685,10 +790,12 @@ func _enqueue(body: Dictionary) -> Dictionary:
 	for t in _tickets.values():
 		if t["player_id"] == pid and t["status"] == "queued":
 			t["status"] = "cancelled"
+			_touch("tickets", t["ticket"])
 	var ticket := { "ticket": _new_id(), "player_id": pid, "status": "queued", "mode": mode, "squad": squad,
 		"rating": int(_accounts[pid]["rating"]), "queued_at": Time.get_unix_time_from_system(),
 		"match_id": "", "team": -1, "token": "" }
 	_tickets[ticket["ticket"]] = ticket
+	_touch("tickets", ticket["ticket"])
 	_run_matchmaker()
 	_save()
 	return _ok(_ticket_view(ticket))
@@ -726,6 +833,8 @@ func _run_matchmaker() -> int:
 		m["players"] = [a["player_id"], best["player_id"]]
 		a.merge({ "status": "matched", "match_id": m["id"], "team": 0, "token": m["tokens"][0] }, true)
 		best.merge({ "status": "matched", "match_id": m["id"], "team": 1, "token": token1 }, true)
+		_touch("tickets", a["ticket"])
+		_touch("tickets", best["ticket"])
 		made += 1
 	return made
 
@@ -743,6 +852,7 @@ func _cancel_ticket(id: String, secret: String) -> Dictionary:
 		return _err(404, "ticket not found")
 	if t["status"] == "queued":
 		t["status"] = "cancelled"
+		_touch("tickets", id)
 		_save()
 	return _ok(_ticket_view(t))
 
@@ -766,6 +876,8 @@ func _apply_elo(m: Dictionary, winner: int) -> void:
 	var deltas := elo_deltas(int(a["rating"]), int(b["rating"]), winner)
 	a["rating"] = int(a["rating"]) + deltas[0]
 	b["rating"] = int(b["rating"]) + deltas[1]
+	_touch("accounts", a["id"])
+	_touch("accounts", b["id"])
 	if winner == 0 or winner == 1:
 		var winner_acc: Dictionary = a if winner == 0 else b
 		var loser_acc: Dictionary = b if winner == 0 else a
@@ -789,6 +901,7 @@ func _apply_trophies(m: Dictionary, winner: int) -> void:
 	for i in 2:
 		accs[i]["trophies"] = int(accs[i]["trophies"]) + int(deltas[i])
 		accs[i]["best_trophies"] = maxi(int(accs[i]["best_trophies"]), int(accs[i]["trophies"]))
+		_touch("accounts", accs[i]["id"])
 	m["trophy_change"] = deltas
 
 
@@ -827,6 +940,11 @@ func _on_live_message(conn: Dictionary, msg: Dictionary) -> void:
 		_hub.send(conn, { "type": "pong", "server_time": Time.get_unix_time_from_system() })
 		return
 	if type == "hello":
+		# Clients older than the protocol field count as version 1.
+		if not NetProtocol.is_supported(int(msg.get("protocol", 1))):
+			_hub.send(conn, { "type": "error", "code": "outdated",
+				"error": "This version of the game is out of date. Please update." })
+			return
 		var id := str(msg.get("match_id", ""))
 		var m: Dictionary = _matches.get(id, {})
 		var team := _team_for_token(m, str(msg.get("token", ""))) if not m.is_empty() else -1
