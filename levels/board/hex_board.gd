@@ -11,6 +11,15 @@ const INVALID_HEX := Vector2i(-2147483648, -2147483648)
 
 signal tile_hovered(hex: Vector2i)
 signal tile_selected(hex: Vector2i)
+## Raw pointer stream used by draggable 3D UI (the look orb). `pointer_down`
+## carries the mouse pick Dictionary ({hex, position} or empty). While
+## `drag_capture` is true the board suppresses tile selection so the drag owns
+## the gesture.
+signal pointer_down(pick: Dictionary)
+signal pointer_drag(hex: Vector2i, world: Vector3)
+signal pointer_up(hex: Vector2i)
+
+var drag_capture := false
 
 @export var board_radius: int = 5
 @export var hex_size: float = 1.0
@@ -86,12 +95,24 @@ var _pressed := false
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		_update_hover()
+		if _pressed and drag_capture:
+			var drag_pick := _mouse_pick()
+			var drag_hex: Vector2i = drag_pick["hex"] if not drag_pick.is_empty() else INVALID_HEX
+			pointer_drag.emit(drag_hex, drag_pick.get("position", Vector3.ZERO))
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
 			_pressed = true
 			_press_pos = event.position
+			pointer_down.emit(_mouse_pick())
 		elif _pressed:
 			_pressed = false
+			if drag_capture:
+				# The drag (look orb) owns this gesture: commit and stop.
+				drag_capture = false
+				var up_pick := _mouse_pick()
+				var up_hex: Vector2i = up_pick["hex"] if not up_pick.is_empty() else INVALID_HEX
+				pointer_up.emit(up_hex)
+				return
 			if event.position.distance_to(_press_pos) > TAP_SLOP_PX:
 				return
 			var hex := _mouse_to_hex()

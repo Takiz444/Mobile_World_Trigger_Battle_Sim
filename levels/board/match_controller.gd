@@ -26,6 +26,7 @@ var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _units_view: BoardUnits
 var _fx: CombatFx
+var _look_orb: LookOrb
 var _camera: BoardCamera
 var _engine := TickEngine.new()
 
@@ -84,11 +85,19 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_board.add_child(_fx)
 	_fx.setup(_board.hex_size)
 
+	_look_orb = LookOrb.new()
+	_look_orb.name = "LookOrb"
+	_board.add_child(_look_orb)
+	_look_orb.setup(_board.hex_size)
+
 	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
 
 	_board.tile_selected.connect(_on_tile_selected)
 	_board.tile_hovered.connect(_on_tile_hovered)
+	_board.pointer_down.connect(_on_pointer_down)
+	_board.pointer_drag.connect(_on_pointer_drag)
+	_board.pointer_up.connect(_on_pointer_up)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
 	_timeline.unit_selected.connect(_on_unit_selected)
 	_timeline.targeting_changed.connect(_update_targeting)
@@ -265,6 +274,54 @@ func _face_selected_slot_toward(hex: Vector2i) -> void:
 		_timeline.set_facing_for_selected_slot(dir)
 
 
+# --- Look orb (drag to choose where the unit looks) -------------------------
+
+## Left-press: if it landed on the look orb, take over the gesture.
+func _on_pointer_down(pick: Dictionary) -> void:
+	if _resolving or _look_orb == null or not _look_orb.visible or pick.is_empty():
+		return
+	var cam := get_viewport().get_camera_3d()
+	if _look_orb.hit_test(get_viewport().get_mouse_position(), cam):
+		_board.drag_capture = true
+		_look_orb.begin_drag()
+
+
+## While dragging, the orb follows the pointer across the board.
+func _on_pointer_drag(_hex: Vector2i, world: Vector3) -> void:
+	if _board.drag_capture and _look_orb != null:
+		_look_orb.drag_to(world)
+
+
+## Release: commit the look direction toward the hex under the pointer, then
+## snap the orb back onto its orbit.
+func _on_pointer_up(hex: Vector2i) -> void:
+	if _look_orb == null:
+		return
+	_look_orb.end_drag()
+	if hex != HexBoard.INVALID_HEX and _board.has_tile(hex):
+		_face_selected_slot_toward(hex)
+	_update_targeting()
+
+
+## Shows the draggable look orb on the selected unit's projected hex, resting
+## on the hex edge that matches its facing.
+func _update_look_orb(info: Dictionary) -> void:
+	if _look_orb == null:
+		return
+	if _board.drag_capture:
+		return  # the drag owns the orb until release
+	if _resolving or info.is_empty():
+		_look_orb.hide_orb()
+		return
+	var unit_index: int = info.get("unit", -1)
+	var tick: int = info.get("tick", -1)
+	if unit_index < 0 or unit_index >= _player_states.size() or tick < 0 or _player_states[unit_index].is_bailed:
+		_look_orb.hide_orb()
+		return
+	var hex := _projected_hex(unit_index, tick)
+	_look_orb.show_at(_board.hex_to_world_at(hex, _projected_floor(unit_index, tick)), _projected_facing(unit_index, tick))
+
+
 ## Picks the destination floor for a clicked hex. Movement cards may climb or
 ## descend within the unit's own hex (toggle up/down on repeated clicks);
 ## every other card targets by hex only (floor 0).
@@ -328,6 +385,8 @@ func _preferred_move_floor(info: Dictionary, hex: Vector2i, toggle: bool) -> int
 
 func _on_tile_hovered(hex: Vector2i) -> void:
 	_hovered_hex = hex
+	if _look_orb != null:
+		_look_orb.set_hovered(get_viewport().get_mouse_position(), get_viewport().get_camera_3d())
 	_update_targeting()
 
 
@@ -521,6 +580,8 @@ func _begin_replay() -> void:
 	_units_view.set_selected(null)
 	if _fx != null:
 		_fx.clear_preview()
+	if _look_orb != null:
+		_look_orb.hide_orb()
 	if _prediction_label != null:
 		_prediction_label.visible = false
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
@@ -638,6 +699,7 @@ func _update_targeting() -> void:
 	if idx >= 0 and idx < _player_states.size():
 		_units_view.set_selected(_player_states[idx])
 	_update_vision(info)
+	_update_look_orb(info)
 
 
 ## Shows the selected character's vision cones where it will be (and which

@@ -120,6 +120,23 @@ func _check_preview() -> void:
 	plan.clear_facing(0, 0, TurnPlan.MAIN_SLOT)
 	_controller._update_targeting()
 
+	# Look orb: appears for the selected tick, orbits the unit's hex, and a
+	# drag-release commits the look direction.
+	var center := _board.hex_to_world_at(u.hex, u.floor)
+	_check(_controller._look_orb.visible, "look orb appears for the selected tick")
+	var orb_pos := _controller._look_orb.orb_world_position()
+	var orbit := Vector2(orb_pos.x - center.x, orb_pos.z - center.z).length()
+	_check(absf(orbit - LookOrb.ORBIT_FRACTION * _board.hex_size) < 0.05,
+		"look orb orbits the unit's hex")
+	var dest := HexCoord.neighbor(u.hex, posmod(u.facing + 2, 6))
+	_controller._look_orb.begin_drag()
+	_controller._look_orb.drag_to(_board.hex_to_world_at(dest, u.floor))
+	_controller._on_pointer_up(dest)
+	_check(plan.slot_facing(0, 0, TurnPlan.MAIN_SLOT) == TickEngine.attack_direction(u.hex, dest),
+		"dragging the look orb sets the look direction")
+	plan.clear_facing(0, 0, TurnPlan.MAIN_SLOT)
+	_controller._update_targeting()
+
 
 ## The rendered city's physics solids and the engine's line-of-sight rules
 ## must agree: fire real physics rays between random street positions (eye
