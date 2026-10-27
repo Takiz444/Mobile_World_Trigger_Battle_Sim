@@ -126,8 +126,8 @@ func _check_preview() -> void:
 	_check(_controller._look_orb.visible, "look orb appears for the selected tick")
 	var orb_pos := _controller._look_orb.orb_world_position()
 	var orbit := Vector2(orb_pos.x - center.x, orb_pos.z - center.z).length()
-	_check(absf(orbit - LookOrb.ORBIT_FRACTION * _board.hex_size) < 0.05,
-		"look orb orbits the unit's hex")
+	_check(absf(orbit - _controller._look_orb.orbit_radius()) < 0.05,
+		"look orb orbits one hex out from the unit")
 	var dest := HexCoord.neighbor(u.hex, posmod(u.facing + 2, 6))
 	_controller._look_orb.begin_drag()
 	_controller._look_orb.drag_to(_board.hex_to_world_at(dest, u.floor))

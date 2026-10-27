@@ -9,11 +9,13 @@ extends Node3D
 ## collision body, so board tile picking ignores it (hit-testing is done in
 ## screen space instead).
 
-## How far out the orb orbits, as a fraction of hex_size.
-const ORBIT_FRACTION := 0.72
+## How far out the orb orbits, measured in hexes (1 = the adjacent hex centre).
+const ORBIT_HEXES := 1.0
+## World distance between adjacent hex centres (flat-top layout).
+const HEX_SPACING := 1.7320508075688772
 ## Pointer-to-orb screen distance (px) that counts as grabbing it.
-const HIT_RADIUS_PX := 30.0
-const HOVER_RADIUS_PX := 46.0
+const HIT_RADIUS_PX := 38.0
+const HOVER_RADIUS_PX := 56.0
 
 var hex_size := 1.0
 
@@ -34,8 +36,8 @@ func setup(p_hex_size: float) -> void:
 	_material = _make_material(Color(0.62, 0.95, 1.0, 0.5), 1.4)
 	_orb = MeshInstance3D.new()
 	var sphere := SphereMesh.new()
-	sphere.radius = hex_size * 0.2
-	sphere.height = hex_size * 0.4
+	sphere.radius = hex_size * 0.28
+	sphere.height = hex_size * 0.56
 	sphere.radial_segments = 18
 	sphere.rings = 10
 	_orb.mesh = sphere
@@ -47,10 +49,10 @@ func setup(p_hex_size: float) -> void:
 	_ring_material = _make_material(Color(0.5, 0.9, 1.0, 0.16), 0.5)
 	_ring = MeshInstance3D.new()
 	var torus := TorusMesh.new()
-	var r := hex_size * ORBIT_FRACTION
+	var r := orbit_radius()
 	torus.inner_radius = r - hex_size * 0.03
 	torus.outer_radius = r + hex_size * 0.03
-	torus.rings = 28
+	torus.rings = 40
 	torus.ring_segments = 6
 	_ring.mesh = torus
 	_ring.material_override = _ring_material
@@ -78,8 +80,13 @@ func _process(delta: float) -> void:
 func show_at(center: Vector3, facing: int) -> void:
 	position = center
 	var fwd := _dir_vector(facing)
-	_orb.global_position = center + Vector3(0.0, _y_off, 0.0) + fwd * (hex_size * ORBIT_FRACTION)
+	_orb.global_position = center + Vector3(0.0, _y_off, 0.0) + fwd * orbit_radius()
 	visible = true
+
+
+## Radius of the orbit (one hex out by default).
+func orbit_radius() -> float:
+	return ORBIT_HEXES * HEX_SPACING * hex_size
 
 
 func hide_orb() -> void:
