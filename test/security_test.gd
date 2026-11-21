@@ -147,6 +147,12 @@ func _test_fogged_wires() -> void:
 func _test_names() -> void:
 	_check(NameRules.clean("  A  [b]x[/b]\n<i>" + char(0x202E) + " ") == "A bx/bi", "names lose markup and control characters")
 	_check(not NameRules.is_clean("[url=x]y[/url]", 20) and NameRules.is_clean("Kuga 2", 20), "markup is not a clean name")
+	_check(not NameRules.is_allowed("xXFuckXx") and not NameRules.is_allowed("F.u.c.k") \
+		and not NameRules.is_allowed("n1gg3r") and not NameRules.is_allowed("Server Admin"), "blocked words are refused, even disguised")
+	var ordinary_ok := true
+	for ordinary in ["Kuga 2", "Cassandra", "Hancock", "Ashita", "Swanky", "Grape", "Raccoon", "Spice", "Therapist"]:
+		ordinary_ok = ordinary_ok and NameRules.is_allowed(ordinary)
+	_check(ordinary_ok, "ordinary names are not caught by the blocklist")
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
 	squad[0]["name"] = "[img]res://icon.svg[/img]"
 	_check(PlanCodec.validate_squad(squad) != "", "squad with a markup unit name is rejected")

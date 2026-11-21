@@ -220,7 +220,7 @@ func _refresh_unit_tabs() -> void:
 		var bailed := bool(st.get("bailed", false))
 		var hp_text := "OUT" if bailed else "%d HP" % int(st.get("hp", _units[i].base_trion_hp))
 		var warn := not bailed and not _problem_of(i).is_empty()
-		b.text = "%s%s   %s" % ["⚠ " if warn else "", _units[i].unit_name, hp_text]
+		b.text = "%s%s   %s" % ["! " if warn else "", _units[i].unit_name, hp_text]
 		if warn:
 			b.add_theme_color_override("font_color", WARN_COLOR)
 		b.custom_minimum_size = Vector2(170, 40)
@@ -346,7 +346,7 @@ func _refresh_guide(error: String = "") -> void:
 		# Another character's plan is what holds up Submit: say so.
 		var problem := squad_problem()
 		if not problem.is_empty() and int(problem["unit"]) != _current_unit:
-			text = "%s needs attention: %s (tap the ⚠ tab)." % [_units[int(problem["unit"])].unit_name, problem["text"]]
+			text = "%s needs attention: %s (tap the tab marked !)." % [_units[int(problem["unit"])].unit_name, problem["text"]]
 			color = WARN_COLOR
 	_guide.text = text
 	_guide.add_theme_color_override("font_color", color)

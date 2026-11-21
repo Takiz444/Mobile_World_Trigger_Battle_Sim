@@ -51,14 +51,30 @@ static func is_clean(text: String, max_length: int) -> bool:
 	return text != "" and text.length() <= max_length and clean(text) == text
 
 
-## False when `text` contains a blocked word (case-insensitive).
+## False when `text` contains a blocked word (case-insensitive). Also checks
+## a squashed copy (separators dropped, common digit/symbol swaps undone) so
+## "F.u.c.k" or "n1gg3r" are caught too.
 static func is_allowed(text: String) -> bool:
 	_load()
 	var lowered := text.to_lower()
+	var squashed := squash(lowered)
 	for word in _blocked:
-		if lowered.contains(word):
+		if lowered.contains(word) or squashed.contains(squash(word)):
 			return false
 	return true
+
+
+## Lowercase letters only, with look-alike digits/symbols mapped back to
+## letters ("$h1t" -> "shit", "f u.c-k" -> "fuck").
+static func squash(text: String) -> String:
+	const SWAPS := { "0": "o", "1": "i", "!": "i", "3": "e", "4": "a", "@": "a", "5": "s", "$": "s", "7": "t", "8": "b", "9": "g" }
+	var out := ""
+	for ch in text.to_lower():
+		if SWAPS.has(ch):
+			out += SWAPS[ch]
+		elif (ch >= "a" and ch <= "z") or ch.unicode_at(0) > 127:
+			out += ch
+	return out
 
 
 static func _load() -> void:

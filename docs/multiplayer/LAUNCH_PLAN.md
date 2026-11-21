@@ -115,7 +115,7 @@ The server sends `seconds_left` rather than an absolute time, so device clock sk
 One process holds live state in memory and writes only changed records to its store (`TT_STORE`: a directory of files, or Postgres via PostgREST).
 That is fine for a closed beta and a soft launch on one machine. Steps beyond that:
 
-1. **Database** ✅ drafted: `PostgrestStore` + `deploy/db/00-schema.sql`. Records are JSONB documents with indexed columns for leaderboards and match history. Every match is written after each turn, so a restart resumes it. **TODO:** run it against real Postgres in staging, and set up backups (`pg_dump` or managed Postgres).
+1. **Database** ✅ drafted: `PostgrestStore` + `deploy/db/00-schema.sql`. Records are JSONB documents with indexed columns for leaderboards and match history. Every match is written after each turn, so a restart resumes it. Backups: `deploy/backup.sh` runs `pg_dump` daily (installed by `deploy/bootstrap.sh`). **TODO:** run it against real Postgres in staging (the first VM deploy does this).
 2. **Split services.**
    * A stateless **account/queue API** (any language).
    * N **match workers**, each running the Godot headless resolver.
@@ -123,7 +123,7 @@ That is fine for a closed beta and a soft launch on one machine. Steps beyond th
 3. **Sticky routing.** Route each match's live socket to its worker. Hand the client `live_url` per match: the ticket already carries `live_url`.
 4. **Regions.** Run workers in 2–3 regions. Turn-based play tolerates 200 ms, so this is about availability, not latency.
 
-Rough beta cost: one 2 vCPU VPS (~$20–40/mo) plus a domain. Apple Developer Program: $99/yr.
+Beta cost: $0. One Oracle Cloud Always Free ARM VM runs the whole stack, with a free `sslip.io` hostname (see `deploy/README.md`). Apple Developer Program: $99/yr. Steamworks: $100 per app.
 
 ---
 
@@ -155,12 +155,12 @@ All existing tests still pass. Older match stores still load: missing fields get
 
 **Networking**
 - [x] Protocol versioning: old builds are told to update (`NetProtocol`, bump on breaking changes).
-- [x] **HTTPS/WSS only.** Release builds refuse `http://` / `ws://` and hide the Server URL field (`ServerConfig`). **TODO (human):** set `ServerConfig.PRODUCTION_URL` to the deployed address.
+- [x] **HTTPS/WSS only.** Release builds refuse `http://` / `ws://` and hide the Server URL field (`ServerConfig`). The Web client uses the origin it was served from. **TODO (human):** set `ServerConfig.PRODUCTION_URL` to the deployed address for native builds.
 - [ ] Export compliance: HTTPS only → set `ITSAppUsesNonExemptEncryption = NO`.
 - [ ] Handle app backgrounding mid-match. iOS suspends the socket; LiveClient reconnects and resyncs on resume. Test this on real devices.
 
 **Content & community**
-- [ ] **Player names are user-generated content** (1.2): names are cleaned of markup and checked against `common/net/blocked_names.txt` (`NameRules`). **TODO (human):** fill the blocklist (shipped empty); add report/block and a way to rename offenders.
+- [ ] **Player names are user-generated content** (1.2): names are cleaned of markup and checked against `common/net/blocked_names.txt` (`NameRules`). The blocklist has a starter list of slurs, sexual terms and staff impersonation, and catches simple disguises (`n1gg3r`, `f.u.c.k`). **TODO:** add report/block and a way to rename offenders.
 - [ ] Age rating questionnaire (cartoon/fantasy violence → likely 9+ or 12+).
 - [ ] **IP licensing (blocker, see §7).**
 
@@ -180,7 +180,7 @@ All existing tests still pass. Older match stores still load: missing fields get
 
 ## 6. Rollout
 
-1. **Internal (now → +2 weeks).** Deploy the compose stack to a VPS. The team plays live matches daily, and we tune the clock, turn cap, and trophy numbers.
+1. **Internal (now → +2 weeks).** Deploy the compose stack to a VM with `deploy/bootstrap.sh`; testers play in the browser at `https://<domain>/`. The team plays live matches daily, and we tune the clock, turn cap, and trophy numbers.
 2. **Closed beta (TestFlight, ~100–500 players).** Add analytics: match length, turns played, buzzer-lock rate, AFK rate, draw rate, queue wait. Add crash reporting.
 3. **Soft launch (one or two small English-speaking markets).** This is the usual mobile pattern. Watch D1/D7 retention and queue health. Scale to the Postgres/worker design before global launch.
 4. **Global launch + Season 1.**

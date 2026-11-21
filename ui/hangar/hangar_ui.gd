@@ -421,10 +421,18 @@ func _build_talent_panel(parent: Control) -> void:
 		minus.pressed.connect(_on_talent.bind(stat, -1))
 		row.add_child(minus)
 
-		var pips := Label.new()
+		# Drawn as shapes, not "●○" text: the web build has no system fonts
+		# to fall back on, and the default font lacks those glyphs.
+		var pips := HBoxContainer.new()
 		pips.custom_minimum_size = Vector2(76, 0)
-		pips.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		pips.add_theme_color_override("font_color", UiTheme.ACCENT)
+		pips.alignment = BoxContainer.ALIGNMENT_CENTER
+		pips.add_theme_constant_override("separation", 4)
+		for i in Talents.MAX_PER_STAT:
+			var pip := Panel.new()
+			pip.custom_minimum_size = Vector2(11, 11)
+			pip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			pips.add_child(pip)
 		row.add_child(pips)
 
 		var plus := Button.new()
@@ -448,6 +456,17 @@ func _build_talent_panel(parent: Control) -> void:
 	box.add_child(_talent_note)
 
 
+## A round talent pip: solid when the point is spent, an outline when not.
+func _pip_style(filled: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.set_corner_radius_all(6)
+	s.bg_color = UiTheme.ACCENT if filled else Color(0, 0, 0, 0)
+	s.border_color = UiTheme.ACCENT
+	s.set_border_width_all(0 if filled else 2)
+	s.anti_aliasing = true
+	return s
+
+
 func _refresh_talents() -> void:
 	if _talent_left == null or _units.is_empty():
 		return
@@ -458,7 +477,9 @@ func _refresh_talents() -> void:
 	for stat in Talents.STATS:
 		var row: Dictionary = _talent_rows[stat]
 		var pts := Talents.get_points(u, stat)
-		(row["pips"] as Label).text = "●".repeat(pts) + "○".repeat(Talents.MAX_PER_STAT - pts)
+		var pips := (row["pips"] as HBoxContainer).get_children()
+		for i in pips.size():
+			(pips[i] as Panel).add_theme_stylebox_override("panel", _pip_style(i < pts))
 		(row["minus"] as Button).disabled = pts <= 0
 		(row["plus"] as Button).disabled = not Talents.can_add(_units, u, stat)
 		match stat:

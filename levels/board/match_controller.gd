@@ -564,7 +564,7 @@ func _update_prediction(a: PlanAction, u: UnitState, pos: Vector2, lvl: int) -> 
 	var dist := pos.distance_to(tp)
 	var melee := a.card.card_type == TriggerCard.CardType.MELEE
 	var reach := TurnEngine.MELEE_RANGE if melee else a.card.attack_range
-	var text := "%s → %s: %.1f m (reach %.1f m)" % [a.card.card_name, target.unit_data.unit_name, dist, reach]
+	var text := "%s » %s: %.1f m (reach %.1f m)" % [a.card.card_name, target.unit_data.unit_name, dist, reach]
 	if dist > reach:
 		text += "  ·  out of reach from there"
 	elif not melee and not a.card.curved and not Visibility.has_los(_ms, pos, lvl, tp, target.level):

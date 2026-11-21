@@ -1,12 +1,13 @@
-# TLS termination + routing for the game server. Caddy obtains and renews
-# the certificate for $TT_DOMAIN automatically (the DNS A record must point
-# at this host, and ports 80/443 must be open).
+# TLS termination + routing. Caddy obtains and renews the certificate for
+# $TT_DOMAIN automatically (its DNS record must point at this host, and
+# ports 80/443 must be open).
+#
+#   /live*                         -> live WebSocket (server:8081)
+#   /health /match /account ...    -> REST API (server:8080)
+#   everything else                -> the Web client, baked into this image
+#                                     (deploy/Dockerfile, target "web")
 
 {$TT_DOMAIN} {
-	encode gzip
-
-	# The API only speaks JSON to the game client: no framing, no sniffing,
-	# HTTPS only from now on.
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -30,10 +31,26 @@
 
 	# Live channel: WebSocket upgrade is proxied transparently.
 	handle /live* {
-		reverse_proxy server:8081
+		reverse_proxy {$TT_SERVER_HOST:server}:8081
 	}
 
+	@api path /health /match /match/* /account /account/* /leaderboard /queue /queue/*
+	# No `encode gzip` here: in a browser, fetch() un-gzips the body but keeps
+	# the Content-Encoding header, and Godot's HTTPRequest then tries to
+	# un-gzip it again and fails (seen on match-state responses).
+	handle @api {
+		reverse_proxy {$TT_SERVER_HOST:server}:8080
+	}
+
+	# The Web client. The .wasm/.pck/.js files were gzipped at build time;
+	# index.html is revalidated each visit so a redeploy reaches players
+	# immediately.
 	handle {
-		reverse_proxy server:8080
+		root * {$TT_WEB_ROOT:/srv/web}
+		@html path / /index.html
+		header @html Cache-Control "no-cache"
+		file_server {
+			precompressed gzip
+		}
 	}
 }
