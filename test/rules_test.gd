@@ -27,6 +27,7 @@ func _ready() -> void:
 	_test_fog_states()
 	_test_city_map()
 	_test_server_persistence()
+	_test_map_sections()
 	_test_trigger_traits()
 	_test_lead_bullet()
 	_test_grasshopper_jump()
@@ -273,6 +274,59 @@ func _test_city_map() -> void:
 	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units())
 	_check(not ms.has_tile(Vector2i(500, 500)) and not TickEngine.is_valid_move(ms, ms.teams[0][0].hex, 0, Vector2i(500, 500), 0),
 		"moves off the map are rejected")
+
+
+func _test_map_sections() -> void:
+	var full := MapData.COLS * MapData.ROWS
+	var shapes := {}
+	var all_ok := true
+	for seed in 40:
+		var r := MapData.random_section(seed)
+		var share := float(r.size.x * r.size.y) / full
+		all_ok = all_ok and MapData.valid_section(r) and share > 0.42 and share < 0.58
+		shapes[r] = true
+	_check(all_ok, "map sections are about half the city and inside it")
+	_check(shapes.size() > 20, "map sections differ from match to match (%d/40 distinct)" % shapes.size())
+	_check(MapData.random_section(7) == MapData.random_section(7), "the same seed picks the same section")
+
+	var sec := MapData.random_section(3)
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 3, sec)
+	_check(ms.tiles.size() == sec.size.x * sec.size.y, "the match board is exactly the section")
+	var inside := true
+	for b in ms.buildings:
+		inside = inside and ms.tiles.has(b)
+	for u in ms.all_units():
+		inside = inside and ms.tiles.has(u.hex) and ms.floor_legal(u.hex, 0)
+	_check(inside, "buildings and spawns all lie inside the section")
+	_check(ms.building_rects().size() > 0, "cut buildings still form building segments")
+
+	# Knife-edge lines on this grid (found by comparing with the 3D physics):
+	var touching := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 8, MapData.random_section(8))
+	_check(not Visibility.has_los(touching, Vector2i(0, 9), 0, Vector2i(3, 6), 0),
+		"no seeing through the point where two buildings touch corner to corner")
+	var graze := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 8)
+	_check(Visibility.has_los(graze, Vector2i(12, 9), 0, Vector2i(16, 5), 0),
+		"a line that only grazes one building's corner is not blocked")
+
+	_check(MapData.section_from([0, 0, 5, 5]) == Rect2i() and MapData.section_from("x") == Rect2i()
+		and MapData.section_from([30, 0, 20, 20]) == Rect2i(), "malformed sections are rejected")
+	_check(MapData.section_from(MapData.section_to_array(sec)) == sec, "sections survive JSON encoding")
+
+	var server := MatchServer.new()
+	server.persist = false
+	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
+	var id := str(server._create_match({ "squad": squad })["body"]["match_id"])
+	server._join_match(id, { "squad": squad })
+	var m: Dictionary = server._matches[id]
+	var area: Rect2i = m["map"]
+	_check(MapData.valid_section(area) and (m["ms"] as MatchState).tiles.size() == area.size.x * area.size.y,
+		"server matches are played on a random section")
+	var public: Dictionary = server._get_match(id, "")["body"]
+	_check(MapData.section_from(public.get("map")) == area, "clients are told the section")
+	var restored := server._deserialize(JSON.parse_string(JSON.stringify(server._serialize(m))))
+	_check(restored["map"] == area and (restored["ms"] as MatchState).tiles.size() == area.size.x * area.size.y,
+		"the section survives a server restart")
+	server.free()
 
 
 func _test_server_persistence() -> void:

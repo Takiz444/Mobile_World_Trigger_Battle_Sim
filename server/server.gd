@@ -329,6 +329,8 @@ func _new_match(squad: Array, seed: int, ranked := false, mode := "async") -> Di
 		"mode": mode,
 		"max_turns": Ladder.LIVE_MAX_TURNS if mode == "live" else ASYNC_MAX_TURNS,
 		"radar_key": _new_secret_int(),
+		# The play area: a random part of the city (public, unlike the seed).
+		"map": MapData.random_section(_new_seed()),
 		"turn": 1,
 		"teams": [PlanCodec.decode_squad(squad), null],
 		"tokens": [_new_token(), ""],
@@ -358,7 +360,7 @@ func _seat_second(m: Dictionary, squad: Array) -> String:
 	var token := _new_token()
 	m["teams"][1] = PlanCodec.decode_squad(squad)
 	m["tokens"][1] = token
-	m["ms"] = MatchRunner.build_match(m["teams"][0], m["teams"][1], m["seed"])
+	m["ms"] = MatchRunner.build_match(m["teams"][0], m["teams"][1], m["seed"], m.get("map", Rect2i()))
 	_start_turn_clock(m, Ladder.LIVE_LOAD_GRACE_SEC)
 	return token
 
@@ -459,6 +461,7 @@ func _get_match(id: String, token: String, since := 0) -> Dictionary:
 		"mode": m.get("mode", "async"),
 		"turn": m["turn"],
 		"max_turns": m.get("max_turns", 0),
+		"map": _map_array(m),
 		"seconds_left": _seconds_left(m),
 		"ready": m["ms"] != null,
 		"submitted": m["submitted"],
@@ -769,6 +772,7 @@ func _serialize(m: Dictionary) -> Dictionary:
 		"max_turns": m.get("max_turns", 0),
 		# 64-bit: as a string so JSON doubles can't round it.
 		"radar_key": str(m.get("radar_key", 0)),
+		"map": _map_array(m),
 		"turn": m["turn"],
 		"squads": [
 			PlanCodec.encode_squad(m["teams"][0]),
@@ -802,7 +806,7 @@ func _deserialize(d: Dictionary) -> Dictionary:
 	var seed := int(d["seed"])
 	var ms: MatchState = null
 	if teams[1] != null:
-		ms = MatchRunner.build_match(teams[0], teams[1], seed)
+		ms = MatchRunner.build_match(teams[0], teams[1], seed, MapData.section_from(d.get("map")))
 		if d.get("state") is Dictionary:
 			PlanCodec.apply_state(ms, d["state"])
 	var plans: Array = [null, null]
@@ -819,6 +823,8 @@ func _deserialize(d: Dictionary) -> Dictionary:
 		"mode": str(d.get("mode", "async")),
 		"max_turns": int(d.get("max_turns", 0)),
 		"radar_key": str(d["radar_key"]).to_int() if d.has("radar_key") else _new_secret_int(),
+		# Older records were played on the whole city.
+		"map": MapData.section_from(d.get("map")),
 		"turn": int(d["turn"]),
 		"teams": teams,
 		"tokens": [str(d["tokens"][0]), str(d["tokens"][1])],
@@ -1208,6 +1214,12 @@ func _new_id() -> String:
 
 func _new_token() -> String:
 	return _crypto.generate_random_bytes(16).hex_encode()
+
+
+## [col, row, w, h] of the match's play area, or null for the whole city.
+func _map_array(m: Dictionary) -> Variant:
+	var r: Rect2i = m.get("map", Rect2i())
+	return MapData.section_to_array(r) if r.has_area() else null
 
 
 func _new_seed() -> int:

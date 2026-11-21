@@ -11,17 +11,20 @@ const DRAW := 2
 const SPAWN_MIN_DISTANCE := 3
 
 
-## Builds a fresh MatchState on the city map (MapData) and places both
-## squads at random street hexes (random_spawns), facing the map center.
-## The placement follows from `seed`, so the server can rebuild a match; the
-## server never reveals the seed, so nobody can predict where enemies start.
+## Builds a fresh MatchState on the city map (MapData) — the whole sheet, or
+## only `section` (MapData.random_section) — and places both squads at random
+## street hexes (random_spawns), facing open street. The placement follows
+## from `seed`, so the server can rebuild a match; the server never reveals
+## the seed, so nobody can predict where enemies start. The section is
+## public (clients need it to draw the map).
 static func build_match(
 	player_data: Array[UnitData],
 	enemy_data: Array[UnitData],
-	seed: int = DEFAULT_SEED
+	seed: int = DEFAULT_SEED,
+	section: Rect2i = Rect2i()
 ) -> MatchState:
 	var ms := MatchState.new(seed)
-	var map := MapData.city()
+	var map := MapData.city(section)
 	ms.tiles = map.tiles
 	ms.buildings = map.buildings
 	ms.cover = map.cover

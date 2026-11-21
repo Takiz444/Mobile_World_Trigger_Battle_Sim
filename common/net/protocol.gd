@@ -18,8 +18,9 @@ extends RefCounted
 ## 4: three-character squads with talent points; random spawns.
 ## 5: vision is a detection radius plus one sight cone.
 ## 6: detection radius 2.
-const VERSION := 6
-const MIN_SUPPORTED := 6
+## 7: each match is played on a random section of the city ("map" field).
+const VERSION := 7
+const MIN_SUPPORTED := 7
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

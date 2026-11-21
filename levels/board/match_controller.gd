@@ -155,8 +155,10 @@ func _build_squads() -> void:
 	for u in _enemy_data:
 		u.ensure_slot_arrays()
 	_data_teams = [player_data, _enemy_data]
-	# A new seed every match: start positions (and hit rolls) differ each time.
-	_ms = MatchRunner.build_match(player_data, _enemy_data, randi() & 0x7FFFFFFF)
+	# A new seed every match: the play area, start positions, and hit rolls
+	# all differ each time.
+	var seed := randi() & 0x7FFFFFFF
+	_ms = MatchRunner.build_match(player_data, _enemy_data, seed, MapData.random_section(seed))
 	_player_states = _ms.teams[0]
 	_enemy_states = _ms.teams[1]
 	_build_board_view()
@@ -225,7 +227,8 @@ func _setup_online() -> void:
 	var squad1 := PlanCodec.decode_squad(teams[1]) if teams.size() > 1 and teams[1] != null else []
 	_data_teams = [squad0, squad1]
 
-	_ms = MatchRunner.build_match(squad0, squad1, seed)
+	# The server sends the play area; positions come from the fogged view.
+	_ms = MatchRunner.build_match(squad0, squad1, seed, MapData.section_from(body.get("map")))
 	_player_states = _ms.teams[_team]
 	_enemy_states = _ms.teams[1 - _team]
 	# The server only sends what our team can see (fog of war); start from

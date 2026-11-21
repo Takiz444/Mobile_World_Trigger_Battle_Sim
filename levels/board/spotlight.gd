@@ -15,9 +15,9 @@ extends Control
 
 const FADE_SEC := 0.2
 const DIM := 0.5
-const FEATHER_PX := 16.0
+## Width of the gradient between light and shadow (centered on the edge).
+const FEATHER_PX := 56.0
 const SHADE := Color(0.02, 0.03, 0.07)
-const RIM := Color(0.55, 0.88, 1.0, 0.85)
 
 var camera: Camera3D
 
@@ -93,8 +93,11 @@ func _draw() -> void:
 		var p := camera.unproject_position(_outline[i])
 		var dir := p - c
 		dir = dir / dir.length() if dir.length() > 0.001 else Vector2.UP
-		inner[i] = p
-		outer[i] = p + dir * FEATHER_PX
+		# The gradient straddles the edge: it starts darkening a little inside
+		# what the character sees and reaches full shadow outside it, so
+		# there is no hard line anywhere.
+		inner[i] = p - dir * minf(FEATHER_PX * 0.35, (p - c).length() * 0.5)
+		outer[i] = p + dir * FEATHER_PX * 0.65
 		beyond[i] = c + dir * far
 	# The outline runs all the way round (-180° to +180°): close it.
 	for i in n:
@@ -107,8 +110,3 @@ func _draw() -> void:
 		var out := PackedVector2Array([outer[i], outer[j], beyond[j], beyond[i]])
 		if _area(out) > 0.25:
 			draw_colored_polygon(out, dim)
-	var rim := inner.duplicate()
-	if rim.is_empty():
-		return
-	rim.append(inner[0])
-	draw_polyline(rim, Color(RIM, RIM.a * _strength), 2.0, true)

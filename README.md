@@ -44,6 +44,11 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - `MatchSession` — static online config (mode, server URL, match id, team).
 
 ### City Map — `common/map/map_data.gd`
+- **Every match uses a random part of the city:** a rectangle covering about
+  half the sheet (`MapData.SECTION_SHARE`), with a random position and shape
+  (at least 18 hexes a side). Faster games, and no two maps alike. The server
+  picks it separately from the hidden match seed and sends it to clients
+  (`map` in the match state); it is saved with the match.
 - The 32×32 flat-top hex map from `Project Docs/Map refrence with building.png`,
   traced hex by hex: the scan's hex lattice was fitted and every hex classified
   as street or building, so streets and building footprints match the sheet

@@ -28,6 +28,11 @@ extends RefCounted
 
 const COLS := 32
 const ROWS := 32
+## Each match is played on a random rectangle of the city covering about
+## this share of it (random_section), so games are faster and every map is
+## different.
+const SECTION_SHARE := 0.5
+const SECTION_MIN_SIDE := 18
 
 const LAYOUT: Array[String] = [
 	"....Z.......Z2...Z3333.2.2Z21.33",
@@ -75,14 +80,49 @@ static func offset_to_axial(col: int, row: int) -> Vector2i:
 	return Vector2i(col, row - (col - (col & 1)) / 2)
 
 
-## Builds the standard city map.
-static func city() -> MapData:
+## A random play area: a rectangle of the sheet (offset coordinates:
+## position = first column / row, size = columns x rows) covering about
+## SECTION_SHARE of it, with a random aspect ratio and position.
+static func random_section(seed: int) -> Rect2i:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([seed, "map_section"])
+	var area := COLS * ROWS * SECTION_SHARE
+	var w := rng.randi_range(SECTION_MIN_SIDE, mini(COLS, int(area / SECTION_MIN_SIDE)))
+	var h := clampi(roundi(area / w), SECTION_MIN_SIDE, ROWS)
+	return Rect2i(rng.randi_range(0, COLS - w), rng.randi_range(0, ROWS - h), w, h)
+
+
+## Whether `r` is a usable section of the sheet (also used to check records).
+static func valid_section(r: Rect2i) -> bool:
+	return r.size.x >= SECTION_MIN_SIDE and r.size.y >= SECTION_MIN_SIDE and r.position.x >= 0 \
+		and r.position.y >= 0 and r.end.x <= COLS and r.end.y <= ROWS
+
+
+static func section_to_array(r: Rect2i) -> Array:
+	return [r.position.x, r.position.y, r.size.x, r.size.y]
+
+
+## Rect2i from [col, row, w, h] (JSON); an empty Rect2i if malformed.
+static func section_from(v: Variant) -> Rect2i:
+	if not (v is Array) or (v as Array).size() != 4:
+		return Rect2i()
+	for x in v:
+		if typeof(x) != TYPE_INT and typeof(x) != TYPE_FLOAT:
+			return Rect2i()
+	var r := Rect2i(int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+	return r if valid_section(r) else Rect2i()
+
+
+## Builds the city map: the whole sheet, or only `section` (offset
+## coordinates; see random_section) when it is given.
+static func city(section: Rect2i = Rect2i()) -> MapData:
 	var m := MapData.new()
 	assert(LAYOUT.size() == ROWS, "map must have %d rows" % ROWS)
-	for row in ROWS:
+	var area := section if section.has_area() else Rect2i(0, 0, COLS, ROWS)
+	for row in range(area.position.y, area.end.y):
 		var line := LAYOUT[row]
 		assert(line.length() == COLS, "map row %d must be %d wide" % [row, COLS])
-		for col in COLS:
+		for col in range(area.position.x, area.end.x):
 			var hex := offset_to_axial(col, row)
 			m.tiles[hex] = true
 			var ch := line[col]
@@ -97,7 +137,7 @@ static func city() -> MapData:
 					m.spawns[0].append(hex)
 				"Z":
 					m.spawns[1].append(hex)
-	m.center = offset_to_axial(COLS / 2, ROWS / 2)
+	m.center = offset_to_axial(area.position.x + area.size.x / 2, area.position.y + area.size.y / 2)
 	return m
 
 

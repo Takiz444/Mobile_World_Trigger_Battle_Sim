@@ -38,6 +38,11 @@ const STEALTH_REVEAL_RANGE := 3
 ## Heights in floors above a unit's floor.
 const EYE_HEIGHT := 0.8
 const BODY_HEIGHT := 0.5
+## A sight line that passes through less than this much of a building
+## (world units) only grazes it, and is not blocked.
+const GRAZE_EPSILON := 0.001
+## How far building boxes are padded when testing for a graze (world units).
+const TOUCH_PAD := 0.0001
 ## Full cover (walls, barricades) is about one floor tall.
 const FULL_COVER_HEIGHT := 1.0
 
@@ -107,6 +112,7 @@ static func has_los(ms: MatchState, a: Vector2i, a_floor: int, b: Vector2i, b_fl
 	var path := HexCoord.line(a, b)
 	var rects := ms.building_rects()
 	var checked := {}
+	var grazes: Array[float] = []   # where (0..1 along the line) it grazes a building
 	for hex in path:
 		for h in [hex] + HexCoord.neighbors(hex):
 			var idx := ms.building_rect_index(h)
@@ -114,8 +120,20 @@ static func has_los(ms: MatchState, a: Vector2i, a_floor: int, b: Vector2i, b_fl
 				continue
 			checked[idx] = true
 			var r: Dictionary = rects[idx]
-			var hit := _segment_box(pa, pb, r)
+			# Padded a hair, so a line that just touches a wall still registers.
+			var hit := _segment_box(pa, pb, r, TOUCH_PAD)
 			if hit.is_empty():
+				continue
+			# A line that only grazes one corner or edge (hex centers and wall
+			# corners line up exactly on this grid) is not blocked by it...
+			if (float(hit["t1"]) - float(hit["t0"])) * length < GRAZE_EPSILON + 2.0 * TOUCH_PAD:
+				var t := (float(hit["t0"]) + float(hit["t1"])) * 0.5
+				# ...but two buildings meeting corner to corner leave no gap:
+				# a line through the point where they touch is blocked.
+				for other in grazes:
+					if absf(other - t) * length < 0.01:
+						return false
+				grazes.append(t)
 				continue
 			var a_in := float(hit["t0"]) <= 0.0
 			var b_in := float(hit["t1"]) >= 1.0
@@ -142,8 +160,8 @@ static func has_los(ms: MatchState, a: Vector2i, a_floor: int, b: Vector2i, b_fl
 
 ## Parametric overlap [t0, t1] (clamped to [0, 1]) of segment pa->pb with a
 ## building box, or {} if they don't meet. Slab method.
-static func _segment_box(pa: Vector3, pb: Vector3, r: Dictionary) -> Dictionary:
-	var b := BuildingRects.bounds(r)
+static func _segment_box(pa: Vector3, pb: Vector3, r: Dictionary, pad: float = 0.0) -> Dictionary:
+	var b := BuildingRects.bounds(r).grow(pad)
 	var lo := Vector3(b.position.x, 0.0, b.position.y)
 	var hi := Vector3(b.end.x, float(r["floors"]), b.end.y)
 	var d := pb - pa

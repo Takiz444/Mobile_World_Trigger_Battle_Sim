@@ -28,6 +28,8 @@ var _squad_vision: Node3D = null     # faint vision of the rest of the squad
 var _squad_vision_key := ""
 ## The selected character's vision outline in world space (for the spotlight).
 var _vision_outline := PackedVector3Array()
+## World distance over which a vision area fades out at its edge.
+const EDGE_FADE := 1.4
 var _vision_center := Vector3.ZERO
 var _map_bounds := Rect2()           # board extent (XZ) — sight ends at the edge
 var _poses: Dictionary = {}          # UnitState -> Node3D (squash / lunge / hop pivot)
@@ -418,10 +420,9 @@ func _build_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rec
 	root.position = origin + Vector3(0, 0.04 if lit else 0.03, 0)
 	# The selected character's area is lit by the spotlight, so its fill
 	# stays light; the rest of the squad gets a faint tint.
-	var fill := Color(team_color, 0.08 if lit else 0.1)
-	var edge := Color(team_color.lerp(Color.WHITE, 0.5), 1.0 if lit else 0.7)
+	var fill := Color(team_color.lerp(Color.WHITE, 0.25), 0.16 if lit else 0.12)
 	var pts := _keyhole_points(eye, fwd, detect_r, sight_r, half, own_rect)
-	root.add_child(_keyhole_mesh(pts, fill, edge, 0.07 if lit else 0.05))
+	root.add_child(_keyhole_mesh(pts, fill))
 	if not lit:
 		return root
 	_vision_center = root.position
@@ -476,48 +477,48 @@ func _keyhole_points(eye: Vector3, fwd: Vector3, detect_r: float, sight_r: float
 	return pts
 
 
-## The vision shape as a translucent fill plus a bright outline ribbon, so it
-## reads at any zoom.
-func _keyhole_mesh(pts: Array[Vector3], fill: Color, edge: Color, edge_width: float) -> Node3D:
+## The vision shape as a translucent tint that fades out toward its edge.
+func _keyhole_mesh(pts: Array[Vector3], fill: Color) -> Node3D:
+	# No hard outline: the tint is strongest around the character and fades
+	# to nothing over the last stretch before the edge, so the vision area
+	# blends into the shadow outside it.
+	var clear := Color(fill, 0.0)
+	var core := Color(fill, fill.a * 0.55)
+	var fade := EDGE_FADE * _hex_size
+	var inner: Array[Vector3] = []
+	for p in pts:
+		var reach := p.length()
+		inner.append(p * maxf(0.0, (reach - minf(fade, reach * 0.6)) / maxf(reach, 0.001)))
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in range(1, pts.size()):
 		st.set_normal(Vector3.UP)
+		# Center to the start of the fade: a gentle rise in strength.
+		st.set_color(core)
 		st.add_vertex(Vector3.ZERO)
+		st.set_color(fill)
+		st.add_vertex(inner[i - 1])
+		st.add_vertex(inner[i])
+		# The fade band: full strength to transparent at the edge.
+		st.set_color(fill)
+		st.add_vertex(inner[i - 1])
+		st.set_color(clear)
 		st.add_vertex(pts[i - 1])
 		st.add_vertex(pts[i])
+		st.set_color(fill)
+		st.add_vertex(inner[i - 1])
+		st.set_color(clear)
+		st.add_vertex(pts[i])
+		st.set_color(fill)
+		st.add_vertex(inner[i])
 	var body := MeshInstance3D.new()
 	body.mesh = st.commit()
 	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	body.material_override = _flat_material(fill)
-
-	# Outline as a thin ribbon (lines are 1 px on most GPUs).
-	var lt := SurfaceTool.new()
-	lt.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var width := edge_width * _hex_size
-	for i in range(1, pts.size()):
-		var p0: Vector3 = pts[i - 1]
-		var p1: Vector3 = pts[i]
-		var along := p1 - p0
-		if along.length() < 0.001:
-			continue
-		var side := along.cross(Vector3.UP).normalized() * width
-		lt.set_normal(Vector3.UP)
-		lt.add_vertex(p0 - side)
-		lt.add_vertex(p0 + side)
-		lt.add_vertex(p1 + side)
-		lt.add_vertex(p0 - side)
-		lt.add_vertex(p1 + side)
-		lt.add_vertex(p1 - side)
-	var outline := MeshInstance3D.new()
-	outline.mesh = lt.commit()
-	outline.position.y = 0.01
-	outline.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	outline.material_override = _flat_material(edge)
-
+	var mat := _flat_material(Color.WHITE)
+	mat.vertex_color_use_as_albedo = true
+	body.material_override = mat
 	var node := Node3D.new()
 	node.add_child(body)
-	node.add_child(outline)
 	return node
 
 
