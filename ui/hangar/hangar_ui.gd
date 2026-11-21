@@ -268,7 +268,7 @@ func _refresh_unit_tabs() -> void:
 		var u := _units[i]
 		var b := Button.new()
 		b.text = u.unit_name
-		b.tooltip_text = "HP %d · AT %d · ATK %d" % [u.base_trion_hp, TurnPlan.new([u]).get_at_pool(0), u.attack_rating]
+		b.tooltip_text = "HP %d · Speed %d%% · ATK %d" % [u.base_trion_hp, roundi(u.tempo * 100.0), u.attack_rating]
 		b.custom_minimum_size = Vector2(150, 0)
 		b.toggle_mode = true
 		b.button_pressed = (i == _current_unit)
@@ -361,7 +361,7 @@ func _on_slot_dropped(slot: HangarSlot, data: Dictionary) -> void:
 
 	_refresh_slots()
 	_refresh_budget()
-	_refresh_talents()   # the Melee Penchant can change the AT pool
+	_refresh_talents()   # the Melee Penchant changes walking speed
 	SquadStore.save()
 
 
@@ -455,7 +455,6 @@ func _refresh_talents() -> void:
 	var left := Talents.remaining(_units)
 	_talent_left.text = "%d / %d left" % [left, Talents.POINTS]
 	_talent_left.add_theme_color_override("font_color", UiTheme.ACCENT if left > 0 else UiTheme.TEXT_DIM)
-	var pool := TurnPlan.new([u]).get_at_pool(0)
 	for stat in Talents.STATS:
 		var row: Dictionary = _talent_rows[stat]
 		var pts := Talents.get_points(u, stat)
@@ -464,7 +463,7 @@ func _refresh_talents() -> void:
 		(row["plus"] as Button).disabled = not Talents.can_add(_units, u, stat)
 		match stat:
 			"stamina":
-				(row["value"] as Label).text = "%d AT" % pool
+				(row["value"] as Label).text = "%d%% speed" % roundi(u.tempo * 100.0)
 			"hp":
 				(row["value"] as Label).text = "%d HP" % u.base_trion_hp
 			"atk":

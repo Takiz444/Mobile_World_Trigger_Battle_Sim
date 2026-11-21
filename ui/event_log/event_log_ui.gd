@@ -67,7 +67,7 @@ func add_event(ev: CombatEvent) -> void:
 
 ## Server replay events arrive as encoded dictionaries (PlanCodec.encode_events).
 func add_event_dict(d: Dictionary) -> void:
-	add_message("[T%d] %s" % [int(d.get("tick", 0)) + 1, str(d.get("message", ""))], _phase_color(int(d.get("phase", -1))))
+	add_message("[%.1fs] %s" % [float(d.get("time", 0.0)), str(d.get("message", ""))], _phase_color(int(d.get("phase", -1))))
 
 
 func add_message(text: String, color: Color = Color(0.9, 0.92, 0.95)) -> void:

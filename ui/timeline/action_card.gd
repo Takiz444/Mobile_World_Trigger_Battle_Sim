@@ -1,7 +1,7 @@
 class_name ActionCard
 extends PanelContainer
-## An action card in the timeline hand. Tap it to place it in the next free
-## tick (or the selected one), or drag it onto a tick. The hand is a palette,
+## An action card in the planning hand: tap it to add the action to the end
+## of its lane. Shows how long it takes this character. The hand is a palette,
 ## not a deck: cards are never used up.
 
 signal tapped(card: TriggerCard)
@@ -20,7 +20,7 @@ var _press := Vector2.INF
 var _sb: StyleBoxFlat
 
 
-func _init(c: TriggerCard) -> void:
+func _init(c: TriggerCard, data: UnitData = null) -> void:
 	card = c
 	tooltip_text = c.describe()
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -39,7 +39,14 @@ func _init(c: TriggerCard) -> void:
 	box.add_child(title)
 
 	var cost := Label.new()
-	cost.text = "free" if c.action_at_cost == 0 else "%d AT" % c.action_at_cost
+	# How long it takes this character (Stamina shortens it).
+	var tempo := data.tempo if data != null else 1.0
+	if TurnPlan.is_move_card(c) and not c.jump:
+		cost.text = "%.1f m/s" % (TurnPlan.speed(data) if data != null else TurnPlan.BASE_SPEED)
+	elif c.card_type == TriggerCard.CardType.SHIELD:
+		cost.text = "hold"
+	else:
+		cost.text = "%.1f s" % (c.action_time / tempo)
 	cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	cost.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cost.add_theme_font_size_override("font_size", 13)
@@ -72,11 +79,3 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		else:
 			_press = Vector2.INF
-
-
-func _get_drag_data(_at_position: Vector2) -> Variant:
-	_press = Vector2.INF
-	var preview := Label.new()
-	preview.text = card.card_name
-	set_drag_preview(preview)
-	return { "card": card, "from_slot": false }

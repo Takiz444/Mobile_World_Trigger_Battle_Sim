@@ -1,40 +1,46 @@
 class_name MatchController
 extends Node
-## Orchestrates a full match in two modes:
-##   LOCAL  — vs the built-in enemy AI, resolved locally.
-##   ONLINE — async backend: submit plans, poll for the opponent, then replay
-##            the server-resolved plans through the deterministic engine.
-##            With MatchSession.live, the server pushes results over the live
-##            WebSocket (LiveClient) and a short turn clock runs: whatever is
-##            planned when it runs out is locked in automatically.
+## Orchestrates a match in two modes:
+##   LOCAL  — vs the built-in enemy AI. The real match lives in `_truth`, a
+##            copy the player never sees; each turn is recorded exactly like
+##            the server does (MatchRunner.record_turn) and only our team's
+##            fog-filtered frames reach the board. So local play and online
+##            play run the same pipeline, and the planning UI can't leak
+##            hidden enemies in either.
+##   ONLINE — the server resolves turns; we submit plans and replay the
+##            frames it sends (async polling, or pushed over the live channel
+##            with a short turn clock: whatever is planned when it runs out is
+##            locked in automatically).
 ##
-## Drives the shared replay visualization (tweened movement, event log) for
-## both modes.
+## `_ms` is always our team's view: our characters exactly, enemies where we
+## see them, radar ghosts for the rest (unseen enemies are parked OFFBOARD).
 
-const MOVE_DURATION := 0.35
-const TICK_PAUSE := 0.25
 const POLL_INTERVAL := 1.0
 const MATCH_SEED := 12345
-## Where hidden enemies are parked in the client's MatchState (online mode),
-## so occupancy checks can't leak their real position.
-const OFFBOARD := Vector2i(100000, 100000)
+## Where hidden enemies are parked in the client's MatchState, so nothing in
+## the planning UI can use their real position.
+const OFFBOARD := Vector2(100000, 100000)
+## Tapping within this distance of a character picks it.
+const PICK_RADIUS := 0.9
 
-var _board: HexBoard
+var _board: CityBoard
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _units_view: BoardUnits
 var _camera: BoardCamera
-var _engine := TickEngine.new()
 
 var _player_states: Array[UnitState] = []
 var _enemy_states: Array[UnitState] = []
 var _enemy_data: Array[UnitData] = []
 var _data_teams: Array = []   # [team 0 UnitData squad, team 1 UnitData squad]
-var _ms: MatchState
+var _ms: MatchState           # our view of the match
+var _truth: MatchState        # local mode: the real match (never shown)
+var _truth_turn_salt := 0
 var _enemy_plan: TurnPlan
 var _resolving := false
 var _turn := 1
-var _hovered_hex: Vector2i = HexBoard.INVALID_HEX
+var _hover_point := Vector2.INF
+var _hover_level := 0
 
 # Online mode
 var _online := false
@@ -47,10 +53,10 @@ var _token := ""
 ## Seconds before the server deadline at which the current plan auto-locks.
 const LIVE_AUTO_LOCK_SEC := 1.5
 var _live: LiveClient
-var _live_deadline_ms := -1          # Time.get_ticks_msec() of the turn deadline
-var _live_queue: Array[Dictionary] = []   # pushed turn results awaiting replay
+var _live_deadline_ms := -1
+var _live_queue: Array[Dictionary] = []
 var _live_replaying := false
-var _live_over: Dictionary = {}      # match_over message, once received
+var _live_over: Dictionary = {}
 var _opponent_online := true
 var _opponent_locked := false
 var _over_shown := false
@@ -75,11 +81,9 @@ var _prediction_label: Label
 const FOCUS_SIZE := 13.0
 var _spotlight: Spotlight
 var _markers: SquadMarkers
-## World distance between neighbouring hex centers.
-var _hex_step := 1.0
 
 
-func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
+func setup(board: CityBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
 	_board = board
 	_timeline = timeline
 	_event_log = event_log
@@ -104,17 +108,16 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 			_timeline.select_unit(i)
 		else:
 			_focus_camera_only(i))
-	_hex_step = HexCoord.axial_to_world(Vector2i(1, 0), _board.hex_size).length()
 
 	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
 	_build_surrender_button(ui_layer)
 
-	_board.tile_selected.connect(_on_tile_selected)
-	_board.tile_hovered.connect(_on_tile_hovered)
+	_board.point_selected.connect(_on_point_selected)
+	_board.point_hovered.connect(_on_point_hovered)
 	_timeline.plan_submitted.connect(_on_plan_submitted)
 	_timeline.unit_selected.connect(_on_unit_selected)
-	_timeline.targeting_changed.connect(_update_targeting)
+	_timeline.selection_changed.connect(_update_targeting)
 
 	_online = MatchSession.mode == MatchSession.Mode.ONLINE
 	if _online:
@@ -127,8 +130,21 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 
 ## Resets to a fresh local match (also used by the Rematch button).
 func _start_match() -> void:
-	_build_squads()
-	_board.clear_highlights()
+	var player_data := SquadStore.get_squad()
+	_enemy_data = TriggerLibrary.sample_units()
+	for u in _enemy_data:
+		u.ensure_slot_arrays()
+	_data_teams = [player_data, _enemy_data]
+	# A new seed every match: the play area, start positions, and hit rolls
+	# all differ each time.
+	var seed := randi() & 0x7FFFFFFF
+	var section := MapData.random_section(seed)
+	_truth = MatchRunner.build_match(player_data, _enemy_data, seed, section)
+	_truth_turn_salt = randi()
+	_build_view(player_data, _enemy_data, seed, section)
+	_apply_view(Visibility.encode_view(_truth, _team, _salt(0), true))
+	_build_board_view()
+	_board.clear_overlays()
 	_units_view.clear_ghost()
 	if _prediction_label != null:
 		_prediction_label.visible = false
@@ -140,58 +156,45 @@ func _start_match() -> void:
 	_btn_row.visible = true
 	_event_log.set_turn(_turn)
 	_event_log.clear()
-	_event_log.add_message("Match started — plan your turn.", Color(0.6, 0.9, 0.6))
+	_event_log.add_message("Match started — plan your turn (%.0f seconds per character)." % TurnPlan.TURN_SECONDS, Color(0.6, 0.9, 0.6))
+	_timeline.setup(_data_teams[_team])
+	_timeline.bind(_ms, _player_states)
 	_timeline.set_locked(false)
-	_timeline.begin_new_turn()
 	_sync_unit_status()
+	_timeline.begin_new_turn()
 	_focus_unit(_timeline.get_current_unit())
 
 
-## Places both squads and builds a fresh MatchState (the enemy plan is rebuilt
-## each turn).
-func _build_squads() -> void:
-	var player_data := SquadStore.get_squad()
-	_enemy_data = TriggerLibrary.sample_units()
-	for u in _enemy_data:
-		u.ensure_slot_arrays()
-	_data_teams = [player_data, _enemy_data]
-	# A new seed every match: the play area, start positions, and hit rolls
-	# all differ each time.
-	var seed := randi() & 0x7FFFFFFF
-	_ms = MatchRunner.build_match(player_data, _enemy_data, seed, MapData.random_section(seed))
-	_player_states = _ms.teams[0]
-	_enemy_states = _ms.teams[1]
-	_build_board_view()
-	_refresh_fog_local(_view_salt())
+## Our view of a match built from the same squads, map and seed (positions
+## are then overwritten by the views we receive).
+func _build_view(squad0: Array, squad1: Array, seed: int, section: Rect2i) -> void:
+	var a: Array[UnitData] = []
+	a.assign(squad0)
+	var b: Array[UnitData] = []
+	b.assign(squad1)
+	_ms = MatchRunner.build_match(a, b, seed, section)
+	_player_states = _ms.teams[_team]
+	_enemy_states = _ms.teams[1 - _team]
 
 
-## Builds the map, props, and unit markers for _ms and frames the camera on
-## the local squad.
+## Local radar salt for frame `n` of the current turn (secret, like the server's).
+func _salt(n: int) -> int:
+	return hash([_truth_turn_salt, _turn, n])
+
+
+## Builds the map, props, and unit markers for _ms and frames the camera.
 func _build_board_view() -> void:
-	_board.set_map(_ms.tiles)
+	_board.set_map(_ms.tiles, _ms.bounds())
+	_board.set_buildings(_ms.buildings)
+	_board.set_wires(_ms.wires)
 	_units_view.setup(_ms.all_units(), _board.hex_size)
+	_units_view.set_map_bounds(_ms.bounds())
+	_units_view.refresh()
 	_markers.view = _units_view
 	_markers.set_units(_player_states)
 	_markers.visible = true
-	_board.set_cover(_ms.cover)
-	_board.set_buildings(_ms.buildings)
-	_board.set_wires(_ms.wires)
-	var board_box := _board.get_bounds()
-	var edge := _board.hex_size
-	_units_view.set_map_bounds(Rect2(board_box.position.x - edge, board_box.position.z - edge,
-		board_box.size.x + 2.0 * edge, board_box.size.z + 2.0 * edge))
 	if _camera != null:
 		_camera.set_bounds(_board.get_bounds())
-		# Frame the squad with some battlefield ahead of it: aim a few hexes
-		# from the squad's center toward the middle of the map.
-		var squad := Vector3.ZERO
-		for u in _player_states:
-			squad += _board.hex_to_world(u.hex)
-		squad /= maxf(1.0, _player_states.size())
-		var bounds := _board.get_bounds()
-		var ahead := (bounds.get_center() - squad)
-		ahead.y = 0.0
-		_camera.recenter(squad + ahead.normalized() * 5.0)
 
 
 func _setup_online() -> void:
@@ -208,9 +211,7 @@ func _setup_online() -> void:
 	if not info.get("success", false):
 		_show_waiting("Could not reach server:\n%s" % str(info.get("error", "?")))
 		return
-
 	var body: Dictionary = info["body"]
-
 	# Host waits for an opponent to join.
 	if not bool(body.get("ready", false)):
 		_show_waiting("Waiting for opponent to join…\nMatch ID: %s" % _match_id)
@@ -221,28 +222,20 @@ func _setup_online() -> void:
 				body = poll["body"]
 				break
 
-	var seed := int(body.get("seed", MATCH_SEED))
 	var teams: Array = body.get("teams", [])
 	var squad0 := PlanCodec.decode_squad(teams[0]) if teams.size() > 0 and teams[0] != null else []
 	var squad1 := PlanCodec.decode_squad(teams[1]) if teams.size() > 1 and teams[1] != null else []
 	_data_teams = [squad0, squad1]
-
 	# The server sends the play area; positions come from the fogged view.
-	_ms = MatchRunner.build_match(squad0, squad1, seed, MapData.section_from(body.get("map")))
-	_player_states = _ms.teams[_team]
-	_enemy_states = _ms.teams[1 - _team]
-	# The server only sends what our team can see (fog of war); start from
-	# that view, which also resyncs a reconnect mid-match.
+	_build_view(squad0, squad1, MATCH_SEED, MapData.section_from(body.get("map")))
 	var view: Variant = body.get("view")
 	if view is Dictionary:
 		_apply_view(view)
 	_build_board_view()
-	_refresh_fog_overlay()
 
-	# The timeline plans only the local team's units.
 	_timeline.setup(_data_teams[_team])
+	_timeline.bind(_ms, _player_states)
 	_sync_unit_status()
-
 	_turn = int(body.get("turn", 1))
 	_overlay.visible = false
 	_btn_row.visible = true
@@ -254,101 +247,350 @@ func _setup_online() -> void:
 		_show_match_over(winner)
 		return
 	_timeline.set_locked(false)
+	_timeline.begin_new_turn()
 	_focus_unit(_timeline.get_current_unit())
 	if MatchSession.live:
 		_start_live(body)
 
 
-func _on_tile_selected(hex: Vector2i) -> void:
+# --- Targeting from the board --------------------------------------------------
+
+func _on_point_selected(p: Vector2, level: int, building: int) -> void:
 	if _resolving or _over_shown:
 		return
-	# Tapping one of your characters commands it.
-	var own := _own_unit_at(hex)
-	if own != -1 and own != _timeline.get_current_unit():
-		_timeline.select_unit(own)
+	var sel := _timeline.get_selection()
+	var a: PlanAction = sel.get("action")
+	# Attacks: tap an enemy (one we know about).
+	if a != null and a.is_attack():
+		var enemy := _enemy_near(p)
+		if enemy != -1:
+			a.target_unit = enemy
+			_timeline.plan_edited()
+			return
+	# Tapping one of your characters commands it (unless placing a point).
+	var own := _own_near(p)
+	if own != -1 and (a == null or not (a.needs_target() and _wants_point(a))):
+		if own != _timeline.get_current_unit():
+			_timeline.select_unit(own)
+		else:
+			_focus_unit(own)
 		return
-	if own != -1 and not _timeline.has_selected_slot():
-		_focus_unit(own)
+	if a == null or not _wants_point(a):
+		if a != null and a.is_attack():
+			_timeline.flash("Tap an enemy you can see (or a radar ping) to target it.")
 		return
-	_timeline.set_target_for_selected_slot(hex, _target_floor_for_click(hex))
+	_place_point(a, p, level, building)
 
 
-## Index of the local player's living character standing on `hex`, or -1.
-func _own_unit_at(hex: Vector2i) -> int:
+## Sets a Move / Jump / Look / Spider target, refusing spots it can't use.
+func _place_point(a: PlanAction, p: Vector2, level: int, building: int) -> void:
+	var unit := _timeline.get_current_unit()
+	var us := _player_states[unit]
+	var geo := _ms.geometry()
+	var target_level := 0
+	if TurnPlan.is_move_card(a.card):
+		target_level = level
+		# Tapping the same building again walks down its floors (Move only).
+		if not a.card.jump and building >= 0 and a.has_point and a.level > 1 \
+				and geo.rect_at(a.point) == geo.rect_at(p) and geo.rect_at(p) != -1:
+			target_level = a.level - 1
+		if not geo.level_ok(p, target_level):
+			_timeline.flash("Nobody can stand there.")
+			return
+	else:
+		target_level = 0
+	if a.card.card_name == "Spider" and not geo.ground_ok(p):
+		_timeline.flash("Spider wires go on the street.")
+		return
+	var old := a.duplicate_action()
+	a.set_point(p, target_level)
+	var plan := _timeline.get_plan()
+	if TurnPlan.is_move_card(a.card):
+		for e in plan.move_schedule(_ms, us, unit):
+			if e["action"] == a and not bool(e["ok"]):
+				_restore(a, old)
+				_timeline.flash("Can't get there%s." % (" (jumps reach %.1f m)" % CityGeometry.JUMP_RANGE if a.card.jump else ""))
+				return
+		if plan.move_used(_ms, us, unit) > TurnPlan.TURN_SECONDS + TurnPlan.TIME_EPSILON:
+			var need := plan.move_used(_ms, us, unit)
+			_restore(a, old)
+			_timeline.flash("Too far for this turn (needs %.1f s of %.0f)." % [need, TurnPlan.TURN_SECONDS])
+			return
+	_timeline.plan_edited()
+
+
+func _restore(a: PlanAction, old: PlanAction) -> void:
+	a.point = old.point
+	a.level = old.level
+	a.has_point = old.has_point
+
+
+static func _wants_point(a: PlanAction) -> bool:
+	return TurnPlan.is_move_card(a.card) or a.card.card_name == "Look" or a.card.card_name == "Spider"
+
+
+func _own_near(p: Vector2) -> int:
+	var best := -1
+	var best_d := PICK_RADIUS
 	for i in _player_states.size():
 		var u := _player_states[i]
-		if not u.is_bailed and u.hex == hex:
-			return i
-	return -1
+		if not u.is_bailed and u.pos.distance_to(p) <= best_d:
+			best_d = u.pos.distance_to(p)
+			best = i
+	return best
 
 
-## Picks the destination floor for a clicked hex. Movement cards may climb or
-## descend within the unit's own hex (toggle up/down on repeated clicks);
-## every other card targets by hex only (floor 0).
-func _target_floor_for_click(hex: Vector2i) -> int:
-	var info := _timeline.get_selected_target_info()
-	if info.is_empty():
-		return 0
-	var card: TriggerCard = info.get("card")
-	if not TickEngine.is_move_card(card):
-		return 0
-	var f := _preferred_move_floor(info, hex, true)
-	return f if f != -1 else _projected_floor(int(info.get("unit", 0)), int(info.get("tick", 0)) - 1)
-
-
-## Floors of `hex` the selected move card can reach from the unit's
-## projected position (unoccupied by known units). Same rules as the engine.
-func _move_floors(info: Dictionary, hex: Vector2i) -> Array[int]:
-	var out: Array[int] = []
-	var card: TriggerCard = info.get("card")
-	var unit_index: int = info.get("unit", -1)
-	var tick: int = info.get("tick", -1)
-	if card == null or unit_index < 0 or not _board.has_tile(hex):
-		return out
-	var origin := _projected_hex(unit_index, tick - 1)
-	var origin_floor := _projected_floor(unit_index, tick - 1)
-	for f in range(0, maxi(_ms.building_floors(hex), origin_floor + 1) + 1):
-		if f == origin_floor and hex == origin:
+## Index of the known enemy (in sight or a radar ping) nearest `p`, or -1.
+func _enemy_near(p: Vector2) -> int:
+	var best := -1
+	var best_d := PICK_RADIUS * 1.5
+	for i in _enemy_states.size():
+		var e := _enemy_states[i]
+		if e.is_bailed:
 			continue
-		if _known_unit_at(hex, f) != null:
+		var at := _known_pos(e)
+		if at == OFFBOARD:
 			continue
-		if TickEngine.is_valid_move(_ms, origin, origin_floor, hex, f, card, _team):
-			out.append(f)
-	return out
+		var d := at.distance_to(p)
+		if d <= best_d:
+			best_d = d
+			best = i
+	return best
 
 
-## Best destination floor for `hex`, or -1 if unreachable: stay level when
-## possible; Grasshopper prefers rooftops; on the unit's own hex, climb (and
-## toggle down on a repeated click when `toggle`).
-func _preferred_move_floor(info: Dictionary, hex: Vector2i, toggle: bool) -> int:
-	var floors := _move_floors(info, hex)
-	if floors.is_empty():
-		return -1
-	var card: TriggerCard = info.get("card")
-	var unit_index: int = info.get("unit", -1)
-	var tick: int = info.get("tick", -1)
-	var origin := _projected_hex(unit_index, tick - 1)
-	var origin_floor := _projected_floor(unit_index, tick - 1)
-	if hex == origin:
-		var up := origin_floor + 1
-		if toggle and _target_hex_for(info) == origin and _target_floor_for(info) >= up and floors.has(origin_floor - 1):
-			return origin_floor - 1
-		if card.jump:
-			return floors.max()
-		return up if floors.has(up) else floors[0]
-	if card.jump:
-		return floors.max()
-	if floors.has(origin_floor):
-		return origin_floor
-	return floors[0]
+## Where we believe an enemy is: exact in sight, the ping on radar, else OFFBOARD.
+func _known_pos(e: UnitState) -> Vector2:
+	if e.fog == Visibility.State.SIGHT and e.pos != OFFBOARD:
+		return e.pos
+	if e.fog == Visibility.State.RADAR:
+		return e.ping_pos
+	return OFFBOARD
 
 
-func _on_tile_hovered(hex: Vector2i) -> void:
-	_hovered_hex = hex
+func _on_point_hovered(p: Vector2, level: int) -> void:
+	_hover_point = p
+	_hover_level = level
+	var a := _timeline.get_selected_action()
+	if a != null and a.needs_target():
+		_update_targeting()
+
+
+# --- Planning previews --------------------------------------------------------
+
+func _on_unit_selected(i: int) -> void:
+	_focus_unit(i)
+
+
+## Zooms the camera onto character `i` and lights it up.
+func _focus_unit(i: int) -> void:
+	if i < 0 or i >= _player_states.size() or _player_states[i].is_bailed:
+		return
+	var u := _player_states[i]
+	if _camera != null:
+		_camera.focus_on(_board.world_at(u.pos, u.level), minf(_camera.size, FOCUS_SIZE))
 	_update_targeting()
 
 
+func _focus_camera_only(i: int) -> void:
+	if _camera == null or i < 0 or i >= _player_states.size():
+		return
+	var u := _player_states[i]
+	if not u.is_bailed:
+		_camera.focus_on(_board.world_at(u.pos, u.level))
+
+
+func _sync_unit_status() -> void:
+	for i in _player_states.size():
+		var u := _player_states[i]
+		_timeline.set_unit_status(i, u.trion_hp, u.unit_data.base_trion_hp, u.is_bailed)
+
+
+## Redraws every planning preview for the selected character: its routes,
+## the selected action's reach, where it will be and look, the spotlight,
+## and the squad's vision.
+func _update_targeting() -> void:
+	_board.clear_overlays()
+	if _resolving or _over_shown or _player_states.is_empty():
+		_units_view.clear_ghost()
+		_units_view.clear_vision()
+		_spotlight.clear()
+		_units_view.hide_squad_vision()
+		if _prediction_label != null:
+			_prediction_label.visible = false
+		return
+	var idx := _timeline.get_current_unit()
+	if idx < 0 or idx >= _player_states.size():
+		return
+	var u := _player_states[idx]
+	_units_view.set_selected(u)
+	_markers.selected = idx
+	var plan := _timeline.get_plan()
+	var sched := plan.move_schedule(_ms, u, idx)
+	var color := BoardUnits.team_color(u.team).lerp(Color.WHITE, 0.3)
+	# Planned routes, with a marker at each stop.
+	for e in sched:
+		if not bool(e["ok"]) or (e["segments"] as Array).is_empty():
+			continue
+		var pts: Array = []
+		for s in e["segments"]:
+			pts.append(_board.world_at(s["from"], int(s["l0"])))
+			pts.append(_board.world_at(s["to"], int(s["l1"])))
+		_board.add_path(pts, Color(color, 0.75))
+		_board.add_marker(e["to_pos"], int(e["to_level"]), Color(color, 0.8), 0.3)
+	var sel := _timeline.get_selection()
+	var a: PlanAction = sel.get("action")
+	# When the selected action happens, and where the character is then.
+	var t := _action_time(plan, idx, sel)
+	var at := TurnPlan.position_at(sched, u, t, u.unit_data)
+	var pos: Vector2 = at["pos"]
+	var lvl: int = at["level"]
+	var facing := _facing_at(plan, idx, sched, t)
+	# Preview the spot being aimed at (hover) for moves.
+	if a != null and a.needs_target() and TurnPlan.is_move_card(a.card) and _hover_point != Vector2.INF:
+		_units_view.show_ghost(u, _hover_point, _hover_level, (_hover_point - pos).angle())
+	elif a != null and TurnPlan.is_move_card(a.card) and a.has_point:
+		_units_view.show_ghost(u, a.point, a.level)
+	else:
+		_units_view.clear_ghost()
+	_draw_reach(a, pos, lvl, color)
+	# Vision where (and how) it will be when the action happens.
+	var own_rect: Dictionary = {}
+	if _ms.geometry().is_inside(pos, lvl):
+		var ri := _ms.geometry().rect_at(pos)
+		if ri != -1:
+			own_rect = _ms.building_rects()[ri]
+	_units_view.show_vision(u, pos, lvl, facing, own_rect)
+	_update_squad_vision(idx)
+	_spotlight.focus_shape(_units_view.vision_center(), _units_view.vision_outline())
+	_update_prediction(a, u, pos, lvl)
+
+
+## Start time of the selected action (its end for attacks, which fire then);
+## the end of the plan's movement when nothing is selected.
+func _action_time(plan: TurnPlan, idx: int, sel: Dictionary) -> float:
+	var u := _player_states[idx]
+	if sel.is_empty():
+		return plan.move_used(_ms, u, idx)
+	var lane_id: int = sel["lane"]
+	var i: int = sel["index"]
+	var sched := plan.move_schedule(_ms, u, idx) if lane_id == TurnPlan.MOVE_LANE else plan.act_schedule(idx)
+	if i >= sched.size():
+		return 0.0
+	var a: PlanAction = sel["action"]
+	return float(sched[i]["end"]) if a.is_attack() or lane_id == TurnPlan.MOVE_LANE else float(sched[i]["start"])
+
+
+## Facing at time `t`: the last Look before it, else the direction of travel,
+## else the current facing.
+func _facing_at(plan: TurnPlan, idx: int, sched: Array, t: float) -> float:
+	var u := _player_states[idx]
+	var facing := u.facing
+	var watch := Vector2.INF
+	for e in plan.act_schedule(idx):
+		var a: PlanAction = e["action"]
+		if a.card.card_name == "Look" and a.has_point and float(e["end"]) <= t + 0.001:
+			watch = a.point
+	var at := TurnPlan.position_at(sched, u, t, u.unit_data)
+	if watch != Vector2.INF:
+		var d: Vector2 = watch - (at["pos"] as Vector2)
+		return d.angle() if d.length() > 0.001 else facing
+	var dir: Vector2 = at["moving_dir"]
+	if dir != Vector2.ZERO:
+		return dir.angle()
+	# Stopped: the direction of the last leg walked before t.
+	for e in sched:
+		if bool(e["ok"]) and float(e["end"]) <= t + 0.001 and not (e["segments"] as Array).is_empty():
+			var s: Dictionary = (e["segments"] as Array).back()
+			var d: Vector2 = (s["to"] as Vector2) - (s["from"] as Vector2)
+			if d.length() > 0.001:
+				facing = d.angle()
+	return facing
+
+
+## Range circle for the selected action, drawn where it will happen.
+func _draw_reach(a: PlanAction, pos: Vector2, lvl: int, color: Color) -> void:
+	if a == null:
+		return
+	var reach := 0.0
+	if a.is_attack():
+		reach = TurnEngine.MELEE_RANGE if a.card.card_type == TriggerCard.CardType.MELEE else a.card.attack_range
+	elif a.card.jump:
+		reach = CityGeometry.JUMP_RANGE
+	elif a.card.card_name == "Spider":
+		reach = TurnEngine.SPIDER_RANGE
+	if reach > 0.0:
+		_board.add_range(pos, lvl, reach, Color(1.0, 0.6, 0.3, 0.8))
+	if a.is_attack() and a.target_unit >= 0 and a.target_unit < _enemy_states.size():
+		var tp := _known_pos(_enemy_states[a.target_unit])
+		if tp != OFFBOARD:
+			_board.add_marker(tp, _enemy_states[a.target_unit].level, Color(1.0, 0.4, 0.3, 0.9), 0.55)
+	if a.has_point and not TurnPlan.is_move_card(a.card):
+		_board.add_marker(a.point, 0, Color(color, 0.9), 0.4)
+
+
+## Faint vision for every other living character in the squad.
+func _update_squad_vision(selected_idx: int) -> void:
+	var entries: Array = []
+	for i in _player_states.size():
+		var u := _player_states[i]
+		if i == selected_idx or u.is_bailed:
+			continue
+		var own_rect: Dictionary = {}
+		if _ms.geometry().is_inside(u.pos, u.level):
+			var ri := _ms.geometry().rect_at(u.pos)
+			if ri != -1:
+				own_rect = _ms.building_rects()[ri]
+		entries.append({ "unit": u, "pos": u.pos, "level": u.level, "facing": u.facing, "own_rect": own_rect })
+	_units_view.show_squad_vision(entries)
+
+
+## Hit-chance readout for the selected attack against its target (or the
+## enemy under the pointer), from where the attacker will be when it fires.
+func _update_prediction(a: PlanAction, u: UnitState, pos: Vector2, lvl: int) -> void:
+	if _prediction_label == null:
+		return
+	_prediction_label.visible = false
+	if a == null or not a.is_attack():
+		return
+	var ti := a.target_unit
+	if ti < 0 and _hover_point != Vector2.INF:
+		ti = _enemy_near(_hover_point)
+	if ti < 0 or ti >= _enemy_states.size():
+		return
+	var target := _enemy_states[ti]
+	var tp := _known_pos(target)
+	if tp == OFFBOARD:
+		return
+	var dist := pos.distance_to(tp)
+	var melee := a.card.card_type == TriggerCard.CardType.MELEE
+	var reach := TurnEngine.MELEE_RANGE if melee else a.card.attack_range
+	var text := "%s → %s: %.1f m (reach %.1f m)" % [a.card.card_name, target.unit_data.unit_name, dist, reach]
+	if dist > reach:
+		text += "  ·  out of reach from there"
+	elif not melee and not a.card.curved and not Visibility.has_los(_ms, pos, lvl, tp, target.level):
+		text += "  ·  no clear line"
+	else:
+		var probe := TurnEngine.new()
+		probe._ms = _ms
+		var ghost := UnitState.new(u.unit_data, u.team, pos, (tp - pos).angle())
+		ghost.level = lvl
+		var chance := probe.hit_chance(ghost, target, a.card)
+		text += "  ·  %d%% to hit, %d damage before shields" % [roundi(chance * 100.0), u.unit_data.attack_rating + a.card.power]
+	if target.fog != Visibility.State.SIGHT:
+		text += "  ·  (radar only: must be seen when it fires)"
+	_prediction_label.text = text
+	_prediction_label.visible = true
+
+
 # --- Submit / Resolve -------------------------------------------------------
+
+## Makes the plan submittable as it stands (the live buzzer): drops actions
+## that were never aimed or can't be walked, then trims each lane from the
+## end until it fits the turn. What the player did plan still happens.
+func _sanitize_plan() -> void:
+	_timeline.get_plan().sanitize(_ms, _player_states)
+	_timeline.plan_edited()
+
 
 func _on_plan_submitted() -> void:
 	if _resolving:
@@ -363,9 +605,14 @@ func _on_plan_submitted() -> void:
 		await _submit_local()
 
 
+## Local turn: the AI plans on the real match, the turn is recorded like the
+## server does it, and we replay our team's view of it.
 func _submit_local() -> void:
 	_build_enemy_plan()
-	var winner := await _replay_turn(_timeline.get_plan(), _enemy_plan)
+	var plans := [_timeline.get_plan(), _enemy_plan] if _team == 0 else [_enemy_plan, _timeline.get_plan()]
+	var frames := MatchRunner.record_turn(_truth, plans[0], plans[1], func(n: int) -> int: return _salt(n))
+	var winner := await _replay_frames(frames[_team])
+	winner = MatchRunner.winner(_truth)
 	_after_resolution(winner)
 
 
@@ -453,28 +700,50 @@ func _catch_up(body: Dictionary) -> int:
 	return winner
 
 
-## Online replay: the server sends one fog-filtered frame per tick (our view
-## of the board + the events we may see). We animate between frames instead
-## of re-simulating, since the client never learns hidden enemy actions.
+
+
+## Replays one turn from its frames ({t, events, view}): the board glides
+## from frame to frame in real time and events play at their moment. Returns
+## the winner as far as our view can tell (the server's word comes after).
 func _replay_frames(frames: Array) -> int:
 	_begin_replay()
-	await get_tree().create_timer(0.4).timeout
-	for frame in frames:
-		var snapshots := _snapshot_units()
+	await get_tree().create_timer(0.3).timeout
+	var last_t := 0.0
+	for i in frames.size():
+		if not is_inside_tree():
+			return -1
+		var frame: Dictionary = frames[i]
+		var t := float(frame.get("t", 0.0))
+		var dt := maxf(0.0, t - last_t)
+		last_t = t
+		var before := {}
+		for u in _ms.all_units():
+			before[u] = { "fog": u.fog, "pos": u.pos }
 		_apply_view(frame.get("view", {}))
 		_board.set_wires(_ms.wires)
 		var events: Array = frame.get("events", [])
 		for ev in events:
 			_event_log.add_event_dict(ev)
-		_refresh_fog_overlay()
 		_units_view.update_labels()
-		_animate_frame(snapshots, events)
-		await get_tree().create_timer(MOVE_DURATION + TICK_PAUSE).timeout
+		_units_view.apply_fog()
+		_sync_unit_status()
+		for u in _ms.all_units():
+			var was: Dictionary = before[u]
+			if u.fog != Visibility.State.SIGHT or u.pos == OFFBOARD:
+				continue
+			if int(was["fog"]) != Visibility.State.SIGHT or was["pos"] == OFFBOARD or i == 0:
+				_units_view.snap(u)
+			else:
+				_units_view.glide_to(u, _board.world_at(u.pos, u.level), u.facing, maxf(dt, 0.05))
+		_present_frame_events(events)
+		if dt > 0.0:
+			await get_tree().create_timer(dt).timeout
+	await get_tree().create_timer(0.25).timeout
 	return MatchRunner.winner(_ms)
 
 
-## Applies a server view (Visibility.encode_view) to the client MatchState.
-## Unseen enemies are parked OFFBOARD; RADAR ones keep only a ping position.
+## Applies a view (Visibility.encode_view) to our MatchState. Unseen enemies
+## are parked OFFBOARD; RADAR ones keep only a ping position.
 func _apply_view(view: Dictionary) -> void:
 	var units := _ms.all_units()
 	var rows: Array = view.get("units", [])
@@ -484,27 +753,29 @@ func _apply_view(view: Dictionary) -> void:
 		u.fog = int(row.get("vis", Visibility.State.SIGHT))
 		match u.fog:
 			Visibility.State.SIGHT:
-				var hex: Array = row.get("hex", [u.hex.x, u.hex.y])
-				u.hex = Vector2i(int(hex[0]), int(hex[1]))
-				u.floor = int(row.get("floor", 0))
-				u.facing = int(row.get("facing", u.facing))
+				var pos: Array = row.get("pos", [u.pos.x, u.pos.y])
+				u.pos = Vector2(float(pos[0]), float(pos[1]))
+				u.level = int(row.get("level", 0))
+				u.facing = float(row.get("facing", u.facing))
 				u.trion_hp = int(row.get("hp", u.trion_hp))
 				u.is_bailed = bool(row.get("bailed", false))
 				u.stealth_active = bool(row.get("stealth", false))
-				u.weight_ticks = int(row.get("weight", 0))
+				u.weight_time = float(row.get("weight", 0.0))
+				u.shield_active = bool(row.get("shield", false))
 			Visibility.State.RADAR:
 				var ping: Array = row.get("ping", [0, 0])
-				u.ping_hex = Vector2i(int(ping[0]), int(ping[1]))
-				u.hex = OFFBOARD
+				u.ping_pos = Vector2(float(ping[0]), float(ping[1]))
+				u.pos = OFFBOARD
 			_:
-				u.hex = OFFBOARD
+				u.pos = OFFBOARD
 	_ms.wires.clear()
 	for w in view.get("wires", []):
-		_ms.wires[Vector2i(int(w[0]), int(w[1]))] = int(w[2]) if w.size() > 2 else -1
+		if w is Array and w.size() >= 3:
+			_ms.wires.append({ "pos": Vector2(float(w[0]), float(w[1])), "team": int(w[2]) })
 
 
-func _animate_frame(snapshots: Dictionary, events: Array) -> void:
-	_animate_moves(snapshots)
+## Combat effects for one frame's events (cosmetic).
+func _present_frame_events(events: Array) -> void:
 	var by_name := {}
 	for u in _ms.all_units():
 		by_name[u.display_name()] = u
@@ -516,33 +787,11 @@ func _animate_frame(snapshots: Dictionary, events: Array) -> void:
 	_present_combat(shown)
 
 
-## Local mode: resolves + animates a full 6-tick turn and returns the winner
-## (-1 if none). The engine sees everything, but the board and the combat log
-## only show what the player's team can see (fog of war).
-func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
-	_begin_replay()
-	await get_tree().create_timer(0.4).timeout
-
-	for tick in TurnPlan.TICKS_PER_TURN:
-		var snapshots := _snapshot_units()
-		var events := _engine.resolve_tick(_ms, player_plan, enemy_plan, tick)
-		_board.set_wires(_ms.wires)
-		var states := _refresh_fog_local(_turn * 10 + tick)
-		for ev in events:
-			if Visibility.event_visible(ev, _team, states):
-				_event_log.add_event(ev)
-		_units_view.update_labels()
-		_animate_transitions(snapshots, events)
-		await get_tree().create_timer(MOVE_DURATION + TICK_PAUSE).timeout
-
-	return MatchRunner.winner(_ms)
-
-
 func _begin_replay() -> void:
 	_spotlight.clear()
 	_units_view.hide_squad_vision()
 	_event_log.clear()
-	_board.clear_highlights()
+	_board.clear_overlays()
 	_units_view.clear_ghost()
 	_units_view.clear_vision()
 	_units_view.set_selected(null)
@@ -551,49 +800,8 @@ func _begin_replay() -> void:
 	_event_log.add_message("Resolving turn %d…" % _turn, Color(0.7, 0.8, 1.0))
 
 
-# --- Fog of War -------------------------------------------------------------
-
-## Radar salt for the planning view; equals the last replay tick's salt
-## (turn * 10 + 5) of the previous turn so pings don't jump.
-func _view_salt() -> int:
-	return _turn * 10 - 5
-
-
-## Local mode: recomputes what our team sees from the full MatchState.
-## Returns the enemy visibility states (for event filtering).
-func _refresh_fog_local(salt: int) -> Dictionary:
-	var states := Visibility.enemy_states(_ms, _team)
-	var index := 0
-	for u in _ms.all_units():
-		if u.team != _team:
-			u.fog = int(states[u])
-			if u.fog == Visibility.State.RADAR:
-				u.ping_hex = Visibility.radar_ping(_ms, u, index, salt)
-		index += 1
-	_refresh_fog_overlay()
-	return states
-
-
-func _refresh_fog_overlay() -> void:
-	_board.set_fog(Visibility.visible_hexes(_ms, _team))
-	_units_view.apply_fog()
-
-
-## Enemy units the player is allowed to know about right now.
-func _is_known(u: UnitState) -> bool:
-	return u.team == _team or u.fog == Visibility.State.SIGHT
-
-
-## Occupancy check that ignores enemies hidden by fog (so the planning UI
-## can't leak their position).
-func _known_unit_at(hex: Vector2i, floor: int) -> UnitState:
-	var u := _ms.get_unit_at(hex, floor)
-	return u if u != null and _is_known(u) else null
-
-
 func _after_resolution(winner: int) -> void:
 	if _over_shown:
-		# Ended while the replay ran (e.g. a surrender): stay on the result.
 		_resolving = false
 		return
 	if winner != -1:
@@ -602,11 +810,11 @@ func _after_resolution(winner: int) -> void:
 		return
 	_turn += 1
 	if not _online:
-		_refresh_fog_local(_view_salt())
+		_apply_view(Visibility.encode_view(_truth, _team, _salt(0), true))
+		_units_view.refresh()
+		_board.set_wires(_ms.wires)
 	_event_log.set_turn(_turn)
 	_event_log.add_message("Turn %d — plan your next move." % _turn, Color(0.6, 0.9, 0.6))
-	# Not resolving any more *before* the new plan view is built, so vision
-	# cones and the spotlight come back for it.
 	_resolving = false
 	_timeline.set_locked(false)
 	_sync_unit_status()
@@ -614,37 +822,9 @@ func _after_resolution(winner: int) -> void:
 	_focus_unit(_timeline.get_current_unit())
 
 
-func _snapshot_units() -> Dictionary:
-	var snap := {}
-	for u in _ms.all_units():
-		snap[u] = { "hex": u.hex, "facing": u.facing, "floor": u.floor, "fog": u.fog }
-	return snap
-
-
-## Tweens units that moved. Units that just came out of the fog snap into
-## place instead of sliding in from their last known (or parked) position.
-func _animate_moves(snapshots: Dictionary) -> void:
-	for u in _ms.all_units():
-		var old: Dictionary = snapshots.get(u, {})
-		if old.is_empty():
-			continue
-		if int(old["fog"]) != Visibility.State.SIGHT or old["hex"] == OFFBOARD:
-			_units_view.snap(u)
-			continue
-		if old["hex"] != u.hex or old["floor"] != u.floor:
-			_units_view.tween_to(u, _board.hex_to_world_at(u.hex, u.floor), MOVE_DURATION)
-		if old["facing"] != u.facing:
-			_units_view.tween_facing(u, u.facing, MOVE_DURATION)
-
-
-func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> void:
-	_animate_moves(snapshots)
-	var states := Visibility.enemy_states(_ms, _team)
-	var shown: Array = []
-	for ev in events:
-		if Visibility.event_visible(ev, _team, states):
-			shown.append({ "phase": ev.phase, "message": ev.message, "actor": ev.actor, "target": ev.target, "damage": ev.damage })
-	_present_combat(shown)
+## Whether the local player currently sees `u` standing on the board.
+func _on_board(u: UnitState) -> bool:
+	return u != null and u.pos != OFFBOARD and (u.team == _team or u.fog == Visibility.State.SIGHT) and _units_view.has_marker(u)
 
 
 # --- Combat presentation ------------------------------------------------------
@@ -703,7 +883,7 @@ func _present_combat(events: Array) -> void:
 		var from := _units_view.chest_pos(actor)
 		var to := _units_view.chest_pos(target)
 		var card := _card_in_message(message)
-		var melee := HexCoord.distance(actor.hex, target.hex) <= 1 and actor.floor == target.floor
+		var melee := actor.pos.distance_to(target.pos) <= TurnEngine.MELEE_RANGE + 0.3 and actor.level == target.level
 		if card != null:
 			melee = card.card_type == TriggerCard.CardType.MELEE
 		var heavy := card != null and card.power >= 6
@@ -761,12 +941,6 @@ func _present_combat(events: Array) -> void:
 	if worst > 0 and _camera != null:
 		_camera.shake(clampf(worst / 12.0, 0.25, 1.0))
 
-
-## Whether the local player currently sees `u` standing on the board.
-func _on_board(u: UnitState) -> bool:
-	return u != null and u.hex != OFFBOARD and _is_known(u) and _units_view.has_marker(u)
-
-
 ## The trigger named in an attack message ("... with Asteroid for 5"), or null.
 func _card_in_message(message: String) -> TriggerCard:
 	if message.contains("Lead Bullet"):
@@ -778,401 +952,6 @@ func _card_in_message(message: String) -> TriggerCard:
 
 
 # --- Targeting / Camera -----------------------------------------------------
-
-func _on_unit_selected(i: int) -> void:
-	_focus_unit(i)
-
-
-## Zooms the camera onto character `i` and lights it up.
-func _focus_unit(i: int) -> void:
-	if i < 0 or i >= _player_states.size() or _player_states[i].is_bailed:
-		return
-	var u := _player_states[i]
-	if _camera != null and u.hex != OFFBOARD:
-		_camera.focus_on(_board.hex_to_world_at(u.hex, u.floor), minf(_camera.size, FOCUS_SIZE))
-	_update_spotlight(_timeline.get_selected_target_info())
-
-
-## Copies each character's HP / bail-out into the timeline tabs.
-func _sync_unit_status() -> void:
-	for i in _player_states.size():
-		var u := _player_states[i]
-		_timeline.set_unit_status(i, u.trion_hp, u.unit_data.base_trion_hp, u.is_bailed)
-
-
-## Fog-of-war spotlight: lights exactly what the commanded character can see
-## from where it will be (and the way it will face) when the selected action
-## fires; everything else is dimmed. Zooms out if the action's reach doesn't
-## fit on screen.
-func _update_spotlight(info: Dictionary) -> void:
-	if _spotlight == null:
-		return
-	var idx: int = info.get("unit", _timeline.get_current_unit())
-	if _resolving or _over_shown or idx < 0 or idx >= _player_states.size() or _player_states[idx].is_bailed:
-		_spotlight.clear()
-		return
-	var tick: int = info.get("tick", -1)
-	var hex := _projected_hex(idx, tick)
-	var floor := _projected_floor(idx, tick)
-	if hex == OFFBOARD:
-		_spotlight.clear()
-		return
-	# Lit area = what this character can see (its vision shape, drawn by
-	# _update_vision at the same projected position and facing).
-	_spotlight.focus_shape(_units_view.vision_center(), _units_view.vision_outline())
-	# Keep the selected action's reach on screen.
-	var radius := (_action_reach(info.get("card")) + 0.65) * _hex_step
-	if _camera != null and info.get("card") != null and radius * 2.3 > _camera.size:
-		_camera.focus_on(_board.hex_to_world_at(hex, floor), radius * 2.3, 0.3)
-
-
-## How many hexes the action can reach (what the spotlight must show).
-func _action_reach(card: TriggerCard) -> float:
-	if card == null:
-		return 1.6
-	if TickEngine.is_move_card(card):
-		return float(maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE))
-	match card.card_type:
-		TriggerCard.CardType.MELEE:
-			return 1.0
-		TriggerCard.CardType.RANGED:
-			return float(card.attack_range)
-	if card.card_name == "Spider":
-		return float(TickEngine.SPIDER_RANGE)
-	if card.card_name == "Look":
-		return 3.0
-	return 1.0
-
-
-func _update_targeting() -> void:
-	var info := _timeline.get_selected_target_info()
-	_board.highlight_hexes(_compute_range_hexes(info))
-	_board.highlight_effects(_compute_effect_hexes(info))
-	_update_ghost(info)
-	_update_prediction(info)
-	var idx := _timeline.get_current_unit()
-	if idx >= 0 and idx < _player_states.size():
-		_units_view.set_selected(_player_states[idx])
-	_markers.selected = idx
-	_update_vision(info)
-	_update_squad_vision(idx)
-	_update_spotlight(info)
-
-
-## Faint vision for every other living character in the squad (where it
-## stands and looks now), so the whole squad's view is readable at a glance.
-func _update_squad_vision(selected_idx: int) -> void:
-	if _resolving or _over_shown:
-		_units_view.hide_squad_vision()
-		return
-	var entries: Array = []
-	for i in _player_states.size():
-		var u := _player_states[i]
-		if i == selected_idx or u.is_bailed or u.hex == OFFBOARD:
-			continue
-		var own_rect: Dictionary = {}
-		if u.floor < _ms.building_floors(u.hex):
-			var ri := _ms.building_rect_index(u.hex)
-			if ri != -1:
-				own_rect = _ms.building_rects()[ri]
-		entries.append({ "unit": u, "hex": u.hex, "floor": u.floor, "facing": u.facing, "own_rect": own_rect })
-	_units_view.show_squad_vision(entries)
-
-
-## Camera glide only (badge taps while a turn is playing out).
-func _focus_camera_only(i: int) -> void:
-	if _camera == null or i < 0 or i >= _player_states.size():
-		return
-	var u := _player_states[i]
-	if u.hex != OFFBOARD and not u.is_bailed:
-		_camera.focus_on(_board.hex_to_world_at(u.hex, u.floor))
-
-
-## Shows the selected character's vision cones where it will be (and which
-## way it will face) at the selected tick. With a Look card selected, the
-## cone follows the hovered hex to preview the new facing.
-func _update_vision(info: Dictionary) -> void:
-	if _resolving or _player_states.is_empty():
-		_units_view.clear_vision()
-		return
-	var idx: int = info.get("unit", _timeline.get_current_unit())
-	if idx < 0 or idx >= _player_states.size() or _player_states[idx].is_bailed:
-		_units_view.clear_vision()
-		return
-	var tick: int = info.get("tick", -1)
-	var hex := _projected_hex(idx, tick)
-	var floor := _projected_floor(idx, tick)
-	var facing := _projected_facing(idx, tick)
-	var card: TriggerCard = info.get("card")
-	if card != null and card.card_name == "Look" and _target_hex_for(info) == HexBoard.INVALID_HEX \
-			and _hovered_hex != HexBoard.INVALID_HEX:
-		var dir := TickEngine.attack_direction(hex, _hovered_hex)
-		if dir != -1:
-			facing = dir
-	# Standing inside a building: vision only leaves through its outer wall.
-	var own_rect: Dictionary = {}
-	if floor < _ms.building_floors(hex):
-		var ri := _ms.building_rect_index(hex)
-		if ri != -1:
-			own_rect = _ms.building_rects()[ri]
-	_units_view.show_vision(_player_states[idx], hex, floor, facing, own_rect)
-
-
-## Facing after ticks 0..through_tick of the plan: moves face their step,
-## Look faces its target, attacks turn toward their target (engine rules).
-func _projected_facing(unit_index: int, through_tick: int) -> int:
-	var u: UnitState = _player_states[unit_index]
-	var facing := u.facing
-	var plan := _timeline.get_plan()
-	for t in range(through_tick + 1):
-		var hex := _projected_hex(unit_index, t - 1)
-		var ta: TickAction = plan.get_tick(unit_index, t)
-		var moved_to := _projected_hex(unit_index, t)
-		if moved_to != hex:
-			var dir := TickEngine.attack_direction(hex, moved_to)
-			if dir != -1:
-				facing = dir
-		for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
-			var card := ta.slot_card(slot)
-			if card == null or not ta.slot_has_target(slot) or TickEngine.is_move_card(card):
-				continue
-			if card.card_name == "Look" or card.card_type == TriggerCard.CardType.MELEE or card.card_type == TriggerCard.CardType.RANGED:
-				var dir := TickEngine.attack_direction(moved_to, ta.slot_target(slot))
-				if dir != -1:
-					facing = dir
-	return facing
-
-
-## Live hit-chance / damage readout for the hovered (or locked) target of the
-## selected offensive card.
-func _update_prediction(info: Dictionary) -> void:
-	if _prediction_label == null:
-		return
-	if info.is_empty():
-		_prediction_label.visible = false
-		return
-
-	var unit_index: int = info.get("unit", -1)
-	var card: TriggerCard = info.get("card")
-	if card == null or unit_index < 0 or unit_index >= _player_states.size():
-		_prediction_label.visible = false
-		return
-	if card.card_type != TriggerCard.CardType.MELEE and card.card_type != TriggerCard.CardType.RANGED:
-		_prediction_label.visible = false
-		return
-
-	var tick: int = info.get("tick", -1)
-	var origin := _projected_hex(unit_index, tick)
-	var origin_floor := _projected_floor(unit_index, tick)
-	var attacker: UnitState = _player_states[unit_index]
-
-	var target_hex := _target_hex_for(info)
-	if target_hex == HexBoard.INVALID_HEX or not _board.has_tile(target_hex):
-		target_hex = _hovered_hex
-	if target_hex == HexBoard.INVALID_HEX or not _board.has_tile(target_hex):
-		_prediction_label.visible = false
-		return
-
-	var target := _ms.get_unit_at_any_floor(target_hex)
-	if target == null or not _is_known(target):
-		_prediction_label.visible = false
-		return
-
-	var p := _engine.preview_attack(_ms, attacker, origin, card, target, origin_floor)
-	_prediction_label.text = _format_prediction(card, attacker, target, p)
-	_prediction_label.visible = true
-
-
-func _format_prediction(card: TriggerCard, attacker: UnitState, target: UnitState, p: Dictionary) -> String:
-	var cname := card.card_name
-	var tname := target.display_name()
-	if target.team == attacker.team:
-		_prediction_label.add_theme_color_override("font_color", Color(0.95, 0.85, 0.4))
-		return "%s → %s — friendly" % [cname, tname]
-	if not p["range_ok"]:
-		_prediction_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
-		return "%s → %s — out of range" % [cname, tname]
-	if p["blocked"]:
-		_prediction_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
-		return "%s → %s — no line of sight" % [cname, tname]
-	if card.effect == "weight":
-		_prediction_label.add_theme_color_override("font_color", Color(0.5, 1.0, 0.55))
-		return "%s → %s — %d%% hit · weighs down (no move/dodge)" % [cname, tname, roundi(float(p["hit_chance"]) * 100.0)]
-
-	var dmg := int(p["power"])
-	var note := ""
-	if p["half_cover"]:
-		dmg = roundi(float(p["power"]) * 0.5)
-		note = " · ½ cover"
-	if p.get("piercing", false):
-		note += " · pierces shields"
-	var hit := roundi(float(p["hit_chance"]) * 100.0)
-	_prediction_label.add_theme_color_override("font_color", Color(0.5, 1.0, 0.55))
-	return "%s → %s — %d%% hit · %d dmg%s" % [cname, tname, hit, dmg, note]
-
-
-## Green tiles the player may click for the selected slot's card. Only
-## movement destinations live here; attack/trap areas use effect highlights.
-func _compute_range_hexes(info: Dictionary) -> Array[Vector2i]:
-	if info.is_empty():
-		return []
-	var unit_index: int = info.get("unit", -1)
-	var card: TriggerCard = info.get("card")
-	if card == null or unit_index < 0 or unit_index >= _player_states.size():
-		return []
-
-	var tick: int = info.get("tick", -1)
-	var result: Array[Vector2i] = []
-
-	if TickEngine.is_move_card(card):
-		var origin := _projected_hex(unit_index, tick - 1)
-		for hex in HexCoord.spiral(origin, maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE)):
-			if not _move_floors(info, hex).is_empty():
-				result.append(hex)
-
-	return result
-
-
-## Orange tiles the selected slot's card affects: attack targets, Spider wire
-## area, or the unit's own hex for self-buffs (Shield / Bagworm). Origins use
-## the unit's projected position (after this tick's move, per the engine order).
-func _compute_effect_hexes(info: Dictionary) -> Array[Vector2i]:
-	if info.is_empty():
-		return []
-	var unit_index: int = info.get("unit", -1)
-	var card: TriggerCard = info.get("card")
-	if card == null or unit_index < 0 or unit_index >= _player_states.size():
-		return []
-
-	var tick: int = info.get("tick", -1)
-	var origin := _projected_hex(unit_index, tick)
-	var origin_floor := _projected_floor(unit_index, tick)
-	var result: Array[Vector2i] = []
-
-	if card.card_type == TriggerCard.CardType.MELEE:
-		for e in _enemy_states:
-			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) == 1 and e.floor == origin_floor:
-				result.append(e.hex)
-	elif card.card_type == TriggerCard.CardType.RANGED:
-		for e in _enemy_states:
-			if _is_known(e) and not e.is_bailed and HexCoord.distance(origin, e.hex) <= card.attack_range:
-				result.append(e.hex)
-	elif card.card_name == "Spider":
-		for hex in HexCoord.spiral(origin, 3):
-			if _board.has_tile(hex):
-				result.append(hex)
-	elif card.card_type == TriggerCard.CardType.SHIELD or card.card_type == TriggerCard.CardType.STEALTH:
-		result.append(origin)
-
-	return result
-
-
-## Shows a translucent "ghost" of the selected unit's position for the current
-## slot. For Move cards it previews the destination (locked target, then the
-## hovered tile, then the projected origin). For every other card it keeps
-## showing where the unit will be when that action fires, so attacks/abilities
-## read from the correct projected position.
-func _update_ghost(info: Dictionary) -> void:
-	var u := _selected_unit(info)
-	if u == null:
-		_units_view.clear_ghost()
-		return
-
-	var unit_index: int = info.get("unit", -1)
-	var tick: int = info.get("tick", -1)
-	var card: TriggerCard = info.get("card")
-	var is_move := TickEngine.is_move_card(card)
-
-	if is_move:
-		var origin := _projected_hex(unit_index, tick - 1)
-		var origin_floor := _projected_floor(unit_index, tick - 1)
-		var target := _target_hex_for(info)
-		var target_floor := _target_floor_for(info)
-		if target != HexBoard.INVALID_HEX and _board.has_tile(target):
-			_units_view.show_ghost(u, target, target_floor)
-			return
-		var hover_floor := _preferred_move_floor(info, _hovered_hex, false) if _hovered_hex != HexBoard.INVALID_HEX else -1
-		if hover_floor != -1:
-			_units_view.show_ghost(u, _hovered_hex, hover_floor)
-			return
-		if origin != u.hex or origin_floor != u.floor:
-			_units_view.show_ghost(u, origin, origin_floor)
-			return
-		_units_view.clear_ghost()
-		return
-
-	# Non-move (attack / shield / utility / empty): keep the ghost at the
-	# unit's projected position so the player can see where the action happens.
-	var pos := _projected_hex(unit_index, tick)
-	var pos_floor := _projected_floor(unit_index, tick)
-	if pos != u.hex or pos_floor != u.floor:
-		_units_view.show_ghost(u, pos, pos_floor)
-	else:
-		_units_view.clear_ghost()
-
-
-func _selected_unit(info: Dictionary) -> UnitState:
-	if info.is_empty():
-		return null
-	var unit_index: int = info.get("unit", -1)
-	if unit_index < 0 or unit_index >= _player_states.size():
-		return null
-	return _player_states[unit_index]
-
-
-func _target_hex_for(info: Dictionary) -> Vector2i:
-	var unit_index: int = info.get("unit", -1)
-	var tick: int = info.get("tick", -1)
-	if unit_index < 0 or tick < 0:
-		return HexBoard.INVALID_HEX
-	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
-	var slot: int = info.get("slot", TurnPlan.MAIN_SLOT)
-	if ta != null and ta.slot_has_target(slot):
-		return ta.slot_target(slot)
-	return HexBoard.INVALID_HEX
-
-
-func _target_floor_for(info: Dictionary) -> int:
-	var unit_index: int = info.get("unit", -1)
-	var tick: int = info.get("tick", -1)
-	if unit_index < 0 or tick < 0:
-		return 0
-	var ta: TickAction = _timeline.get_plan().get_tick(unit_index, tick)
-	var slot: int = info.get("slot", TurnPlan.MAIN_SLOT)
-	if ta != null and ta.slot_has_target(slot):
-		return ta.slot_target_floor(slot)
-	return 0
-
-
-## Where a unit will be after resolving all Move cards in ticks 0..through_tick
-## (inclusive). through_tick < 0 means "no moves yet" (returns its current
-## position). Matches the engine's sequential per-tick movement for previews.
-func _projected_pos(unit_index: int, through_tick: int) -> Dictionary:
-	var u: UnitState = _player_states[unit_index]
-	var hex := u.hex
-	var floor := u.floor
-	var plan := _timeline.get_plan()
-	for t in range(through_tick + 1):
-		var ta: TickAction = plan.get_tick(unit_index, t)
-		var slot := TickEngine.move_slot(ta)
-		if slot != -1 and ta.slot_has_target(slot):
-			var to_hex := ta.slot_target(slot)
-			var to_floor := ta.slot_target_floor(slot)
-			if TickEngine.is_valid_move(_ms, hex, floor, to_hex, to_floor, ta.slot_card(slot), _team) and _known_unit_at(to_hex, to_floor) == null:
-				hex = to_hex
-				floor = to_floor
-	return { "hex": hex, "floor": floor }
-
-
-func _projected_hex(unit_index: int, through_tick: int) -> Vector2i:
-	return _projected_pos(unit_index, through_tick)["hex"]
-
-
-func _projected_floor(unit_index: int, through_tick: int) -> int:
-	return _projected_pos(unit_index, through_tick)["floor"]
-
-
-# --- Prediction Readout -----------------------------------------------------
 
 func _build_prediction_label(ui_layer: CanvasLayer) -> void:
 	_prediction_label = Label.new()
@@ -1296,7 +1075,7 @@ func _show_match_over(winner: int) -> void:
 	_btn_row.visible = true
 	_overlay.visible = true
 	_timeline.set_locked(true)
-	_board.clear_highlights()
+	_board.clear_overlays()
 	_units_view.clear_ghost()
 	if _prediction_label != null:
 		_prediction_label.visible = false
@@ -1366,6 +1145,7 @@ func _process(_delta: float) -> void:
 	# Buzzer: lock in whatever is planned (the server would otherwise fall
 	# back to "Stand Ground + Shield").
 	if left >= 0.0 and left <= LIVE_AUTO_LOCK_SEC and not _resolving and not _live_replaying:
+		_sanitize_plan()
 		_on_plan_submitted()
 
 
@@ -1539,127 +1319,143 @@ func _on_surrender_pressed() -> void:
 	_show_match_over(int(_live_over["winner"]))
 
 
+
+
 # --- Enemy AI (local mode only) --------------------------------------------
-# The AI plays fair under fog of war: it only attacks player units its team
-# can see, closes in on radar contacts, and paths around buildings.
+# The AI plays fair under fog of war: it works on the real match but only
+# uses what its own team can see (enemies in sight; radar ghosts for the
+# rest), walks the same routes, and its plans pass the same timing rules.
 
-## Rebuilds the enemy plan for the current turn from the enemy loadout.
 func _build_enemy_plan() -> void:
-	_enemy_plan = TurnPlan.new(_enemy_data)
-	var seen := Visibility.enemy_states(_ms, 1)
-	for i in _enemy_data.size():
-		if not _enemy_states[i].is_bailed:
-			_plan_enemy_unit(i, seen)
+	var ai_team := 1 - _team
+	var units: Array = _truth.teams[ai_team]
+	var data: Array[UnitData] = []
+	for u in units:
+		data.append((u as UnitState).unit_data)
+	_enemy_plan = TurnPlan.new(data)
+	var seen := Visibility.enemy_states(_truth, ai_team)
+	for i in units.size():
+		if not (units[i] as UnitState).is_bailed:
+			_plan_enemy_unit(i, units[i], seen)
+			# Never submit something the rules would refuse.
+			if not _enemy_plan.is_unit_valid(_truth, units[i], i):
+				_enemy_plan.clear_unit(i)
+				_enemy_plan.add(i, _hold_action("Shield", TurnPlan.TURN_SECONDS)) if _has_card(data[i], "Shield") else null
 
 
-func _plan_enemy_unit(i: int, seen: Dictionary) -> void:
-	var u := _enemy_states[i]
-	var actions := _enemy_plan.get_available_actions(i)
-	var melee: TriggerCard = null
-	var ranged: TriggerCard = null
-	var shield: TriggerCard = null
-	var move_card: TriggerCard = null
-	for a in actions:
-		if melee == null and a.card_type == TriggerCard.CardType.MELEE:
-			melee = a
-		elif a.card_type == TriggerCard.CardType.RANGED and a.power > 0 and (ranged == null or a.power > ranged.power):
-			ranged = a
-		elif shield == null and a.card_type == TriggerCard.CardType.SHIELD:
-			shield = a
-		elif move_card == null and a.card_type == TriggerCard.CardType.MOVE:
-			move_card = a
+func _plan_enemy_unit(i: int, u: UnitState, seen: Dictionary) -> void:
+	var data := u.unit_data
+	var melee := _best_card(data, TriggerCard.CardType.MELEE)
+	var ranged := _best_card(data, TriggerCard.CardType.RANGED)
+	var shield_ok := _has_card(data, "Shield")
+	var low_hp := u.trion_hp <= data.base_trion_hp * 0.25
 
-	var low_hp := u.trion_hp <= u.unit_data.base_trion_hp * 0.2
-	var pos := u.hex  # projected position as the plan's moves accumulate
-	var floor := u.floor
+	# Panic defense: bunker down when nearly bailed out.
+	if low_hp and shield_ok:
+		_enemy_plan.add(i, _hold_action("Shield", TurnPlan.TURN_SECONDS))
+		return
 
-	for tick in TurnPlan.TICKS_PER_TURN:
-		# Panic defense: bunker up when nearly bailed.
-		if low_hp and shield != null and _try_full_guard(i, tick, shield):
-			continue
+	var target := _ai_pick(u, seen, true)
+	var goal := target if target != null else _ai_pick(u, seen, false)
+	var goal_pos := Vector2.INF
+	if goal != null:
+		goal_pos = goal.pos if int(seen.get(goal, Visibility.State.HIDDEN)) == Visibility.State.SIGHT \
+			else Visibility.radar_ping(_truth, goal, goal.team, _turn)
+	var geo := _truth.geometry()
 
-		var target := _pick_target(pos, seen, true)
-		if target != null:
-			var dist := HexCoord.distance(pos, target.hex)
-			var weapon: TriggerCard = null
-			if melee != null and dist == 1 and target.floor == floor:
-				weapon = melee
-			elif ranged != null and dist <= ranged.attack_range \
-					and (ranged.curved or Visibility.has_los(_ms, pos, floor, target.hex, target.floor)):
-				weapon = ranged
-			if weapon != null and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, weapon):
-				_enemy_plan.set_target(i, tick, target.hex)
-				continue
+	# Movement: close in (melee all the way, shooters to firing range).
+	if goal_pos != Vector2.INF and u.level == 0:
+		var want := TurnEngine.MELEE_RANGE * 0.7 if melee != null and (ranged == null or u.pos.distance_to(goal_pos) < 8.0) \
+			else (ranged.attack_range * 0.7 if ranged != null else 2.0)
+		if u.pos.distance_to(goal_pos) > want + 0.5:
+			var path := geo.nav_path(u.pos, _ground_near(geo, goal_pos))
+			if path.size() >= 2:
+				var dest := _along(path, maxf(0.0, geo.path_length(path) - want), TurnPlan.speed(data) * 4.5)
+				if dest.distance_to(u.pos) > 0.5 and geo.ground_ok(dest):
+					var mv := PlanAction.new(TriggerLibrary.get_move_card())
+					mv.set_point(dest, 0)
+					_enemy_plan.add(i, mv)
+		var look := PlanAction.new(TriggerLibrary.get_look_card())
+		look.set_point(goal_pos, 0)
+		_enemy_plan.add(i, look)
 
-		# Advance on a seen enemy, else on the nearest radar contact, while
-		# keeping eyes on it (Look is free and fits the Sub slot).
-		var goal := target if target != null else _pick_target(pos, seen, false)
-		if goal != null and move_card != null and floor == 0 and HexCoord.distance(pos, goal.hex) > 1:
-			var step := _next_step(pos, goal.hex)
-			if step != pos and _enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, move_card):
-				_enemy_plan.set_target(i, tick, step)
-				pos = step
-				_watch(i, tick, goal.hex)
-				continue
-
-		# Fallback: raise shield (more AT lets later ticks do other things).
-		if shield != null:
-			_enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, shield)
-		if goal != null:
-			_watch(i, tick, goal.hex)
+	# Actions: attack what the team sees, as often as the turn allows.
+	var weapon: TriggerCard = melee if melee != null and target != null and u.pos.distance_to(target.pos) < 4.0 else ranged
+	if weapon == null:
+		weapon = melee
+	if target != null and weapon != null:
+		var enemy_index: int = _truth.teams[target.team].find(target)
+		while _enemy_plan.act_used(i) + weapon.action_time / data.tempo <= TurnPlan.TURN_SECONDS:
+			var shot := PlanAction.new(weapon)
+			shot.target_unit = enemy_index
+			_enemy_plan.add(i, shot)
+	elif shield_ok:
+		var left := TurnPlan.TURN_SECONDS - _enemy_plan.act_used(i)
+		if left >= TurnPlan.MIN_HOLD:
+			_enemy_plan.add(i, _hold_action("Shield", snappedf(left - 0.01, 0.01)))
 
 
-## Free Look toward `hex` in the Sub slot (keeps the AI's vision on threats).
-func _watch(i: int, tick: int, hex: Vector2i) -> void:
-	if _enemy_plan.assign(i, tick, TurnPlan.SUB_SLOT, TriggerLibrary.get_look_card()):
-		_enemy_plan.set_target(i, tick, hex, 0, TurnPlan.SUB_SLOT)
-
-
-## Assigns Main+Sub shield in one tick (Full Guard, 4 AT) if affordable.
-func _try_full_guard(i: int, tick: int, shield: TriggerCard) -> bool:
-	if not _enemy_plan.can_assign(i, tick, TurnPlan.MAIN_SLOT, shield):
-		return false
-	_enemy_plan.assign(i, tick, TurnPlan.MAIN_SLOT, shield)
-	_enemy_plan.assign(i, tick, TurnPlan.SUB_SLOT, shield)
-	return true
-
-
-## Focus-fires the weakest player unit in sight (ties broken by proximity).
-## With `sight_only` false, also considers radar contacts (approximate
-## positions the AI may advance toward but not shoot at).
-func _pick_target(from: Vector2i, seen: Dictionary, sight_only: bool) -> UnitState:
+## The weakest enemy in sight (ties: nearest); with `sight_only` false, the
+## nearest known contact (radar included).
+func _ai_pick(u: UnitState, seen: Dictionary, sight_only: bool) -> UnitState:
 	var best: UnitState = null
-	var best_score := 0x7FFFFFFF
-	for p in _player_states:
-		if p.is_bailed:
+	var best_score := INF
+	for p in _truth.teams[1 - u.team]:
+		var e: UnitState = p
+		if e.is_bailed:
 			continue
-		var state := int(seen.get(p, Visibility.State.HIDDEN))
+		var state := int(seen.get(e, Visibility.State.HIDDEN))
 		if state == Visibility.State.HIDDEN or (sight_only and state != Visibility.State.SIGHT):
 			continue
-		var score := p.trion_hp * 1000 + HexCoord.distance(from, p.hex)
-		if not sight_only:
-			score = HexCoord.distance(from, p.hex)
+		var score := u.pos.distance_to(e.pos) + (e.trion_hp * 10.0 if sight_only else 0.0)
 		if score < best_score:
 			best_score = score
-			best = p
+			best = e
 	return best
 
 
-## Next street hex on the shortest ground path toward `goal` (A* around
-## buildings). Falls back to a greedy step when no path exists.
-func _next_step(from: Vector2i, goal: Vector2i) -> Vector2i:
-	var walkable := func(h: Vector2i) -> bool:
-		return _board.has_tile(h) and (h == goal or _ms.floor_legal(h, 0))
-	var path := HexCoord.find_path(from, goal, walkable, 40)
-	var step := from
-	if path.size() >= 2:
-		step = path[1]
-	else:
-		var best_d := HexCoord.distance(from, goal)
-		for n in HexCoord.neighbors(from):
-			if walkable.call(n) and HexCoord.distance(n, goal) < best_d:
-				best_d = HexCoord.distance(n, goal)
-				step = n
-	if step == goal or not _ms.floor_legal(step, 0) or _ms.get_unit_at(step, 0) != null:
-		return from
-	return step
+## The point `dist` metres along `path`, but no further than `cap` metres.
+static func _along(path: PackedVector2Array, dist: float, cap: float) -> Vector2:
+	var left := minf(dist, cap)
+	for k in range(1, path.size()):
+		var seg := path[k - 1].distance_to(path[k])
+		if left <= seg:
+			return path[k - 1].lerp(path[k], left / maxf(seg, 0.0001))
+		left -= seg
+	return path[path.size() - 1]
+
+
+## An open street point near `p` (radar ghosts can sit inside walls).
+static func _ground_near(geo: CityGeometry, p: Vector2) -> Vector2:
+	if geo.ground_ok(p):
+		return p
+	for r in [0.5, 1.0, 1.5, 2.5, 3.5]:
+		for k in 12:
+			var q: Vector2 = p + Vector2.from_angle(TAU * k / 12.0) * float(r)
+			if geo.ground_ok(q):
+				return q
+	return p
+
+
+static func _best_card(data: UnitData, type: int) -> TriggerCard:
+	var best: TriggerCard = null
+	for slots in [data.main_trigger_slots, data.sub_trigger_slots]:
+		for c in slots:
+			var card: TriggerCard = c
+			if card != null and card.card_type == type and card.power > 0 and (best == null or card.power > best.power):
+				best = card
+	return best
+
+
+static func _has_card(data: UnitData, card_name: String) -> bool:
+	for slots in [data.main_trigger_slots, data.sub_trigger_slots]:
+		for c in slots:
+			if c != null and (c as TriggerCard).card_name == card_name:
+				return true
+	return false
+
+
+static func _hold_action(card_name: String, seconds: float) -> PlanAction:
+	var a := PlanAction.new(TriggerLibrary.get_card(card_name))
+	a.hold = seconds
+	return a

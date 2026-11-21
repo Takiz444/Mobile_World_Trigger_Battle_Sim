@@ -420,7 +420,8 @@ func _submit(id: String, body: Dictionary) -> Dictionary:
 	var plan_dict: Variant = body.get("plan", {})
 	if not (plan_dict is Dictionary):
 		return _err(400, "plan required")
-	var decoded := PlanCodec.decode_plan_checked(plan_dict, m["teams"][team])
+	var ms_now: MatchState = m["ms"]
+	var decoded := PlanCodec.decode_plan_checked(plan_dict, m["teams"][team], ms_now, ms_now.teams[team])
 	if str(decoded["error"]) != "":
 		return _err(400, "invalid plan: %s" % decoded["error"])
 	m["plans"][team] = decoded["plan"]
@@ -494,27 +495,14 @@ func _get_match(id: String, token: String, since := 0) -> Dictionary:
 
 # --- Resolution -------------------------------------------------------------
 
-## Resolves the turn tick by tick, recording a fog-filtered replay frame per
-## tick for each team.
+## Resolves the turn in continuous time (TurnEngine), recording a
+## fog-filtered replay frame for each team every FRAME_SECONDS.
 func _resolve_turn(m: Dictionary) -> void:
 	_touch("matches", m["id"])
 	var ms: MatchState = m["ms"]
 	var turn := int(m["turn"])
-	var engine := TickEngine.new()
-	var frames: Array = [[], []]
-	for tick in TurnPlan.TICKS_PER_TURN:
-		var events := engine.resolve_tick(ms, m["plans"][0], m["plans"][1], tick)
-		for team in 2:
-			var states := Visibility.enemy_states(ms, team)
-			var seen: Array[CombatEvent] = []
-			for ev in events:
-				if Visibility.event_visible(ev, team, states):
-					seen.append(ev)
-			frames[team].append({
-				"tick": tick,
-				"events": PlanCodec.encode_events(seen),
-				"view": Visibility.encode_view(ms, team, _radar_salt(m, turn * 10 + tick), true),
-			})
+	var frames := MatchRunner.record_turn(ms, m["plans"][0], m["plans"][1],
+		func(frame: int) -> int: return _radar_salt(m, turn * 1000 + frame))
 	var winner := MatchRunner.winner(ms)
 	var reason := "elimination"
 	var max_turns := int(m.get("max_turns", 0))
@@ -581,10 +569,10 @@ func _result_for(m: Dictionary, team: int) -> Variant:
 	return _filter_entry(m["history"].back(), team)
 
 
-## Radar salt for the planning-phase view. Matches the last replay frame of
-## the previous turn (turn * 10 + 5) so pings don't jump between the two.
+## Radar salt for the planning-phase view.
 func _view_salt(m: Dictionary, turn: int) -> int:
-	return _radar_salt(m, turn * 10 - 5)
+	# The same salt as the turn's first replay frame (frame 0 of turn * 1000).
+	return _radar_salt(m, turn * 1000)
 
 
 ## Radar pings are offset pseudo-randomly from an unseen enemy's true hex.

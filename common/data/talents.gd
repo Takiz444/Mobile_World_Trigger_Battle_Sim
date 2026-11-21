@@ -2,7 +2,8 @@ class_name Talents
 extends RefCounted
 ## Talent points: every squad gets the same fixed pool (POINTS) to spread over
 ## its characters. Each point raises one stat of one character:
-##   Stamina  +AT_PER_POINT Action Tokens per turn (more actions)
+##   Stamina  +TEMPO_PER_POINT tempo: every action takes less time and the
+##            character moves faster, so more fits into a 6-second turn
 ##   HP       +HP_PER_POINT Trion (health)
 ##   ATK      +ATK_PER_POINT attack rating (added to every hit's damage)
 ## A stat takes at most MAX_PER_STAT points on one character.
@@ -14,14 +15,14 @@ extends RefCounted
 
 const POINTS := 9
 const MAX_PER_STAT := 4
-const AT_PER_POINT := 1
+const TEMPO_PER_POINT := 0.1
 const HP_PER_POINT := 15
 const ATK_PER_POINT := 1
 
 const STATS: Array[String] = ["stamina", "hp", "atk"]
 const LABELS := { "stamina": "Stamina", "hp": "HP", "atk": "ATK" }
 const HINTS := {
-	"stamina": "+%d Action Token per turn: more actions each turn" % AT_PER_POINT,
+	"stamina": "+%d%% speed: every action and move takes less time" % roundi(TEMPO_PER_POINT * 100.0),
 	"hp": "+%d Trion: survive more hits" % HP_PER_POINT,
 	"atk": "+%d damage on every hit" % ATK_PER_POINT,
 }
@@ -73,7 +74,7 @@ static func can_add(units: Array, u: UnitData, stat: String) -> bool:
 ## Recomputes `u`'s stats from its talents (the base stats are the same for
 ## every character).
 static func apply(u: UnitData) -> void:
-	u.base_at_pool = TriggerLibrary.STANDARD_AT_POOL + u.talent_stamina * AT_PER_POINT
+	u.tempo = 1.0 + u.talent_stamina * TEMPO_PER_POINT
 	u.base_trion_hp = TriggerLibrary.STANDARD_TRION_HP + u.talent_hp * HP_PER_POINT
 	u.attack_rating = TriggerLibrary.STANDARD_RATING + u.talent_atk * ATK_PER_POINT
 	u.mobility_rating = TriggerLibrary.STANDARD_RATING
@@ -81,11 +82,11 @@ static func apply(u: UnitData) -> void:
 	u.max_trion_capacity = TriggerLibrary.STANDARD_TRION_CAPACITY
 
 
-## The stat a stat's talents produce (for UI labels).
+## The stat a stat's talents produce (for UI labels; tempo as a percentage).
 static func stat_value(u: UnitData, stat: String) -> int:
 	match stat:
 		"stamina":
-			return u.base_at_pool
+			return roundi(u.tempo * 100.0)
 		"hp":
 			return u.base_trion_hp
 		"atk":

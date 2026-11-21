@@ -2,10 +2,9 @@ extends Node3D
 ## Root scene for the board/diorama prototype (GDD Phase 1, step 1).
 ## Builds the hologram tabletop board, lighting, environment, and camera.
 
-const BOARD_RADIUS := 6
 const HEX_SIZE := 1.0
 
-var _board: HexBoard
+var _board: CityBoard
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _ui_layer: CanvasLayer
@@ -80,9 +79,8 @@ func _setup_lights() -> void:
 
 
 func _setup_board() -> void:
-	var board := HexBoard.new()
-	board.name = "HexBoard"
-	board.board_radius = BOARD_RADIUS
+	var board := CityBoard.new()
+	board.name = "CityBoard"
 	board.hex_size = HEX_SIZE
 	add_child(board)
 	_board = board

@@ -19,8 +19,9 @@ extends RefCounted
 ## 5: vision is a detection radius plus one sight cone.
 ## 6: detection radius 2.
 ## 7: each match is played on a random section of the city ("map" field).
-const VERSION := 7
-const MIN_SUPPORTED := 7
+## 8: free movement in continuous space and time-based turns (no hexes, no AT).
+const VERSION := 8
+const MIN_SUPPORTED := 8
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

@@ -8,7 +8,8 @@ const MAX_SUB_SLOTS: int = 4
 
 @export var unit_name: String = ""
 @export var base_trion_hp: int = 0
-@export var base_at_pool: int = 8
+## Action speed multiplier from Stamina (1.0 = standard; see Talents).
+@export var tempo: float = 1.0
 @export var mobility_rating: int = 0
 @export var attack_rating: int = 0
 @export var defense_rating: int = 0

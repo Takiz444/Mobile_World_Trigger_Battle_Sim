@@ -7,7 +7,7 @@ extends Node3D
 ## on top of buildings.
 ##
 ## Fog of war: each unit's `fog` state decides how it is drawn — exact
-## (SIGHT), as a pulsing radar ping at `ping_hex` (RADAR), or not at all
+## (SIGHT), as a pulsing radar ping at `ping_pos` (RADAR), or not at all
 ## (HIDDEN). Provides tween helpers for the replay controller.
 
 
@@ -130,8 +130,7 @@ func apply_fog() -> void:
 			if ping == null:
 				ping = _build_ping(u)
 				_pings[u] = ping
-			var p := HexCoord.axial_to_world(u.ping_hex, _hex_size)
-			p.y = HexCoord.GROUND_Y
+			var p := Vector3(u.ping_pos.x, HexCoord.GROUND_Y, u.ping_pos.y)
 			ping.position = p
 			ping.visible = true
 		elif ping != null:
@@ -228,8 +227,28 @@ func tween_to(u: UnitState, world: Vector3, duration: float = 0.35) -> void:
 	_pose_tweens[u] = ptw
 
 
+## Smooth, even motion to `world` over `duration` (replay frames), turning
+## to `facing` on the way. A gentle stride bob plays while it moves.
+func glide_to(u: UnitState, world: Vector3, facing: float, duration: float) -> void:
+	var root: Node3D = _markers.get(u)
+	if root == null:
+		return
+	_kill_tween(_move_tweens, u)
+	var moving := root.position.distance_to(world) > 0.01
+	if moving:
+		var tw := root.create_tween()
+		tw.tween_property(root, "position", world, duration)
+		_move_tweens[u] = tw
+		var pose: Node3D = _poses.get(u)
+		if pose != null and not _pose_tweens.has(u):
+			var ptw := pose.create_tween()
+			ptw.tween_property(pose, "position:y", 0.06, duration * 0.5).set_trans(Tween.TRANS_SINE)
+			ptw.tween_property(pose, "position:y", 0.0, duration * 0.5).set_trans(Tween.TRANS_SINE)
+	tween_facing(u, facing, minf(duration, 0.2))
+
+
 ## Turns the figure toward a new facing (shortest way round).
-func tween_facing(u: UnitState, facing: int, duration: float = 0.35) -> void:
+func tween_facing(u: UnitState, facing: float, duration: float = 0.35) -> void:
 	var fig: Node3D = _figures.get(u)
 	if fig == null:
 		return
@@ -332,16 +351,16 @@ func play_bail(u: UnitState) -> void:
 # --- Ghost Preview ----------------------------------------------------------
 
 ## Shows a translucent "ghost" of `u` at `hex` (movement destination preview).
-func show_ghost(u: UnitState, hex: Vector2i, floor: int = 0) -> void:
+func show_ghost(u: UnitState, pos: Vector2, level: int = 0, facing: float = INF) -> void:
 	if _ghost == null:
 		_ghost = _build_ghost()
 	var team_color := BoardUnits.team_color(u.team)
 	var mat: StandardMaterial3D = _ghost_body.material_override
 	mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.35)
 	mat.emission = team_color
-	var p := HexCoord.axial_to_world(hex, _hex_size)
-	p.y = HexCoord.GROUND_Y + floor * HexCoord.FLOOR_HEIGHT
-	_ghost.position = p
+	_ghost.position = Vector3(pos.x, HexCoord.GROUND_Y + level * HexCoord.FLOOR_HEIGHT, pos.y)
+	if is_finite(facing):
+		_ghost.rotation.y = _facing_yaw(facing)
 	_ghost.visible = true
 
 
@@ -356,9 +375,9 @@ func show_ghost(u: UnitState, hex: Vector2i, floor: int = 0) -> void:
 ## (`own_rect` is the building it stands in, if any). Shadow-casting lights
 ## at eye height light the same area (buildings throw real shadows).
 ## Planning shows it at the unit's projected position and facing.
-func show_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect: Dictionary = {}) -> void:
+func show_vision(u: UnitState, pos: Vector2, level: int, facing: float, own_rect: Dictionary = {}) -> void:
 	clear_vision()
-	_vision = _build_vision(u, hex, floor, facing, own_rect, true)
+	_vision = _build_vision(u, pos, level, facing, own_rect, true)
 	_vision.name = "SelectedVision"
 	add_child(_vision)
 
@@ -369,7 +388,7 @@ func show_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect:
 func show_squad_vision(entries: Array) -> void:
 	var key := ""
 	for e in entries:
-		key += "%s|%s|%d|%d;" % [str(e["unit"].get_instance_id()), str(e["hex"]), int(e["floor"]), int(e["facing"])]
+		key += "%s|%.2f,%.2f|%d|%.3f;" % [str(e["unit"].get_instance_id()), (e["pos"] as Vector2).x, (e["pos"] as Vector2).y, int(e["level"]), float(e["facing"])]
 	if _squad_vision != null and key == _squad_vision_key:
 		_squad_vision.visible = true
 		return
@@ -379,7 +398,7 @@ func show_squad_vision(entries: Array) -> void:
 	_squad_vision.name = "SquadVision"
 	add_child(_squad_vision)
 	for e in entries:
-		_squad_vision.add_child(_build_vision(e["unit"], e["hex"], int(e["floor"]), int(e["facing"]), e.get("own_rect", {}), false))
+		_squad_vision.add_child(_build_vision(e["unit"], e["pos"], int(e["level"]), float(e["facing"]), e.get("own_rect", {}), false))
 
 
 func clear_squad_vision() -> void:
@@ -396,24 +415,22 @@ func hide_squad_vision() -> void:
 
 ## One character's combined vision shape; `lit` adds the eye lights and a
 ## brighter fill (the selected character).
-func _build_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect: Dictionary, lit: bool) -> Node3D:
+func _build_vision(u: UnitState, pos: Vector2, level: int, facing: float, own_rect: Dictionary, lit: bool) -> Node3D:
 	var team_color := BoardUnits.team_color(u.team)
-	var saved := [u.hex, u.floor, u.facing]
-	u.hex = hex
-	u.floor = floor
+	var saved := [u.pos, u.level, u.facing]
+	u.pos = pos
+	u.level = level
 	u.facing = facing
 	var p := Visibility.profile(u)
-	u.hex = saved[0]
-	u.floor = saved[1]
+	u.pos = saved[0]
+	u.level = saved[1]
 	u.facing = saved[2]
 
-	var step := HexCoord.SQRT3 * _hex_size  # center-to-center hex distance
 	var fwd := _facing_vector(facing)
-	var origin := HexCoord.axial_to_world(hex, _hex_size)
-	origin.y = HexCoord.GROUND_Y + floor * HexCoord.FLOOR_HEIGHT
+	var origin := Vector3(pos.x, HexCoord.GROUND_Y + level * HexCoord.FLOOR_HEIGHT, pos.y)
 	var eye := origin + Vector3(0, Visibility.EYE_HEIGHT * HexCoord.FLOOR_HEIGHT, 0)
-	var sight_r := (int(p["sight_range"]) + 0.5) * step
-	var detect_r := (int(p["detect"]) + 0.5) * step
+	var sight_r := float(p["sight_range"]) * _hex_size
+	var detect_r := float(p["detect"]) * _hex_size
 	var half := float(p["sight_half"])
 
 	var root := Node3D.new()
@@ -955,9 +972,7 @@ func _capsule(radius: float, height: float, pos: Vector3, mat: Material, rot: Ve
 
 ## World position of a unit standing on the tile surface / its floor.
 func _world_pos(u: UnitState) -> Vector3:
-	var p := HexCoord.axial_to_world(u.hex, _hex_size)
-	p.y = HexCoord.GROUND_Y + u.floor * HexCoord.FLOOR_HEIGHT
-	return p
+	return Vector3(u.pos.x, HexCoord.GROUND_Y + u.level * HexCoord.FLOOR_HEIGHT, u.pos.y)
 
 
 ## Opaque body normally; translucent only while Bagworm is active (opaque
@@ -1004,7 +1019,7 @@ func _build_ping(u: UnitState) -> Node3D:
 
 
 ## Yaw (radians) that points the figure's local +Z along `facing`.
-func _facing_yaw(facing: int) -> float:
+func _facing_yaw(facing: float) -> float:
 	var fwd := _facing_vector(facing)
 	return atan2(fwd.x, fwd.z)
 
@@ -1022,11 +1037,10 @@ func _kill_tween(dict: Dictionary, key: Variant) -> void:
 	dict.erase(key)
 
 
-func _facing_vector(facing: int) -> Vector3:
-	var dir_hex := HexCoord.AXIAL_DIRECTIONS[posmod(facing, 6)]
-	var a := HexCoord.axial_to_world(Vector2i.ZERO, 1.0)
-	var b := HexCoord.axial_to_world(dir_hex, 1.0)
-	return (b - a).normalized()
+## World direction of a facing angle (radians in the ground plane).
+func _facing_vector(facing: float) -> Vector3:
+	var d := Vector2.from_angle(facing)
+	return Vector3(d.x, 0.0, d.y)
 
 
 func _make_material(color: Color) -> StandardMaterial3D:

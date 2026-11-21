@@ -195,7 +195,7 @@ func _test_controller_buzzer() -> void:
 
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var board := HexBoard.new()
+	var board := CityBoard.new()
 	board.hex_size = 1.0
 	add_child(board)
 	var timeline := TimelineUI.new()
@@ -264,7 +264,7 @@ func _test_surrender_button() -> void:
 func _controller(squad: Array[UnitData]) -> MatchController:
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var board := HexBoard.new()
+	var board := CityBoard.new()
 	board.hex_size = 1.0
 	add_child(board)
 	var timeline := TimelineUI.new()

@@ -43,8 +43,7 @@ func _run() -> void:
 
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var board := HexBoard.new()
-	board.board_radius = 6
+	var board := CityBoard.new()
 	board.hex_size = 1.0
 	add_child(board)
 	var timeline := TimelineUI.new()
@@ -80,8 +79,8 @@ func _run() -> void:
 		if not synced:
 			break
 		var u: UnitState = controller._ms.teams[0][i]
-		var hex: Array = units[i].get("hex", [])
-		synced = hex.size() == 2 and Vector2i(int(hex[0]), int(hex[1])) == u.hex
+		var pos: Array = units[i].get("pos", [])
+		synced = pos.size() == 2 and Vector2(float(pos[0]), float(pos[1])).distance_to(u.pos) < 0.01
 	_check(synced, "client units match server view after replay")
 
 	print("ONLINE TEST %s" % ("PASS" if not _failed else "FAIL"))
@@ -92,7 +91,7 @@ func _shield_plan(units: Array[UnitData]) -> TurnPlan:
 	var plan := TurnPlan.new(units)
 	var shield := TriggerLibrary.get_card("Shield")
 	for i in units.size():
-		plan.assign(i, 0, TurnPlan.MAIN_SLOT, shield)
+		plan.add(i, PlanAction.new(shield))
 	return plan
 
 

@@ -1,8 +1,9 @@
 # Trion Tactics (World Trigger Battle Sim)
 
 Cross-platform online turn-based strategy game built in **Godot 4.6**.
-Simultaneous-execution 3v3 hex-grid skirmishes based on the *World Trigger*
-Away Mission Test Battle Simulation Exercise.
+Simultaneous-execution 3v3 skirmishes in a 3D city, with free movement and
+time-based turns, based on the *World Trigger* Away Mission Test Battle
+Simulation Exercise.
 
 See `Project Docs/GDDV1.pdf` for the full design document.
 
@@ -13,15 +14,15 @@ See `Project Docs/GDDV1.pdf` for the full design document.
 /common/           # Shared resources, math, and data definitions
     /hex_grid/     # Hexagonal grid math (axial coords, pathfinding, mesh)
     /data/         # Core Resource/RefCounted definitions
-    /combat/       # Deterministic tick engine + shared match runner
+    /combat/       # Deterministic continuous-time turn engine + shared match runner
     /net/          # JSON codec, HTTP client, HTTP server
 /entities/         # Units, actors (future)
 /ui/
-    /timeline/     # 6-tick timeline ribbon + drag-and-drop planning UI
+    /timeline/     # two 6-second lanes per character (the planning UI)
     /event_log/    # On-screen combat log panel
     /hangar/       # pre-match deck-builder (Trigger Holder + Trion budget)
 /levels/
-    /board/        # 3D tabletop diorama (hex board + camera + controller)
+    /board/        # 3D city diorama (board + camera + controller)
 /server/           # Headless REST backend (async multiplayer)
 /test/             # Headless smoke / networking tests
 /addons/           # Third-party plugins
@@ -31,13 +32,29 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ## Implemented So Far
 
-### Hex Grid Math — `common/hex_grid/hex_coord.gd`
-- Axial ⇄ cube conversion, neighbors/ring/line, 3D (XZ) mapping, deterministic A*.
+### How a turn works
+- **Free movement.** Characters stand anywhere on the street, inside a
+  building on a floor, or on a roof (`common/map/city_geometry.gd`). A tapped
+  destination is routed around buildings (A* on a fine grid + string
+  pulling); entering a building, stairs, and Grasshopper jumps take time.
+- **Time, not tokens.** Each turn every character gets **6 seconds** and two
+  lanes that run side by side (`common/data/turn_plan.gd`): **Movement**
+  (Move, Jump, Wait) and **Actions** (attacks, Shield, Look, Bagworm, Spider,
+  Wait). Every action takes time (`TriggerCard.action_time`, e.g. Kogetsu
+  1.8 s, Ibis 2.4 s); a lane must fit in the turn.
+- **Stamina = speed.** Stamina talents raise a character's tempo: every
+  action takes less time and it walks faster, so more fits in a turn.
+- **Resolution** (`common/combat/turn_engine.gd`): both squads' plans play out
+  at once in 0.05 s steps. Attacks land when their wind-up ends, all against
+  the same moment; moves that would bump into someone wait (the same rule for
+  everyone, whatever the order). The server records a fog-filtered frame
+  every 0.25 s that the client replays smoothly.
 
 ### Data Definitions — `common/data/`
-- `trigger_card.gd`, `unit_data.gd` (8-slot Trigger Holder + Trion budget),
-  `tick_action.gd`, `turn_plan.gd` (6-tick AT economy), `trigger_library.gd`
-  (13-card catalog + `get_card(name)` for network serialization).
+- `trigger_card.gd` (action time, reach in metres, traits), `unit_data.gd`
+  (8-slot Trigger Holder + Trion budget, tempo), `plan_action.gd`,
+  `turn_plan.gd` (the two time lanes, timing, validation), `trigger_library.gd`
+  (13-card catalog + Move / Look / Wait).
 
 ### Global State — `common/squad_store.gd` / `common/match_session.gd`
 - `SquadStore` — static player squad (survives Hangar → Battle).
@@ -57,50 +74,49 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   rectangular segments (towers with lower wings), each with its own height
   (1–4 floors), mirrored across the map so both sides stay fair. Edit the
   digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
-- Spawns: random open street hexes (one connected street area); nobody,
-  friend or foe, starts within a 3-hex radius of anyone else (at least
-  `MatchRunner.SPAWN_MIN_DISTANCE` = 4 hexes apart, never relaxed on a
-  playable map). Derived from the hidden match seed, so the server can
+- The map sheet is drawn on a hex lattice, which only shapes the buildings;
+  play itself is continuous (positions in metres, no tiles).
+- Spawns: random open street spots (one connected street area); nobody,
+  friend or foe, starts within about 5 m of anyone else (at least
+  `MatchRunner.SPAWN_MIN_DISTANCE` ≈ 6.9 m apart, never relaxed on a
+  playable map), each facing its most open street. Derived from the hidden match seed, so the server can
   rebuild a match but players can't predict enemy positions.
 
 ### Squad & Talents — `common/data/talents.gd`
 - Three playable characters: **Assassin** (blades, stealth, jump),
   **Sniper** (Egret / Ibis), **Scout** (Hound / Asteroid, Spider, Lead Bullet).
 - Every squad has the same **talent pool** (`Talents.POINTS` = 9) to spread
-  over its characters: **Stamina** (+1 AT per turn), **HP** (+15 Trion),
+  over its characters: **Stamina** (+10% speed: actions take less time, faster on foot), **HP** (+15 Trion),
   **ATK** (+1 damage per hit), at most 4 points per stat. Stats are derived
   from talents on the server; client-sent stats are only checked, never
   trusted. The squad (loadouts + talents) is saved in `user://squad.json`.
 
 ### Combat Resolution — `common/combat/`
-- `unit_state.gd`, `match_state.gd`, `combat_event.gd`
-- `tick_engine.gd` — deterministic 6-tick pipeline (resumable per-tick).
-  Simultaneous movement on (hex, floor) cells, per-slot targets (Main and Sub
-  aim independently), buildings block shots, and Bagworm as a per-turn toggle
-  (1 AT per turn, drops when attacking).
-- Trigger behaviour (`TriggerCard` traits): Scorpion strikes around shields,
-  Raygust shields while swinging, Viper curves around buildings, Hound homes
-  (+hit, ignores half cover), Egret/Ibis are long-range snipers (Ibis pierces
-  shields), Lead Bullet weighs targets down (no moving or dodging for 6 ticks),
-  Grasshopper jumps 2 hexes or onto rooftops.
-- GDD 5.3 combos: **Melee Assist** (an ally next to your melee target follows
-  up for free) and **Crossfire Assist** (an ally with the target in its firing
-  arc follows up for half AT from its unspent pool). **Wire Mobility
-  Penchant**: on your own team's Spider wires you get +20% defense, +10%
-  evasion, and a 2-hex wire dash.
-- `visibility.gd` — per-character vision and fog of war (GDD 4.3). Each unit
-  has a short all-round **detection radius** (2 hexes, any facing) and a long
-  **sight cone** in its facing direction (9 hexes, ±45°). Sniper scopes extend
-  the sight range; each floor of height adds range. Line of sight is traced in 3D (eye height to
-  body height) against the real building boxes (`common/map/building_rects.gd`,
-  the same geometry that's rendered), so nobody sees through a building.
-  Units inside buildings see and are seen only from near the outer wall. Unseen enemies show as radar pings offset 1–2 hexes;
-  Bagworm hides from radar until within 3 hexes.
-- Facing matters: units turn toward what they attack, and the free **Look**
-  action (0 AT, no Mental Load) turns a unit to watch a hex after moving.
-- `match_runner.gd` — shared squad placement, turn resolution, winner detection,
-  and the GDD 3.1 "Stand Ground + Shield" fallback plan. Used by both the local
-  client and the headless server.
+- `unit_state.gd` (position, level, facing angle), `match_state.gd` (squads,
+  city, Spider wires), `combat_event.gd` (timestamped).
+- `turn_engine.gd` — the deterministic continuous-time turn (see above).
+  An attack targets an enemy character and only goes off if the attacker's
+  team sees the target at that moment and has a clear line (Viper curves
+  around buildings); melee needs the target within reach on the same level.
+  Failed shots read the same whatever the reason, so they reveal nothing.
+- Triggers: Scorpion strikes around shields, Raygust shields while swinging,
+  Viper curves, Hound homes (+hit, beats a moving target's dodge), Egret /
+  Ibis are long-range snipers (Ibis pierces shields), Lead Bullet roots the
+  target for 3 s, Grasshopper jumps onto roofs, Spider strings a wire your
+  team gets +defense / +dodge on. A **Shield** is held for as long as you
+  choose; standing still behind it is a **Full Guard** (all round, x1.5).
+  Shooting on the move is less accurate; moving targets dodge straight shots.
+- `visibility.gd` — per-character vision and fog of war (GDD 4.3): a short
+  all-round **detection radius** (3.5 m) and a long **sight cone** (15.6 m,
+  ±45°) in the facing direction. Scopes and height extend the sight range.
+  Line of sight is traced in 3D against the real building boxes (the same
+  geometry that's rendered), so nobody sees through a building; characters
+  inside buildings see and are seen only near the outer wall. Unseen enemies
+  show as radar pings a few metres off; Bagworm hides from radar until close.
+- **Look** keeps a character watching a point, even while it walks.
+- `match_runner.gd` — squad placement, the turn recorder (shared by the
+  server and local play), winner detection, and the "Stand Ground + Shield"
+  AFK fallback.
 
 ### Networking — `common/net/`
 - `plan_codec.gd` — JSON (de)serialization for squads, plans, and results
@@ -130,10 +146,10 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   **Async Ranked** buttons register once per server (saved in
   `user://account.json`) and queue.
 - Validates every squad (standard stats, slot rules, Trion budget) and plan
-  (only equipped cards, AT budget) before accepting it.
+  (only equipped cards, reachable routes, both lanes inside the 6-second turn) before accepting it.
 - Server-authoritative deterministic resolution via `MatchRunner`, with
   server-enforced fog of war: `GET /match/{id}?token=…` returns only that
-  team's view (own units, enemies in sight, radar pings) and per-tick replay
+  team's view (own units, enemies in sight, radar pings) and replay
   frames filtered the same way. The opponent's plans and the full state never
   leave the server. Clients catch up on missed turns from the history.
 - Matches persist to disk (`TT_DATA_FILE`, default `user://matches.json`) and
@@ -176,29 +192,23 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   request timeouts, per-client rate limit (`TT_TRUST_PROXY=1` behind Caddy),
   WebSocket keepalive with dead-link detection, 4 MB resync buffers.
 
-### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
-- Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
-- `board_units.gd` — team-colored markers standing on the tile surface,
-  tweened movement/facing, damage flash, bail-out, and radar-ping markers.
-- `city_buildings.gd` + `building.gdshader` — the city: building hexes merge
-  into clean rectangular segments with window-grid facades, floor lines,
-  parapets, and rooftop equipment (water tanks and antennas on towers). Heights
-  come from the map, so rooftops always match where units stand.
-- `hex_board.gd` — street tiles, roof-level pick colliders and highlight caps
-  for building hexes (clipped to the building's footprint, so highlights never
-  spill past a wall), cover props, and the fog overlay.
-- `board_units.gd` — low-poly Border agents in Trion combat suits (team-colored
-  jacket, dark trousers, emblem, team ring) with a role weapon from the
-  loadout: glowing blade, sniper rifle, or a floating Trion cube. Figures turn
-  to face their facing. Units hidden behind or inside buildings show as
-  team-colored x-ray silhouettes; the selected character's vision cones are drawn on the board
-  at its planned position and facing.
+### Board — `levels/board/`
+- `city_board.gd` — the dressed street (asphalt, sidewalks, avenue markings,
+  lamps), the buildings, free picking (street or roof), and planning overlays
+  (routes, range circles, target markers, Spider wires).
+- `city_buildings.gd` + `building.gdshader` — rectangular building segments
+  with window-grid facades, floor lines, parapets, and rooftop equipment.
+- `board_units.gd` — low-poly agents with a role weapon; they glide between
+  replay frames, turn to their facing, flash on hits, and bail out. Hidden or
+  indoor characters show as x-ray silhouettes; radar pings show unseen enemies.
 - `board_camera.gd` — camera clamped to the map and framed around the UI.
-- `match_controller.gd` — local (vs AI) and online (async) match orchestration,
-  multi-turn lifecycle, win/loss overlay, and replay animation.
+- `match_controller.gd` — local (vs AI) and online match orchestration. Local
+  play keeps the real match hidden and replays only our team's view of it, the
+  same pipeline as online, so the planning UI never knows more than you do.
 
 ### UI — `ui/timeline/`, `ui/event_log/`, `ui/hangar/`
-- Timeline: unit tabs, 6-tick Main/Sub ribbon, draggable card hand, AT meter.
+- Timeline: unit tabs, the two 6-second lanes on a ruler (blocks as wide as
+  the time they take), action cards, hold-time stepper for Shield / Wait.
 - Event log: color-coded, auto-scrolling combat log.
 - Hangar: talent points panel + Trigger Holder deck-builder with Trion budget + async multiplayer
   host/join controls.
@@ -213,30 +223,28 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
    Online Match** / **Join** (friendly match by ID), **Live Battle** (live
    trophy ladder), or **Async Ranked** (correspondence).
 2. **Battle** — tap a character (top tab or on the board): the camera zooms
-   in and a spotlight shows how far the chosen action reaches. Tap action
-   cards to fill the ticks in order (or drag one onto a tick), tap a
-   highlighted hex to aim each one, then **Submit Turn**. The line above the
-   ticks always says what to do next; actions that still need a target are
-   marked "aim".
+   in and the spotlight shows exactly what it can see. Tap an action card: it
+   goes on the end of its lane (Movement or Actions). Aim it on the board:
+   tap the street or a roof for a move (tap a building again for lower
+   floors), an enemy for an attack, a spot for Look / Spider. Blocks are as
+   wide as the time they take; each lane must fit in 6 seconds. Then
+   **Submit Turn** and watch both squads' plans play out together.
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
    offers Rematch or Return to Hangar.
 
 **Vision:** every character's vision is drawn as one shape: the detection
 circle plus the sight cone. For the selected character it is also the
-spotlight: everything that character can't see is dimmed. The rest of
-the squad's are faint, so you can see where everyone is looking. Badges over
-each character (pinned to the screen edge when off screen) show where your
-troops are and which way they face; tap one to command that character. The cones are built from 3D physics raycasts from the
-character's eye against the buildings' solid bodies, so they stop at walls,
-and shadow-casting lights from the eye show the same view as light and
-shadow. (The rules use exact ray-vs-box math on the same geometry, and the
-smoke test checks the two agree.) Drag **Look** into a slot and click a hex to choose where it
-watches (free). Rooftops see farther; stand by an outer wall to see out of a
-building.
+spotlight: everything that character can't see is dimmed. The rest of the
+squad's are faint, so you can see where everyone is looking. Badges over each
+character (pinned to the screen edge when off screen) show where your troops
+are and which way they face; tap one to command that character. The shapes
+come from 3D physics raycasts against the buildings (the rules use exact
+ray-vs-box math on the same geometry, and the smoke test checks the two
+agree). Rooftops see farther; stand by an outer wall to see out of a building.
 
 **Controls:** mouse — scroll to zoom, middle-drag to pan, right-drag to
-rotate, right-click a slot to clear it. Touch — drag to pan, pinch to zoom,
-twist to rotate, tap to select, double-tap a slot to clear it. The UI scales
+rotate, right-click a block to remove it. Touch — drag to pan, pinch to
+zoom, twist to rotate, tap to select, double-tap a block to remove it. The UI scales
 to the screen (1280×720 base, landscape).
 
 ## Run the Async Backend (Phase 3)
@@ -278,6 +286,7 @@ godot --headless --path . res://test/online_test.tscn  # full online client flow
 godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies, surrender
 godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres (fake), outage
 godot --headless --path . res://test/security_test.tscn  # abuse / cheating regressions (rules + server)
+godot --headless --path . res://test/stress_test.tscn    # random plans over many turns: client and server agree
 ```
 
 CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.
@@ -300,7 +309,7 @@ once so Godot registers them before running headless tests.
 - Before a store build: set `ServerConfig.PRODUCTION_URL`
   (`common/net/server_config.gd`) and fill `common/net/blocked_names.txt`.
 - Real-time spectating over the live channel (GDD 2.2).
-- Phase 4 polish: low-poly models, toon shaders, and balancing AT costs,
+- Phase 4 polish: low-poly models, toon shaders, and balancing action times,
   Trion weights, and penchant modifiers from playtests.
 - Scale-out: the JSON store suits one server; Postgres + match workers for
   many (see the launch plan).

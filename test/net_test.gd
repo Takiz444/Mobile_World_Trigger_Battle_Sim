@@ -56,7 +56,7 @@ func _run() -> void:
 	_check(int(forged.get("status", 0)) == 403, "submit rejects unknown token")
 
 	var bad_plan := PlanCodec.encode_plan(plan0)
-	bad_plan["units"][0][0]["main"] = "Ibis"  # not equipped
+	bad_plan["units"][0]["act"] = [{ "card": "Ibis", "unit": 0 }]  # not equipped
 	var illegal := await b0.submit_plan(match_id, token0, 1, bad_plan)
 	_check(int(illegal.get("status", 0)) == 400, "submit rejects unequipped card")
 
@@ -80,7 +80,9 @@ func _run() -> void:
 	if result is Dictionary:
 		_check(result.get("plan") is Dictionary, "result contains our own plan")
 		_check(not result.has("plans"), "opponent plan not leaked")
-		_check((result.get("frames", []) as Array).size() == TurnPlan.TICKS_PER_TURN, "one fog-filtered frame per tick")
+		var frames: Array = result.get("frames", [])
+		_check(frames.size() >= 2 and absf(float(frames.back().get("t", 0)) - TurnPlan.TURN_SECONDS) < 0.01,
+			"fog-filtered replay frames cover the whole turn")
 		_check(int(result.get("winner", -2)) in [-1, 0, 1], "winner field valid")
 	_check(body.get("view") is Dictionary, "player receives a fogged board view")
 	_check(not body.has("state"), "full match state not exposed")
@@ -195,7 +197,7 @@ func _shield_plan(units: Array[UnitData]) -> TurnPlan:
 	var plan := TurnPlan.new(units)
 	var shield := TriggerLibrary.get_card("Shield")
 	for i in units.size():
-		plan.assign(i, 0, TurnPlan.MAIN_SLOT, shield)
+		plan.add(i, PlanAction.new(shield))
 	return plan
 
 

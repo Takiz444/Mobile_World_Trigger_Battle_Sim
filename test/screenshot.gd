@@ -38,12 +38,10 @@ func _ready() -> void:
 			var ctl := main.get_node("MatchController") as MatchController
 			var u: UnitState = ctl._player_states[0]
 			cam.screen_offset_px = Vector2.ZERO
-			cam.recenter(HexCoord.axial_to_world(u.hex, 1.0) + Vector3(1.0, 0, -0.5))
+			cam.recenter(Vector3(u.pos.x + 1.0, 0, u.pos.y - 0.5))
 			(main.get_node("UILayer") as CanvasLayer).visible = false
-			# Light up nearby hexes so roof-cap clipping is visible.
-			(main.get_node("HexBoard") as HexBoard).highlight_hexes(HexCoord.spiral(u.hex, 3))
 		elif args.size() > 4 and args[4] == "center":
-			var board := main.get_node("HexBoard") as HexBoard
+			var board := main.get_node("CityBoard") as CityBoard
 			cam.screen_offset_px = Vector2.ZERO
 			cam.recenter(board.get_bounds().get_center())
 			(main.get_node("UILayer") as CanvasLayer).visible = false

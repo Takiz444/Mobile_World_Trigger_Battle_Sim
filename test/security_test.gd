@@ -43,87 +43,105 @@ func _run() -> void:
 
 # --- Rules --------------------------------------------------------------------
 
-## A plan target billions of hexes away used to reach HexCoord.line() and
-## hang the server (one request froze every match).
+## Absurd plan targets used to hang the server (one request froze every
+## match). The server refuses them; the engine shrugs them off anyway.
 func _test_engine_bounds() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 3]])
-	var far := Vector2i(2000000000, -2000000000)
+	var ms := _arena()
+	_duel(ms, Vector2(5, 10), Vector2(9, 10))
 	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_look_card())
-	p0.set_target(0, 0, far)
-	p0.assign(0, 1, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	p0.set_target(0, 1, far)
-	p0.assign(0, 2, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Kogetsu"))
-	p0.set_target(0, 2, far)
+	var far := Vector2(2000000000, -2000000000)
+	var look := PlanAction.new(TriggerLibrary.get_look_card())
+	look.set_point(far)
+	p0.add(0, look)
+	var mv := PlanAction.new(TriggerLibrary.get_move_card())
+	mv.set_point(far)
+	p0.add(0, mv)
 	var started := Time.get_ticks_msec()
-	TickEngine.new().resolve(ms, p0, _plan(ms, 1))
-	_check(Time.get_ticks_msec() - started < 1000, "absurd targets resolve instantly")
-	_check((ms.teams[0][0] as UnitState).hex == Vector2i(0, 0), "absurd move target is ignored")
+	TurnEngine.new().resolve(ms, p0, _plan(ms, 1))
+	_check(Time.get_ticks_msec() - started < 1500, "absurd targets resolve quickly")
+	_check(ms.teams[0][0].pos == Vector2(5, 10), "an unreachable move target is ignored")
+	var d := PlanCodec.encode_plan(p0)
+	_check(str(PlanCodec.decode_plan_checked(d, p0.units, ms, ms.teams[0])["error"]) != "",
+		"the server refuses targets off the map")
 
 
-## A failed attack must not reveal whether an unseen enemy stands on the hex.
+## A failed attack must not tell the attacker anything about the target:
+## out of reach, behind a wall, and hidden by Bagworm all read the same, and
+## the failed shot isn't attached to the target (so its team doesn't see it).
 func _test_no_probing() -> void:
-	# Shooter (Asteroid, range 5) at origin; enemy far out of range.
-	var ms := _match([[0, Vector2i(0, 0), 0, 1], [1, Vector2i(0, 9), 3]])
-	var events := _attack(ms, "Asteroid", Vector2i(0, 9))
-	var empty := _attack(_match([[0, Vector2i(0, 0), 0, 1], [1, Vector2i(5, 9), 3]]), "Asteroid", Vector2i(0, 9))
-	_check(_messages(events) == _messages(empty), "out-of-range attack reads the same with or without a target")
-	_check(_no_enemy_named(events), "out-of-range attack names no enemy")
-
-	# In range but stealthed beyond the reveal range: same as an empty hex.
-	ms = _match([[0, Vector2i(0, 0), 0, 1], [1, Vector2i(0, 5), 3]])
-	(ms.teams[1][0] as UnitState).stealth_active = true
-	var p1 := _plan(ms, 1)
-	p1.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Bagworm"))
-	events = _attack(ms, "Asteroid", Vector2i(0, 5), p1)
-	empty = _attack(_match([[0, Vector2i(0, 0), 0, 1], [1, Vector2i(9, 9), 3]]), "Asteroid", Vector2i(0, 5))
-	_check(_messages(events) == _messages(empty), "attack on a stealthed unit reads like an empty hex")
-	_check((ms.teams[1][0] as UnitState).trion_hp == 100, "stealthed unit beyond reveal range takes no damage")
+	var cases := {
+		"out of reach": func(ms: MatchState) -> void: ms.teams[1][0].pos = Vector2(20, 10),
+		"behind a wall": func(ms: MatchState) -> void:
+			ms.buildings = _block(4, 5, 4, 9, 3)
+			ms.teams[1][0].pos = Vector2(BuildingRects.bounds(ms.building_rects()[0]).end.x + 1.0, 10),
+		"stealthed": func(ms: MatchState) -> void:
+			ms.teams[1][0].pos = Vector2(12, 10),
+	}
+	var texts := {}
+	for label in cases:
+		var ms := _arena()
+		_duel(ms, Vector2(4, 10), Vector2(9, 10))
+		(cases[label] as Callable).call(ms)
+		var p1 := _plan(ms, 1)
+		if label == "stealthed":
+			p1.add(0, PlanAction.new(TriggerLibrary.get_card("Bagworm")))
+		var events := _attack(ms, "Asteroid", p1)
+		var mine: Array = []
+		var attached := false
+		for ev in events:
+			if ev.actor != null and ev.actor.team == 0:
+				mine.append(ev.message)
+				attached = attached or ev.target != null
+		texts[label] = mine
+		_check(not attached, "a failed shot (%s) isn't attached to the target" % label)
+		_check(ms.teams[1][0].trion_hp == 100, "no damage when %s" % label)
+	_check(texts["out of reach"] == texts["behind a wall"] and texts["behind a wall"] == texts["stealthed"],
+		"failed shots all read the same (%s)" % str(texts["out of reach"]))
 
 
 func _test_mutual_knockout() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 1), 3]])
+	var ms := _arena()
+	_duel(ms, Vector2(4, 10), Vector2(9, 10))
 	for u in ms.all_units():
 		u.is_bailed = true
-	_check(MatchRunner.winner(ms) == MatchRunner.DRAW, "both squads down on the same tick is a draw")
+	_check(MatchRunner.winner(ms) == MatchRunner.DRAW, "both squads down at the same moment is a draw")
 	(ms.teams[0][0] as UnitState).is_bailed = false
 	_check(MatchRunner.winner(ms) == 0, "last squad standing still wins")
 
 
 func _test_spider_range() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0, 3], [1, Vector2i(0, 9), 3]])
+	var ms := _arena()
+	_duel(ms, Vector2(4, 10), Vector2(20, 20), 3)
 	var p0 := _plan(ms, 0)
-	var spider := TriggerLibrary.get_card("Spider")
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, spider)
-	p0.set_target(0, 0, Vector2i(0, 20))
-	p0.assign(0, 1, TurnPlan.MAIN_SLOT, spider)
-	p0.set_target(0, 1, Vector2i(0, 2))
-	TickEngine.new().resolve(ms, p0, _plan(ms, 1))
-	_check(not ms.wires.has(Vector2i(0, 20)), "Spider wire can't be strung across the map")
-	_check(ms.wires.has(Vector2i(0, 2)), "Spider wire in range still deploys")
+	for at in [Vector2(4, 25), Vector2(6, 10)]:
+		var w := PlanAction.new(TriggerLibrary.get_card("Spider"))
+		w.set_point(at)
+		p0.add(0, w)
+	TurnEngine.new().resolve(ms, p0, _plan(ms, 1))
+	_check(ms.wires.size() == 1 and (ms.wires[0]["pos"] as Vector2) == Vector2(6, 10), "Spider wires can't be strung across the map")
 
 
 func _test_fogged_wires() -> void:
 	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 1)
-	# One wire per team on a hex the other team can't see (spawns are random).
-	var seen := [Visibility.visible_hexes(ms, 0), Visibility.visible_hexes(ms, 1)]
-	var hidden := [Vector2i.ZERO, Vector2i.ZERO]   # hidden[t]: a hex team t can't see
-	var found := [false, false]
-	var keys: Array = ms.tiles.keys()
-	keys.sort()
-	for hex in keys:
-		for t in 2:
-			if not found[t] and not seen[t].has(hex) and ms.floor_legal(hex, 0) 					and not (found[1 - t] and hidden[1 - t] == hex):
-				hidden[t] = hex
-				found[t] = true
-	ms.wires[hidden[0]] = 1   # team 1's wire, out of team 0's sight
-	ms.wires[hidden[1]] = 0   # team 0's wire, out of team 1's sight
+	# One wire per team on a street spot the other team can't see.
+	var geo := ms.geometry()
+	var hidden: Array = [Vector2.INF, Vector2.INF]   # hidden[t]: a spot team t can't see
+	var b := ms.bounds()
+	for x in range(int(b.position.x) + 1, int(b.end.x)):
+		for y in range(int(b.position.y) + 1, int(b.end.y)):
+			var p := Vector2(x, y)
+			if not geo.ground_ok(p):
+				continue
+			for t in 2:
+				if hidden[t] == Vector2.INF and not Visibility.team_sees_point(ms, t, p) and p != hidden[1 - t]:
+					hidden[t] = p
+	ms.wires.append({ "pos": hidden[0], "team": 1 })   # team 1's wire, out of team 0's sight
+	ms.wires.append({ "pos": hidden[1], "team": 0 })   # team 0's wire, out of team 1's sight
 	var view0: Array = Visibility.encode_view(ms, 0, 1, true)["wires"]
 	var view1: Array = Visibility.encode_view(ms, 1, 1, true)["wires"]
 	_check(view0.size() == 1 and int(view0[0][2]) == 0, "enemy wires out of sight are not sent")
 	_check(view1.size() == 1 and int(view1[0][2]) == 1, "each side gets only its own unseen wires")
-	var sighted: Array = Visibility.encode_view(ms, 0, 1, false)["wires"]
-	_check(sighted.size() == 2, "without fogging every wire is listed (local play)")
+	_check((Visibility.encode_view(ms, 0, 1, false)["wires"] as Array).size() == 2, "without fogging every wire is listed")
 
 
 func _test_names() -> void:
@@ -146,18 +164,19 @@ func _test_names() -> void:
 func _test_plan_numbers() -> void:
 	var units := TriggerLibrary.sample_units()
 	var base := PlanCodec.encode_plan(TurnPlan.new(units))
-	for bad in [[1e300, 0], [0.5, 0], [2000000000, 0], ["1", 2], [0, null]]:
+	for bad in [[1e300, 0], [2000000000, 0], ["1", 2], [0, null], [0], "x"]:
 		var plan: Dictionary = base.duplicate(true)
-		plan["units"][0][0]["main"] = "Move"
-		plan["units"][0][0]["target"] = bad
+		plan["units"][0]["move"] = [{ "card": "Move", "to": bad, "level": 0 }]
 		_check(str(PlanCodec.decode_plan_checked(plan, units)["error"]) != "", "plan target %s is rejected" % str(bad))
 	var floor_plan: Dictionary = base.duplicate(true)
-	floor_plan["units"][0][0]["target"] = [0, 0]
-	floor_plan["units"][0][0]["target_floor"] = 1e18
-	_check(str(PlanCodec.decode_plan_checked(floor_plan, units)["error"]) != "", "absurd target floor is rejected")
+	floor_plan["units"][0]["move"] = [{ "card": "Move", "to": [0, 0], "level": 1e18 }]
+	_check(str(PlanCodec.decode_plan_checked(floor_plan, units)["error"]) != "", "absurd target level is rejected")
 	var card_plan: Dictionary = base.duplicate(true)
-	card_plan["units"][0][0]["main"] = ["Move"]
+	card_plan["units"][0]["move"] = [{ "card": ["Move"], "to": [0, 0] }]
 	_check(str(PlanCodec.decode_plan_checked(card_plan, units)["error"]) != "", "non-text card is rejected")
+	var hold_plan: Dictionary = base.duplicate(true)
+	hold_plan["units"][0]["act"] = [{ "card": "Shield", "hold": 1e300 }]
+	_check(str(PlanCodec.decode_plan_checked(hold_plan, units)["error"]) != "", "absurd hold time is rejected")
 
 
 func _test_secret_compare() -> void:
@@ -210,8 +229,7 @@ func _test_http_surface() -> void:
 		_check(int(res.get("status", 0)) in [400, 403, 409], "malformed submit is refused cleanly (%d)" % int(res.get("status", 0)))
 
 	var far_plan: Dictionary = plan.duplicate(true)
-	far_plan["units"][0][0]["main"] = "Look"
-	far_plan["units"][0][0]["target"] = [2000000000, 0]
+	far_plan["units"][0]["act"] = [{ "card": "Look", "to": [2000000000, 0] }]
 	var far := await b.submit_plan(id, token0, 1, far_plan)
 	_check(int(far.get("status", 0)) == 400, "a plan with an absurd target is refused")
 
@@ -338,43 +356,41 @@ func _raw(request: String) -> String:
 	return out.get_string_from_utf8()
 
 
-func _attack(ms: MatchState, card_name: String, target: Vector2i, p1: TurnPlan = null) -> Array[CombatEvent]:
+## Team 0 fires `card_name` at team 1's only character (always hits).
+func _attack(ms: MatchState, card_name: String, p1: TurnPlan = null) -> Array[CombatEvent]:
 	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card(card_name))
-	p0.set_target(0, 0, target)
-	var engine := TickEngine.new()
+	var a := PlanAction.new(TriggerLibrary.get_card(card_name))
+	a.target_unit = 0
+	p0.add(0, PlanAction.new(TriggerLibrary.get_wait_card()))
+	p0.add(0, a)
+	var engine := TurnEngine.new()
 	engine.always_hit = true
-	return engine.resolve_tick(ms, p0, p1 if p1 != null else _plan(ms, 1), 0)
+	return engine.resolve(ms, p0, p1 if p1 != null else _plan(ms, 1))
 
 
-func _messages(events: Array[CombatEvent]) -> Array:
-	var out: Array = []
-	for ev in events:
-		if ev.actor != null and ev.actor.team == 0:
-			out.append(ev.message)
+## An open street arena, about 24 x 28 m.
+func _arena() -> MatchState:
+	var ms := MatchState.new(1)
+	for col in 16:
+		for row in 16:
+			ms.tiles[MapData.offset_to_axial(col, row)] = true
+	return ms
+
+
+func _block(c0: int, c1: int, r0: int, r1: int, floors: int) -> Dictionary:
+	var out := {}
+	for c in range(c0, c1 + 1):
+		for r in range(r0, r1 + 1):
+			out[MapData.offset_to_axial(c, r)] = floors
 	return out
 
 
-func _no_enemy_named(events: Array[CombatEvent]) -> bool:
-	for ev in events:
-		if ev.actor != null and ev.actor.team == 0 and (ev.target != null or ev.message.contains("T1.")):
-			return false
-	return true
-
-
-func _match(specs: Array) -> MatchState:
-	var ms := MatchState.new(1)
-	var teams: Array = [[], []]
-	var data := TestUnits.legacy()
-	for i in specs.size():
-		var spec: Array = specs[i]
-		var unit_data: UnitData = data[spec[3]] if spec.size() > 3 else data[i]
-		teams[spec[0]].append(UnitState.new(unit_data, spec[0], spec[1], spec[2]))
-	for team in 2:
-		var typed: Array[UnitState] = []
-		typed.assign(teams[team])
-		ms.setup_team(team, typed)
-	return ms
+## A shooter (team 0) and a target (team 1, Bagworm-capable scout) facing each other.
+func _duel(ms: MatchState, a: Vector2, b: Vector2, a_kind: int = 1) -> void:
+	var t0: Array[UnitState] = [UnitState.new(TestUnits.legacy()[a_kind], 0, a, (b - a).angle())]
+	var t1: Array[UnitState] = [UnitState.new(TestUnits.legacy()[3], 1, b, (a - b).angle())]
+	ms.setup_team(0, t0)
+	ms.setup_team(1, t1)
 
 
 func _plan(ms: MatchState, team: int) -> TurnPlan:

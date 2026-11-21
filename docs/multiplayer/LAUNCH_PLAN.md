@@ -12,7 +12,7 @@ Clash Royale works because a match is **short (≈3 min), synchronous, ranked, a
 always one tap away**. Players progress on a visible **trophy ladder** through
 **arenas**, with **seasons** that soft-reset the top.
 
-Our core loop is different: simultaneous 6-tick turns, not real-time card drops.
+Our core loop is different: simultaneous 6-second turns (free movement, time-based plans), not real-time card drops.
 So we keep the turn structure and make it *fast*: both players are online, a
 short planning clock runs, and the board replays between turns. One match takes
 about **6–8 minutes**.
@@ -93,7 +93,7 @@ gap. The matchmaker runs every second. Live and async queues are separate.
 ```
 
 **Why it's cheat-resistant by design:**
-* The server is authoritative: clients only send *plans*, and the server validates every squad (stats, slots, Trion budget) and plan (equipped cards, AT budget).
+* The server is authoritative: clients only send *plans*, and the server validates every squad (stats, slots, Trion budget) and plan (equipped cards, reachable routes, each lane inside the 6-second turn).
 * Fog of war is applied on the server. A modified client can't reveal hidden enemies, because the server never sends them. The opponent's plan is never sent, only "opponent locked in".
 * Resolution is deterministic and seeded, so any match can be replayed exactly from its history for disputes and reports.
 
@@ -196,7 +196,7 @@ Metrics that tell us the live format works:
 ## 7. Open decisions for the team
 
 1. **IP / licensing (launch blocker).** *World Trigger* (Daisuke Ashihara / Shueisha) names are throughout the game: trigger names (Kogetsu, Scorpion, Bagworm…), "Border", the arena placeholders I used (C/B/A-Rank, Mikado City, Away Mission). Apple rejects apps that use third-party IP without rights (5.2.1). We either secure a license or rebrand to original names before submitting. This decision drives naming, art, and marketing, so it should come first.
-2. **Live turn length and cap.** 40 s × 8 turns is a starting guess. Planning 4 units × 6 ticks is a lot on a phone. Consider fewer ticks or a "quick plan" preset in live mode.
+2. **Live turn length and cap.** 40 s × 8 turns is a starting guess. Planning 3 characters × two 6-second lanes is a lot on a phone. Consider a "quick plan" preset in live mode.
 3. **Android at the same time?** The Godot export is cheap. Google Play has its own account-deletion and data-safety requirements.
 4. **Backend language for the scaled version.** Keep the Godot headless resolver for match workers (shared deterministic code). The account/queue API can be anything the team is comfortable operating.
 5. **Bots in low-trophy queues.** Labelled or not at all? I recommend labelled.

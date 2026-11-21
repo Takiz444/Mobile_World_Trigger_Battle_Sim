@@ -35,6 +35,8 @@ jobs:
         run: godot --headless --path . res://test/live_test.tscn
       - name: Persistence
         run: godot --headless --path . res://test/store_test.tscn
+      - name: Stress (random plans, client vs server)
+        run: godot --headless --path . res://test/stress_test.tscn
       - name: Local smoke
         run: godot --headless --path . res://test/smoke_test.tscn
 
