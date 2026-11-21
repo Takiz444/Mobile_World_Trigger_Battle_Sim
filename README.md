@@ -1,7 +1,7 @@
 # Trion Tactics (World Trigger Battle Sim)
 
 Cross-platform online turn-based strategy game built in **Godot 4.6**.
-Simultaneous-execution 4v4 hex-grid skirmishes based on the *World Trigger*
+Simultaneous-execution 3v3 hex-grid skirmishes based on the *World Trigger*
 Away Mission Test Battle Simulation Exercise.
 
 See `Project Docs/GDDV1.pdf` for the full design document.
@@ -52,7 +52,19 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   rectangular segments (towers with lower wings), each with its own height
   (1–4 floors), mirrored across the map so both sides stay fair. Edit the
   digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
-- Spawns: four streets along each short edge. Shared by client and server.
+- Spawns: random open street hexes (one connected street area), every
+  character at least `MatchRunner.SPAWN_MIN_DISTANCE` (3) hexes from every
+  other, friend or foe. Derived from the hidden match seed, so the server can
+  rebuild a match but players can't predict enemy positions.
+
+### Squad & Talents — `common/data/talents.gd`
+- Three playable characters: **Assassin** (blades, stealth, jump),
+  **Sniper** (Egret / Ibis), **Scout** (Hound / Asteroid, Spider, Lead Bullet).
+- Every squad has the same **talent pool** (`Talents.POINTS` = 9) to spread
+  over its characters: **Stamina** (+1 AT per turn), **HP** (+15 Trion),
+  **ATK** (+1 damage per hit), at most 4 points per stat. Stats are derived
+  from talents on the server; client-sent stats are only checked, never
+  trusted. The squad (loadouts + talents) is saved in `user://squad.json`.
 
 ### Combat Resolution — `common/combat/`
 - `unit_state.gd`, `match_state.gd`, `combat_event.gd`
@@ -71,9 +83,9 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   Penchant**: on your own team's Spider wires you get +20% defense, +10%
   evasion, and a 2-hex wire dash.
 - `visibility.gd` — per-character vision and fog of war (GDD 4.3). Each unit
-  has a long narrow **focus cone**, a wide short **peripheral cone**, and an
-  all-round awareness radius. Sniper scopes extend the focus range; each
-  floor of height adds range. Line of sight is traced in 3D (eye height to
+  has a short all-round **detection radius** (2 hexes, any facing) and a long
+  **sight cone** in its facing direction (9 hexes, ±45°). Sniper scopes extend
+  the sight range; each floor of height adds range. Line of sight is traced in 3D (eye height to
   body height) against the real building boxes (`common/map/building_rects.gd`,
   the same geometry that's rendered), so nobody sees through a building.
   Units inside buildings see and are seen only from near the outer wall. Unseen enemies show as radar pings offset 1–2 hexes;
@@ -92,9 +104,19 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ### Headless Backend — `server/server.gd`
 - REST API: `GET /health`, `POST /match/create`, `POST /match/{id}/join`,
-  `POST /match/{id}/submit`, `GET /match/{id}`.
+  `POST /match/{id}/submit`, `GET /match/{id}`, `POST /account/matches`
+  (resume a running match after a restart).
 - Create/join return a secret per-player `token`; submits are attributed to a
-  team by token only, and must name the current `turn`.
+  team by token only, and must name the current `turn`. Tokens and account
+  secrets travel in the JSON body or an `Authorization: Bearer` header,
+  never in the URL.
+- Security model (regression-tested in `test/security_test.gd`): the server
+  picks every match seed and never sends it (it drives the hit rolls); radar
+  ping offsets are keyed with a per-match secret; failed attacks reveal
+  nothing about unseen units; enemy Spider wires are sent only when in sight;
+  account secrets are stored hashed; names are stripped of markup; per-client
+  limits on account creation, match creation, and failed logins; responses
+  are written without blocking the server loop.
 - Accounts + ranked matchmaking: `POST /account/register`, `GET /account/{id}`,
   `GET /leaderboard`, `POST /queue` (pairs the waiting player closest in
   rating), `GET /queue/{ticket}`, `POST /queue/{ticket}/cancel`. Ranked results
@@ -172,7 +194,7 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 ### UI — `ui/timeline/`, `ui/event_log/`, `ui/hangar/`
 - Timeline: unit tabs, 6-tick Main/Sub ribbon, draggable card hand, AT meter.
 - Event log: color-coded, auto-scrolling combat log.
-- Hangar: Trigger Holder deck-builder with Trion budget + async multiplayer
+- Hangar: talent points panel + Trigger Holder deck-builder with Trion budget + async multiplayer
   host/join controls.
 
 ## Run It
@@ -180,16 +202,25 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 **Local play:** open the project in Godot and press F5 (main scene is the Hangar).
 
 **Flow:**
-1. **Hangar** — configure each unit's Trigger Holder, then **Start Match**
-   (local vs AI), **Host Online Match** / **Join** (friendly match by ID),
-   **Live Battle** (live trophy ladder), or **Async Ranked** (correspondence).
-2. **Battle** — click a tick slot → click a hex to target it → drag cards into
-   slots → **Submit All** to watch the animated replay in the combat log.
+1. **Squad Setup (Hangar)** — spend the talent points and configure each
+   character's Trigger Holder, then **Start Match** (local vs AI), **Host
+   Online Match** / **Join** (friendly match by ID), **Live Battle** (live
+   trophy ladder), or **Async Ranked** (correspondence).
+2. **Battle** — tap a character (top tab or on the board): the camera zooms
+   in and a spotlight shows how far the chosen action reaches. Tap action
+   cards to fill the ticks in order (or drag one onto a tick), tap a
+   highlighted hex to aim each one, then **Submit Turn**. The line above the
+   ticks always says what to do next; actions that still need a target are
+   marked "aim".
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
    offers Rematch or Return to Hangar.
 
-**Vision:** select a unit to see its focus cone, peripheral cone, and
-awareness ring. The cones are built from 3D physics raycasts from the
+**Vision:** every character's vision is drawn as one shape: the detection
+circle plus the sight cone. For the selected character it is also the
+spotlight: everything that character can't see is dimmed. The rest of
+the squad's are faint, so you can see where everyone is looking. Badges over
+each character (pinned to the screen edge when off screen) show where your
+troops are and which way they face; tap one to command that character. The cones are built from 3D physics raycasts from the
 character's eye against the buildings' solid bodies, so they stop at walls,
 and shadow-casting lights from the eye show the same view as light and
 shadow. (The rules use exact ray-vs-box math on the same geometry, and the
@@ -240,6 +271,7 @@ godot --headless --path . res://test/net_test.tscn     # backend create/join/sub
 godot --headless --path . res://test/online_test.tscn  # full online client flow
 godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies, surrender
 godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres (fake), outage
+godot --headless --path . res://test/security_test.tscn  # abuse / cheating regressions (rules + server)
 ```
 
 CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.
@@ -258,7 +290,9 @@ once so Godot registers them before running headless tests.
 ## Next Up
 
 - Launch blockers and next steps are tracked in `docs/multiplayer/LAUNCH_PLAN.md`
-  (IP licensing, account-deletion UI, Sign in with Apple, Keychain, iOS export).
+  (IP licensing, Sign in with Apple / Steam login, Keychain, store exports).
+- Before a store build: set `ServerConfig.PRODUCTION_URL`
+  (`common/net/server_config.gd`) and fill `common/net/blocked_names.txt`.
 - Real-time spectating over the live channel (GDD 2.2).
 - Phase 4 polish: low-poly models, toon shaders, and balancing AT costs,
   Trion weights, and penchant modifiers from playtests.

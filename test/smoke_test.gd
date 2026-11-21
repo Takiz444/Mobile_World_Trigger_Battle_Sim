@@ -21,6 +21,7 @@ func _ready() -> void:
 
 
 func _run() -> void:
+	SquadStore.persist = false   # never touch the player's saved squad
 	_layer = CanvasLayer.new()
 	add_child(_layer)
 
@@ -40,11 +41,12 @@ func _run() -> void:
 	add_child(_controller)
 	_controller.setup(_board, _timeline, _event_log, _layer)
 
-	_check(_controller._ms.all_units().size() == 8, "8 units placed on board")
+	_check(_controller._ms.all_units().size() == 2 * PlanCodec.SQUAD_SIZE, "both squads placed on the board")
 	_check(not _controller._overlay.visible, "overlay hidden at match start")
 	_check(_controller._ms.buildings.size() > 0, "city map buildings placed on board")
 	_controller._update_targeting()
 	await _check_physics_matches_rules()
+	_check_planning_ui()
 
 	for turn in range(3):
 		if _controller._overlay.visible:
@@ -58,6 +60,48 @@ func _run() -> void:
 
 	print("SMOKE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
+
+
+## Tap-to-place, aiming, tapping a character on the board, the spotlight,
+## and the plan lock.
+func _check_planning_ui() -> void:
+	_check(_controller._spotlight.is_active(), "the commanded character is spotlit")
+	var move := TriggerLibrary.get_move_card()
+	_timeline._on_card_tapped(move)
+	var plan := _timeline.get_plan()
+	_check(plan.get_card(0, 0, TurnPlan.MAIN_SLOT) == move and _timeline.has_selected_slot(),
+		"tapping a card places it in the first free tick and selects it")
+	_check(_timeline._missing_targets() == 1, "an unaimed move is counted as needing a target")
+	var me: UnitState = _controller._player_states[0]
+	var dest := Vector2i.ZERO
+	for n in HexCoord.neighbors(me.hex):
+		if _controller._ms.floor_legal(n, 0) and _controller._known_unit_at(n, 0) == null:
+			dest = n
+			break
+	_controller._on_tile_selected(dest)
+	_check(plan.get_tick(0, 0).has_target and plan.get_tick(0, 0).target_hex == dest, "tapping a hex aims the selected action")
+	# The next tap goes to the next free tick, not over the one just placed.
+	_timeline._on_card_tapped(TriggerLibrary.get_look_card())
+	_check(plan.get_card(0, 0, TurnPlan.MAIN_SLOT) == move and plan.get_card(0, 0, TurnPlan.SUB_SLOT) != null
+		or plan.get_card(0, 1, TurnPlan.MAIN_SLOT) != null, "tapping another card adds it after the first")
+	# Dropping a different card on a filled tick replaces it and drops the old target.
+	_timeline._on_slot_dropped(_timeline._current_slots[0][0], { "card": TriggerLibrary.get_look_card(), "from_slot": false })
+	_check(plan.get_card(0, 0, TurnPlan.MAIN_SLOT).card_name == "Look" and not plan.get_tick(0, 0).has_target,
+		"a replaced action loses its old target")
+	_timeline.begin_new_turn()
+
+	var ally: UnitState = _controller._player_states[1]
+	_controller._on_tile_selected(ally.hex)
+	_check(_timeline.get_current_unit() == 1, "tapping a character on the board commands it")
+	_timeline.select_unit(0)
+
+	_timeline.begin_new_turn()
+	plan = _timeline.get_plan()
+	_timeline.set_locked(true)
+	_timeline._on_card_tapped(move)
+	_check(plan.get_card(0, 0, TurnPlan.MAIN_SLOT) == null, "a locked plan can't be edited")
+	_timeline.set_locked(false)
+	_timeline.begin_new_turn()
 
 
 ## The rendered city's physics solids and the engine's line-of-sight rules

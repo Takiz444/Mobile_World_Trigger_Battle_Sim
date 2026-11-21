@@ -25,6 +25,8 @@ jobs:
 
       - name: Rules
         run: godot --headless --path . res://test/rules_test.tscn
+      - name: Security
+        run: godot --headless --path . res://test/security_test.tscn
       - name: Backend
         run: godot --headless --path . res://test/net_test.tscn
       - name: Online client

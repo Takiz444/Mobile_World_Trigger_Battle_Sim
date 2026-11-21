@@ -101,43 +101,48 @@ static func all_cards() -> Array[TriggerCard]:
 	return result
 
 
+## The three playable characters, with default loadouts and a default
+## talent spread that uses the whole pool (Talents.POINTS).
+const ROSTER: Array[String] = ["Assassin", "Sniper", "Scout"]
+
+
 static func sample_units() -> Array[UnitData]:
 	var c := sample_cards()
 	var result: Array[UnitData] = []
+	# Close-range striker: blades, stealth to get close, a jump to engage.
 	result.append(_make_unit(
-		"Attacker",
-		[c["Kogetsu"], c["Raygust"], c["Asteroid"], c["Shield"]],
-		[c["Shield"], c["Bagworm"]]
+		"Assassin",
+		[c["Kogetsu"], c["Scorpion"], c["Shield"], c["Bagworm"]],
+		[c["Shield"], c["Grasshopper"]],
+		[1, 1, 1]
 	))
-	result.append(_make_unit(
-		"Shooter",
-		[c["Asteroid"], c["Hound"], c["Shield"], c["Spider"]],
-		[c["Shield"], c["Viper"]]
-	))
+	# Long-range damage from cover and rooftops.
 	result.append(_make_unit(
 		"Sniper",
 		[c["Egret"], c["Ibis"], c["Shield"], c["Bagworm"]],
-		[c["Shield"], c["Grasshopper"]]
+		[c["Shield"], c["Grasshopper"]],
+		[0, 1, 2]
 	))
+	# Mid-range support: homing shots, wires, and Lead Bullet to pin targets.
 	result.append(_make_unit(
 		"Scout",
-		[c["Scorpion"], c["Spider"], c["Shield"], c["Bagworm"]],
-		[c["Lead Bullet"], c["Grasshopper"]]
+		[c["Asteroid"], c["Hound"], c["Shield"], c["Spider"]],
+		[c["Shield"], c["Lead Bullet"], c["Grasshopper"]],
+		[2, 1, 0]
 	))
 	return result
 
 
-static func _make_unit(unit_name: String, main: Array, sub: Array) -> UnitData:
+## `talents` = [stamina, hp, atk].
+static func _make_unit(unit_name: String, main: Array, sub: Array, talents: Array = [0, 0, 0]) -> UnitData:
 	var u := UnitData.new()
 	u.unit_name = unit_name
-	u.base_trion_hp = STANDARD_TRION_HP
-	u.base_at_pool = STANDARD_AT_POOL
-	u.mobility_rating = STANDARD_RATING
-	u.attack_rating = STANDARD_RATING
-	u.defense_rating = STANDARD_RATING
-	u.max_trion_capacity = STANDARD_TRION_CAPACITY
 	u.main_trigger_slots = _to_cards(main)
 	u.sub_trigger_slots = _to_cards(sub)
+	u.talent_stamina = int(talents[0])
+	u.talent_hp = int(talents[1])
+	u.talent_atk = int(talents[2])
+	Talents.apply(u)
 	return u
 
 

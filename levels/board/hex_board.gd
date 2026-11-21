@@ -28,11 +28,11 @@ var _base_material: ShaderMaterial    # hex overlay: faint grid line only
 var _fog_material: ShaderMaterial     # hex overlay: grid line + fog tint
 var _decor: Node3D                    # street lamps
 var _ground: MeshInstance3D           # continuous street surface
-var _hover_material: StandardMaterial3D
-var _selected_material: StandardMaterial3D
-var _highlight_material: StandardMaterial3D
-var _effect_material: StandardMaterial3D
-var _wire_material: StandardMaterial3D
+var _hover_material: ShaderMaterial
+var _selected_material: ShaderMaterial
+var _highlight_material: ShaderMaterial
+var _effect_material: ShaderMaterial
+var _wire_material: ShaderMaterial
 
 var _tiles: Dictionary = {}        # Vector2i -> StaticBody3D
 var _tile_meshes: Dictionary = {}  # Vector2i -> MeshInstance3D
@@ -59,11 +59,12 @@ func _ready() -> void:
 	_shape = HexMesh.build_convex_shape(hex_size, tile_height)
 	_base_material = _make_overlay_material(0.0)
 	_fog_material = _make_overlay_material(1.0)
-	_hover_material = _make_material(hover_color)
-	_selected_material = _make_material(selected_color)
-	_highlight_material = _make_material(highlight_color)
-	_effect_material = _make_material(effect_color)
-	_wire_material = _make_material(wire_color)
+	# Each state has its own pattern as well as its own color (see the shader).
+	_hover_material = _make_material(hover_color, 1, 0.22)
+	_selected_material = _make_material(selected_color, 1, 0.38)
+	_highlight_material = _make_material(highlight_color, 0, 0.3)
+	_effect_material = _make_material(effect_color, 2, 0.4)
+	_wire_material = _make_material(wire_color, 3, 0.2)
 	_build_board()
 
 
@@ -483,9 +484,9 @@ func _spawn_lamps(buildings: Dictionary) -> void:
 		var light := OmniLight3D.new()
 		light.position = bulb.position
 		light.light_color = Color(1.0, 0.78, 0.5)
-		light.light_energy = 1.2
-		light.omni_range = 2.6 * hex_size
-		light.omni_attenuation = 1.4
+		light.light_energy = 1.0
+		light.omni_range = 2.8 * hex_size
+		light.omni_attenuation = 1.6
 		_decor.add_child(light)
 
 
@@ -593,17 +594,15 @@ func _set_tile_material(hex: Vector2i, mat: Material) -> void:
 		cap.visible = highlighted
 
 
-## Highlight overlay: translucent so the street shows through.
-func _make_material(color: Color) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(color, 0.62)
-	mat.metallic = 0.0
-	mat.roughness = 0.55
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.emission_enabled = true
-	mat.emission = color
-	mat.emission_energy_multiplier = 0.25
+## Highlight overlay: translucent fill with a crisp outline and a slow pulse
+## (hex_highlight.gdshader), so the street shows through.
+func _make_material(color: Color, style: int = 0, fill_alpha: float = 0.3) -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://levels/board/hex_highlight.gdshader")
+	mat.set_shader_parameter("hex_size", hex_size)
+	mat.set_shader_parameter("color", color)
+	mat.set_shader_parameter("style", style)
+	mat.set_shader_parameter("fill_alpha", fill_alpha)
 	return mat
 
 
@@ -612,6 +611,8 @@ func _make_prop_material(level: int) -> StandardMaterial3D:
 	mat.albedo_color = Color(0.55, 0.5, 0.42) if level == 1 else Color(0.32, 0.3, 0.26)
 	mat.metallic = 0.0
 	mat.roughness = 0.8
+	mat.rim_enabled = true
+	mat.rim = 0.25
 	return mat
 
 

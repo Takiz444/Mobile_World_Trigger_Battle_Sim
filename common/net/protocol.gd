@@ -13,8 +13,13 @@ extends RefCounted
 ## version in the live "hello"; the server answers an outdated client with
 ## {type: "error", code: "outdated"}.
 
-const VERSION := 2
-const MIN_SUPPORTED := 2
+## 3: credentials moved out of URLs (Authorization header / body), the match
+##    seed is no longer sent, `turn` is mandatory on submit, account resume.
+## 4: three-character squads with talent points; random spawns.
+## 5: vision is a detection radius plus one sight cone.
+## 6: detection radius 2.
+const VERSION := 6
+const MIN_SUPPORTED := 6
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

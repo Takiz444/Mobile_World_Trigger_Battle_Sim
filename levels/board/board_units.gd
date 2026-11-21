@@ -23,8 +23,34 @@ var _face_tweens: Dictionary = {}    # UnitState -> Tween
 var _ghost: Node3D = null            # translucent movement-destination preview
 var _ghost_body: MeshInstance3D = null
 var _pings: Dictionary = {}          # UnitState -> Node3D (radar ghost)
-var _vision: Node3D = null           # selected character's vision cones
+var _vision: Node3D = null           # selected character's vision shape
+var _squad_vision: Node3D = null     # faint vision of the rest of the squad
+var _squad_vision_key := ""
+## The selected character's vision outline in world space (for the spotlight).
+var _vision_outline := PackedVector3Array()
+var _vision_center := Vector3.ZERO
 var _map_bounds := Rect2()           # board extent (XZ) — sight ends at the edge
+var _poses: Dictionary = {}          # UnitState -> Node3D (squash / lunge / hop pivot)
+var _pose_tweens: Dictionary = {}    # UnitState -> Tween
+var _hp_bars: Dictionary = {}        # UnitState -> MeshInstance3D (hp_bar.gdshader)
+var _hp_shown: Dictionary = {}       # UnitState -> HP fraction the bar shows
+var _selected: UnitState = null
+var _time := 0.0
+var _hp_material: ShaderMaterial
+
+## One-shot combat effects (tracers, slashes, popups); rebuilt by setup().
+var fx: BoardFx
+
+const TEAM_COLORS: Array[Color] = [Color(0.15, 0.62, 1.0), Color(1.0, 0.36, 0.2)]
+const SELECT_COLOR := Color(1.0, 0.9, 0.3)
+const HIT_COLOR := Color(1.0, 0.2, 0.18)
+
+
+## Team identity color. Blue vs orange stays distinguishable under the common
+## forms of color blindness; the team ring's shape (circle vs diamond) and the
+## facing chevron back it up.
+static func team_color(team: int) -> Color:
+	return TEAM_COLORS[clampi(team, 0, 1)]
 
 
 ## Clears existing markers and spawns one per unit.
@@ -40,12 +66,42 @@ func setup(units: Array[UnitState], hex_size: float) -> void:
 	_rings.clear()
 	_pings.clear()
 	_vision = null
+	_squad_vision = null
+	_squad_vision_key = ""
 	_move_tweens.clear()
 	_face_tweens.clear()
 	_ghost = null
 	_ghost_body = null
+	_poses.clear()
+	_pose_tweens.clear()
+	_hp_bars.clear()
+	_hp_shown.clear()
+	_selected = null
+	fx = BoardFx.new()
+	fx.name = "Fx"
+	add_child(fx)
 	for u in units:
 		_spawn_marker(u)
+
+
+## Idle life: figures breathe and bob slightly out of phase, and the selected
+## unit's ring pulses. Cosmetic only (touches the figure node, never the
+## marker root that the replay tweens).
+func _process(delta: float) -> void:
+	_time += delta
+	var i := 0
+	for u in _figures:
+		var fig: Node3D = _figures[u]
+		if fig.is_visible_in_tree():
+			var t := _time * 2.1 + i * 1.7
+			fig.position.y = 0.012 + sin(t) * 0.012
+			fig.scale = Vector3(1.15, 1.15 * (1.0 + sin(t + 0.6) * 0.012), 1.15)
+		i += 1
+	if _selected != null and _rings.has(_selected):
+		var ring: MeshInstance3D = _rings[_selected]
+		var k := 1.0 + 0.07 * sin(_time * 4.0)
+		ring.scale = Vector3(k, 1.0, k)
+		ring.rotation.y = _time * 0.6
 
 
 ## Updates HP labels, fog visibility, and stealth alpha without moving markers.
@@ -53,6 +109,7 @@ func update_labels() -> void:
 	for u in _markers:
 		var label: Label3D = _hp_labels[u]
 		label.text = str(u.trion_hp)
+		_set_hp_bar(u, true)
 		if not u.is_bailed:
 			_markers[u].visible = u.fog == Visibility.State.SIGHT
 		_apply_body_style(u)
@@ -84,12 +141,15 @@ func refresh() -> void:
 	for u in _markers:
 		_kill_tween(_move_tweens, u)
 		_kill_tween(_face_tweens, u)
+		_kill_tween(_pose_tweens, u)
+		_reset_pose(u)
 		var root: Node3D = _markers[u]
 		root.scale = Vector3.ONE
 		root.position = _world_pos(u)
 		root.visible = not u.is_bailed and u.fog == Visibility.State.SIGHT
 		var label: Label3D = _hp_labels[u]
 		label.text = str(u.trion_hp)
+		_set_hp_bar(u, false)
 		(_figures[u] as Node3D).rotation.y = _facing_yaw(u.facing)
 
 
@@ -100,29 +160,70 @@ func snap(u: UnitState) -> void:
 		return
 	_kill_tween(_move_tweens, u)
 	_kill_tween(_face_tweens, u)
+	_kill_tween(_pose_tweens, u)
+	_reset_pose(u)
 	root.position = _world_pos(u)
 	(_figures[u] as Node3D).rotation.y = _facing_yaw(u.facing)
 
 
 ## Shows the selection ring under `u` (or clears it when null).
 func set_selected(u: UnitState) -> void:
+	_selected = u
 	for key in _rings:
 		var ring: MeshInstance3D = _rings[key]
 		ring.visible = key == u
 
 
+## World position of a unit's chest (where shots leave from and land).
+func chest_pos(u: UnitState) -> Vector3:
+	return _world_pos(u) + Vector3(0, 0.95, 0)
+
+
+## World position just above a unit's head (damage numbers).
+func head_pos(u: UnitState) -> Vector3:
+	return _world_pos(u) + Vector3(0, 1.75, 0)
+
+
+func has_marker(u: UnitState) -> bool:
+	return _markers.has(u)
+
+
 # --- Tween Helpers ----------------------------------------------------------
 
-## Tweens a marker from its current position to `world`.
+## Moves a marker from its current position to `world` with a little
+## character: a quick crouch (anticipation), a stretched hop along the way,
+## and a squash on landing. Total time is `duration`, same as before.
 func tween_to(u: UnitState, world: Vector3, duration: float = 0.35) -> void:
 	var root: Node3D = _markers.get(u)
 	if root == null:
 		return
 	_kill_tween(_move_tweens, u)
+	var windup := duration * 0.16
+	var travel := duration - windup
 	var tw := root.create_tween()
-	tw.tween_property(root, "position", world, duration) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	tw.tween_interval(windup)
+	tw.tween_property(root, "position", world, travel) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	_move_tweens[u] = tw
+
+	var pose: Node3D = _poses.get(u)
+	if pose == null:
+		return
+	_kill_tween(_pose_tweens, u)
+	var climb := absf(world.y - root.position.y) > 0.1
+	var hop := 0.3 if climb else 0.12
+	var ptw := pose.create_tween()
+	ptw.tween_property(pose, "scale", Vector3(1.1, 0.86, 1.1), windup).set_ease(Tween.EASE_OUT)
+	ptw.tween_property(pose, "scale", Vector3(0.93, 1.1, 0.93), travel * 0.45).set_ease(Tween.EASE_OUT)
+	ptw.parallel().tween_property(pose, "position:y", hop, travel * 0.45) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	ptw.tween_property(pose, "position:y", 0.0, travel * 0.4) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	ptw.parallel().tween_property(pose, "scale", Vector3.ONE, travel * 0.4)
+	ptw.tween_property(pose, "scale", Vector3(1.1, 0.9, 1.1), travel * 0.07)
+	ptw.tween_property(pose, "scale", Vector3.ONE, travel * 0.08)
+	ptw.tween_callback(_reset_pose.bind(u))
+	_pose_tweens[u] = ptw
 
 
 ## Turns the figure toward a new facing (shortest way round).
@@ -134,12 +235,44 @@ func tween_facing(u: UnitState, facing: int, duration: float = 0.35) -> void:
 	var target := fig.rotation.y + wrapf(_facing_yaw(facing) - fig.rotation.y, -PI, PI)
 	var tw := fig.create_tween()
 	tw.tween_property(fig, "rotation:y", target, duration) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	_face_tweens[u] = tw
 
 
-## Quick red flash on a unit that took damage.
-func flash_hit(u: UnitState) -> void:
+## Attack motion: a melee lunge toward `toward` (world position), or a short
+## recoil away from it for ranged shots.
+func play_attack(u: UnitState, toward: Vector3, melee: bool) -> void:
+	var pose: Node3D = _poses.get(u)
+	var root: Node3D = _markers.get(u)
+	if pose == null or root == null:
+		return
+	var dir := toward - root.position
+	dir.y = 0.0
+	if dir.length() < 0.001:
+		return
+	dir = dir.normalized()
+	_kill_tween(_pose_tweens, u)
+	_reset_pose(u)
+	var tw := pose.create_tween()
+	if melee:
+		tw.tween_property(pose, "position", -dir * 0.08, 0.05)
+		tw.parallel().tween_property(pose, "scale", Vector3(1.08, 0.92, 1.08), 0.05)
+		tw.tween_property(pose, "position", dir * 0.42, 0.07).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(pose, "scale", Vector3(0.94, 1.06, 0.94), 0.07)
+		tw.tween_property(pose, "position", Vector3.ZERO, 0.2).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(pose, "scale", Vector3.ONE, 0.2)
+	else:
+		tw.tween_property(pose, "position", -dir * 0.13, 0.04).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(pose, "scale", Vector3(1.05, 0.95, 1.05), 0.04)
+		tw.tween_property(pose, "position", Vector3.ZERO, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(pose, "scale", Vector3.ONE, 0.2)
+	tw.tween_callback(_reset_pose.bind(u))
+	_pose_tweens[u] = tw
+
+
+## A unit taking damage: a white pop, then red fading back to its colors,
+## with a squash-and-knockback away from `from_dir` (the attacker's side).
+func flash_hit(u: UnitState, from_dir: Vector3 = Vector3.ZERO) -> void:
 	var root: Node3D = _markers.get(u)
 	var mats: Array = _body_materials.get(u, [])
 	if root == null or mats.is_empty():
@@ -147,24 +280,50 @@ func flash_hit(u: UnitState) -> void:
 	var tw := root.create_tween().set_parallel(true)
 	for m in mats:
 		var mat: StandardMaterial3D = m
-		tw.tween_property(mat, "albedo_color", Color(1.0, 0.18, 0.18), 0.1)
+		mat.albedo_color = Color(1.6, 1.6, 1.6, mat.albedo_color.a)
+		tw.tween_property(mat, "albedo_color", HIT_COLOR, 0.07).set_delay(0.04)
 	tw.chain()
 	for m in mats:
 		var mat: StandardMaterial3D = m
-		tw.tween_property(mat, "albedo_color", _shade(u, mat), 0.28)
+		tw.tween_property(mat, "albedo_color", _shade(u, mat), 0.26)
 	tw.chain().tween_callback(_apply_body_style.bind(u))
 
+	var pose: Node3D = _poses.get(u)
+	if pose == null:
+		return
+	_kill_tween(_pose_tweens, u)
+	_reset_pose(u)
+	var push := Vector3(from_dir.x, 0.0, from_dir.z)
+	push = -push.normalized() * 0.16 if push.length() > 0.001 else Vector3.ZERO
+	var ptw := pose.create_tween()
+	# A held squash frame reads as a beat of hit-stop before the rebound.
+	ptw.tween_property(pose, "scale", Vector3(1.22, 0.8, 1.22), 0.03)
+	ptw.parallel().tween_property(pose, "position", push, 0.03)
+	ptw.tween_interval(0.05)
+	ptw.tween_property(pose, "scale", Vector3.ONE, 0.3).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+	ptw.parallel().tween_property(pose, "position", Vector3.ZERO, 0.22).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	ptw.tween_callback(_reset_pose.bind(u))
+	_pose_tweens[u] = ptw
 
-## Shrinks a bailed unit out and hides it.
+
+## Bail-out: the body flashes white, stretches into a streak of light, and is
+## gone, with a beam shooting skyward.
 func play_bail(u: UnitState) -> void:
 	var root: Node3D = _markers.get(u)
 	if root == null:
 		return
 	_kill_tween(_move_tweens, u)
 	_kill_tween(_face_tweens, u)
+	_kill_tween(_pose_tweens, u)
+	_reset_pose(u)
+	if fx != null and root.visible:
+		fx.bail_out(root.position, BoardUnits.team_color(u.team))
+	for m in _body_materials.get(u, []):
+		(m as StandardMaterial3D).albedo_color = Color(1.8, 1.8, 1.8)
 	var tw := root.create_tween()
-	tw.tween_property(root, "scale", Vector3(0.01, 0.01, 0.01), 0.35) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+	tw.tween_property(root, "scale", Vector3(1.15, 0.85, 1.15), 0.07)
+	tw.tween_property(root, "scale", Vector3(0.04, 2.6, 0.04), 0.24) \
+		.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func() -> void: root.visible = false)
 
 
@@ -174,7 +333,7 @@ func play_bail(u: UnitState) -> void:
 func show_ghost(u: UnitState, hex: Vector2i, floor: int = 0) -> void:
 	if _ghost == null:
 		_ghost = _build_ghost()
-	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
+	var team_color := BoardUnits.team_color(u.team)
 	var mat: StandardMaterial3D = _ghost_body.material_override
 	mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.35)
 	mat.emission = team_color
@@ -186,21 +345,57 @@ func show_ghost(u: UnitState, hex: Vector2i, floor: int = 0) -> void:
 
 # --- Vision Cones --------------------------------------------------------------
 
-## Draws one character's vision at (hex, floor) facing `facing`, occluded by
-## the city in 3D:
-##   - vision cones (focus, peripheral, awareness) are built from physics
-##     raycasts fired from the character's eye height against the building
-##     solids (CityBuildings.COLLISION_LAYER): every ray stops at the first
-##     wall, so the cone has the true shape of what the character can see.
-##     Inside a building the character sees out only within WINDOW_REACH of
-##     the outer wall (`own_rect` is the building it stands in, if any).
-##   - shadow-casting lights at eye height (a narrow focus spotlight, a wide
-##     peripheral one, and a soft awareness glow) — light ray casting: the
-##     buildings throw real shadows, so the lit area is the visible area.
+## Draws the selected character's vision at (hex, floor) facing `facing`:
+## one shape combining the all-round detection radius and the long sight cone
+## (Visibility.profile), occluded by the city in 3D. Every edge comes from a
+## physics raycast fired from the character's eye height against the
+## building solids, so the shape is exactly what the character can see.
+## Inside a building it sees out only within WINDOW_REACH of the outer wall
+## (`own_rect` is the building it stands in, if any). Shadow-casting lights
+## at eye height light the same area (buildings throw real shadows).
 ## Planning shows it at the unit's projected position and facing.
 func show_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect: Dictionary = {}) -> void:
 	clear_vision()
-	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
+	_vision = _build_vision(u, hex, floor, facing, own_rect, true)
+	_vision.name = "SelectedVision"
+	add_child(_vision)
+
+
+## Faint vision shapes for the rest of the squad, so you can always tell
+## where every character is looking. `entries`: [{unit, hex, floor, facing,
+## own_rect}]. Rebuilt only when something in it changed.
+func show_squad_vision(entries: Array) -> void:
+	var key := ""
+	for e in entries:
+		key += "%s|%s|%d|%d;" % [str(e["unit"].get_instance_id()), str(e["hex"]), int(e["floor"]), int(e["facing"])]
+	if _squad_vision != null and key == _squad_vision_key:
+		_squad_vision.visible = true
+		return
+	clear_squad_vision()
+	_squad_vision_key = key
+	_squad_vision = Node3D.new()
+	_squad_vision.name = "SquadVision"
+	add_child(_squad_vision)
+	for e in entries:
+		_squad_vision.add_child(_build_vision(e["unit"], e["hex"], int(e["floor"]), int(e["facing"]), e.get("own_rect", {}), false))
+
+
+func clear_squad_vision() -> void:
+	if _squad_vision != null:
+		_squad_vision.queue_free()
+		_squad_vision = null
+	_squad_vision_key = ""
+
+
+func hide_squad_vision() -> void:
+	if _squad_vision != null:
+		_squad_vision.visible = false
+
+
+## One character's combined vision shape; `lit` adds the eye lights and a
+## brighter fill (the selected character).
+func _build_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect: Dictionary, lit: bool) -> Node3D:
+	var team_color := BoardUnits.team_color(u.team)
 	var saved := [u.hex, u.floor, u.facing]
 	u.hex = hex
 	u.floor = floor
@@ -215,31 +410,130 @@ func show_vision(u: UnitState, hex: Vector2i, floor: int, facing: int, own_rect:
 	var origin := HexCoord.axial_to_world(hex, _hex_size)
 	origin.y = HexCoord.GROUND_Y + floor * HexCoord.FLOOR_HEIGHT
 	var eye := origin + Vector3(0, Visibility.EYE_HEIGHT * HexCoord.FLOOR_HEIGHT, 0)
-	var focus_r := (int(p["focus_range"]) + 0.5) * step
-	var peri_r := (int(p["peripheral_range"]) + 0.5) * step
-	var aware_r := (int(p["awareness"]) + 0.5) * step
+	var sight_r := (int(p["sight_range"]) + 0.5) * step
+	var detect_r := (int(p["detect"]) + 0.5) * step
+	var half := float(p["sight_half"])
 
-	_vision = Node3D.new()
-	_vision.name = "VisionCones"
-	_vision.position = origin + Vector3(0, 0.04, 0)
-	add_child(_vision)
-	_vision.add_child(_occluded_fan(eye, fwd, float(p["peripheral_half"]), peri_r, own_rect, Color(team_color, 0.08)))
-	_vision.add_child(_occluded_fan(eye, fwd, float(p["focus_half"]), focus_r, own_rect, Color(team_color, 0.14)))
-	_vision.add_child(_occluded_fan(eye, fwd, 180.0, aware_r, own_rect, Color(1, 1, 1, 0.05)))
+	var root := Node3D.new()
+	root.position = origin + Vector3(0, 0.04 if lit else 0.03, 0)
+	# The selected character's area is lit by the spotlight, so its fill
+	# stays light; the rest of the squad gets a faint tint.
+	var fill := Color(team_color, 0.08 if lit else 0.1)
+	var edge := Color(team_color.lerp(Color.WHITE, 0.5), 1.0 if lit else 0.7)
+	var pts := _keyhole_points(eye, fwd, detect_r, sight_r, half, own_rect)
+	root.add_child(_keyhole_mesh(pts, fill, edge, 0.07 if lit else 0.05))
+	if not lit:
+		return root
+	_vision_center = root.position
+	_vision_outline = PackedVector3Array()
+	for p_local in pts:
+		_vision_outline.append(root.position + p_local)
 
-	# Light ray casting: real shadowed lights from the eye.
-	# Beams start just in front of the figure so its own body doesn't shadow them.
+	# Light ray casting: real shadowed lights from the eye. Beams start just
+	# in front of the figure so its own body doesn't shadow them.
 	var tint := team_color.lerp(Color.WHITE, 0.55)
-	var lens := eye - _vision.position + fwd * 0.45 * _hex_size
-	_vision.add_child(_eye_light(lens, fwd, float(p["focus_half"]), focus_r, tint, 6.0))
-	_vision.add_child(_eye_light(lens, fwd, float(p["peripheral_half"]), peri_r, tint, 2.5))
+	var lens := eye - root.position + fwd * 0.45 * _hex_size
+	root.add_child(_eye_light(lens, fwd, half, sight_r, tint, 2.2))
 	var glow := OmniLight3D.new()
-	glow.position = eye - _vision.position + Vector3(0, 1.0, 0)
-	glow.omni_range = aware_r
+	glow.position = eye - root.position + Vector3(0, 1.0, 0)
+	glow.omni_range = detect_r
 	glow.light_color = tint
-	glow.light_energy = 1.2
+	glow.light_energy = 0.8
 	glow.shadow_enabled = true
-	_vision.add_child(glow)
+	root.add_child(glow)
+	return root
+
+
+## Outline of the combined vision shape (relative to the character): a
+## circle of `detect_r` all round with the sight cone (`half_deg` either side
+## of `fwd`) reaching out to `sight_r`. Every point is a raycast, so walls cut
+## it. Points never sit exactly on the center, so each keeps its direction.
+func _keyhole_points(eye: Vector3, fwd: Vector3, detect_r: float, sight_r: float, half_deg: float,
+		own_rect: Dictionary) -> Array[Vector3]:
+	var rays: Array = []   # [angle_deg, radius]
+	var a := -180.0
+	while a < -half_deg:
+		rays.append([a, detect_r])
+		a += 4.0
+	rays.append([-half_deg, detect_r])
+	a = -half_deg
+	while a <= half_deg:
+		rays.append([a, sight_r])
+		a += 1.5
+	rays.append([half_deg, sight_r])
+	rays.append([half_deg, detect_r])
+	a = half_deg + 4.0
+	while a < 180.0:
+		rays.append([a, detect_r])
+		a += 4.0
+	rays.append([180.0, detect_r])
+
+	var space := get_world_3d().direct_space_state
+	var pts: Array[Vector3] = []
+	for r in rays:
+		var dir := fwd.rotated(Vector3.UP, deg_to_rad(float(r[0])))
+		pts.append(dir * maxf(0.05, _ray_reach(space, eye, dir, float(r[1]), own_rect)))
+	return pts
+
+
+## The vision shape as a translucent fill plus a bright outline ribbon, so it
+## reads at any zoom.
+func _keyhole_mesh(pts: Array[Vector3], fill: Color, edge: Color, edge_width: float) -> Node3D:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(1, pts.size()):
+		st.set_normal(Vector3.UP)
+		st.add_vertex(Vector3.ZERO)
+		st.add_vertex(pts[i - 1])
+		st.add_vertex(pts[i])
+	var body := MeshInstance3D.new()
+	body.mesh = st.commit()
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	body.material_override = _flat_material(fill)
+
+	# Outline as a thin ribbon (lines are 1 px on most GPUs).
+	var lt := SurfaceTool.new()
+	lt.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var width := edge_width * _hex_size
+	for i in range(1, pts.size()):
+		var p0: Vector3 = pts[i - 1]
+		var p1: Vector3 = pts[i]
+		var along := p1 - p0
+		if along.length() < 0.001:
+			continue
+		var side := along.cross(Vector3.UP).normalized() * width
+		lt.set_normal(Vector3.UP)
+		lt.add_vertex(p0 - side)
+		lt.add_vertex(p0 + side)
+		lt.add_vertex(p1 + side)
+		lt.add_vertex(p0 - side)
+		lt.add_vertex(p1 + side)
+		lt.add_vertex(p1 - side)
+	var outline := MeshInstance3D.new()
+	outline.mesh = lt.commit()
+	outline.position.y = 0.01
+	outline.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	outline.material_override = _flat_material(edge)
+
+	var node := Node3D.new()
+	node.add_child(body)
+	node.add_child(outline)
+	return node
+
+
+func _flat_material(color: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.no_depth_test = false
+	mat.albedo_color = color
+	return mat
+
+
+## World-space direction `u`'s figure faces (for screen markers).
+func facing_vector(u: UnitState) -> Vector3:
+	return _facing_vector(u.facing)
 
 
 ## Board extent in XZ (vision rays stop at the edge of the map).
@@ -251,6 +545,17 @@ func clear_vision() -> void:
 	if _vision != null:
 		_vision.queue_free()
 		_vision = null
+	_vision_outline = PackedVector3Array()
+
+
+## World-space outline of what the selected character can see (empty when no
+## vision is shown), and the point it is seen from.
+func vision_outline() -> PackedVector3Array:
+	return _vision_outline
+
+
+func vision_center() -> Vector3:
+	return _vision_center
 
 
 ## Spotlight from the eye along `fwd` (tilted slightly down so the street
@@ -306,35 +611,6 @@ func _box_exit_2d(p: Vector2, d: Vector2, b: Rect2) -> float:
 	return maxf(0.0, t)
 
 
-## A flat translucent fan whose edge is the raycast reach in each direction.
-func _occluded_fan(eye: Vector3, fwd: Vector3, half_deg: float, radius: float, own_rect: Dictionary, color: Color) -> MeshInstance3D:
-	var space := get_world_3d().direct_space_state
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var segments := maxi(12, int(half_deg / 1.5))
-	var prev := Vector3.ZERO
-	for i in segments + 1:
-		var a := deg_to_rad(-half_deg + 2.0 * half_deg * i / segments)
-		var dir := fwd.rotated(Vector3.UP, a)
-		var v := dir * _ray_reach(space, eye, dir, radius, own_rect)
-		if i > 0:
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3.ZERO)
-			st.add_vertex(prev)
-			st.add_vertex(v)
-		prev = v
-	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.albedo_color = color
-	mi.material_override = mat
-	return mi
-
-
 func clear_ghost() -> void:
 	if _ghost != null:
 		_ghost.visible = false
@@ -386,68 +662,155 @@ func _spawn_marker(u: UnitState) -> void:
 	root.name = "Unit_" + u.display_name()
 	root.position = _world_pos(u)
 
-	var team_color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
+	var team_color := BoardUnits.team_color(u.team)
 
-	# Selection ring (hidden until this unit is selected).
+	# Selection ring (hidden until this unit is selected): a bright dashed
+	# ring that pulses and slowly turns (see _process).
 	var ring := MeshInstance3D.new()
 	ring.name = "SelectionRing"
-	var ring_cyl := CylinderMesh.new()
-	ring_cyl.top_radius = 0.5
-	ring_cyl.bottom_radius = 0.5
-	ring_cyl.height = 0.04
-	ring.mesh = ring_cyl
-	ring.material_override = _make_emissive(Color(1.0, 0.9, 0.3), 2.5)
-	ring.position = Vector3(0, 0.02, 0)
+	ring.mesh = _dashed_ring_mesh(0.5, 0.6, 8)
+	ring.material_override = _make_emissive(SELECT_COLOR, 3.0)
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ring.position = Vector3(0, 0.035, 0)
 	ring.visible = false
 	root.add_child(ring)
 
-	# Team base ring: always-on team identity at the unit's feet.
+	# Team base ring: always-on team identity at the unit's feet. Shape backs
+	# up the color: team 0 is a circle, team 1 a diamond.
 	var base := MeshInstance3D.new()
 	base.name = "TeamRing"
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.3
-	torus.outer_radius = 0.36
+	torus.outer_radius = 0.37
+	torus.rings = 32 if u.team == 0 else 4
+	torus.ring_segments = 6
 	base.mesh = torus
-	base.material_override = _make_emissive(team_color, 1.6)
+	base.material_override = _make_emissive(team_color, 1.8)
+	base.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	base.position.y = 0.03
+	if u.team != 0:
+		base.scale = Vector3(1.18, 1.0, 1.18)
 	root.add_child(base)
+
+	# Pose pivot: squash / stretch / lunge / hop happen here, so they never
+	# fight the replay's position tween on the root or the facing on the figure.
+	var pose := Node3D.new()
+	pose.name = "Pose"
+	root.add_child(pose)
 
 	var figure := _build_figure(u, team_color)
 	figure.scale = Vector3.ONE * 1.15
 	figure.rotation.y = _facing_yaw(u.facing)
-	root.add_child(figure)
+	pose.add_child(figure)
 
-	# Name + HP labels (always face the camera). Depth-tested so they are
-	# hidden behind solid geometry instead of floating on top of it.
+	# Name + HP (always face the camera). Depth-tested so they are hidden
+	# behind solid geometry instead of floating on top of it.
 	var name_label := Label3D.new()
 	name_label.text = u.unit_data.unit_name
-	name_label.position = Vector3(0, 2.35, 0)
+	name_label.position = Vector3(0, 2.3, 0)
 	name_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	name_label.pixel_size = 0.016
-	name_label.outline_size = 8
-	name_label.modulate = team_color
+	name_label.font_size = 40
+	name_label.pixel_size = 0.0115
+	name_label.outline_size = 12
+	name_label.modulate = team_color.lerp(Color.WHITE, 0.25)
+	name_label.outline_modulate = Color(0.02, 0.03, 0.06, 0.9)
 	root.add_child(name_label)
+
+	var bar := MeshInstance3D.new()
+	bar.name = "HpBar"
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1.04, 0.13)
+	bar.mesh = quad
+	bar.material_override = _hp_bar_material()
+	bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	bar.position = Vector3(0, 1.98, 0)
+	bar.set_instance_shader_parameter("team_color", team_color)
+	root.add_child(bar)
 
 	var label := Label3D.new()
 	label.text = str(u.trion_hp)
-	label.position = Vector3(0, 1.75, 0)
+	label.position = Vector3(0, 1.74, 0)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	label.pixel_size = 0.02
-	label.outline_size = 8
+	label.font_size = 40
+	label.pixel_size = 0.0105
+	label.outline_size = 12
+	label.outline_modulate = Color(0.02, 0.03, 0.06, 0.9)
 	root.add_child(label)
 
 	add_child(root)
 	_markers[u] = root
 	_hp_labels[u] = label
+	_hp_bars[u] = bar
 	_figures[u] = figure
+	_poses[u] = pose
 	_rings[u] = ring
+	_set_hp_bar(u, false)
 
 
-## A low-poly Border agent in a Trion combat suit, styled like the city:
-## matte team-colored jacket, dark trousers and boots, skin-tone head with
-## hair, a glowing team emblem, and a role weapon from the loadout (glowing
-## blade for attackers, long rifle for snipers, floating Trion cube for
-## shooters). Local +Z is "forward"; the node rotates to the unit's facing.
+func _hp_bar_material() -> ShaderMaterial:
+	if _hp_material == null:
+		_hp_material = ShaderMaterial.new()
+		_hp_material.shader = load("res://levels/board/hp_bar.gdshader")
+	return _hp_material
+
+
+## Updates a unit's HP bar. With `animate`, the lost segment lingers white
+## for a moment and then drains, so damage is readable at a glance.
+func _set_hp_bar(u: UnitState, animate: bool) -> void:
+	var bar: MeshInstance3D = _hp_bars.get(u)
+	if bar == null:
+		return
+	var frac := clampf(float(u.trion_hp) / maxf(1.0, float(u.unit_data.base_trion_hp)), 0.0, 1.0)
+	var shown: float = _hp_shown.get(u, frac)
+	_hp_shown[u] = frac
+	bar.set_instance_shader_parameter("fill", frac)
+	if not animate or shown <= frac:
+		bar.set_instance_shader_parameter("chip", frac)
+		return
+	var set_chip := func(v: float) -> void: bar.set_instance_shader_parameter("chip", v)
+	set_chip.call(shown)
+	var tw := bar.create_tween()
+	tw.tween_interval(0.3)
+	tw.tween_method(set_chip, shown, frac, 0.35).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+
+func _reset_pose(u: UnitState) -> void:
+	var pose: Node3D = _poses.get(u)
+	if pose != null:
+		pose.position = Vector3.ZERO
+		pose.scale = Vector3.ONE
+
+
+## A flat ring of `dashes` arc segments in the XZ plane.
+func _dashed_ring_mesh(inner: float, outer: float, dashes: int) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var steps := 6
+	for d in dashes:
+		var a0 := TAU * d / dashes
+		var span := TAU / dashes * 0.68
+		for i in steps:
+			var a := a0 + span * i / steps
+			var b := a0 + span * (i + 1) / steps
+			var ai := Vector3(cos(a) * inner, 0, sin(a) * inner)
+			var ao := Vector3(cos(a) * outer, 0, sin(a) * outer)
+			var bi := Vector3(cos(b) * inner, 0, sin(b) * inner)
+			var bo := Vector3(cos(b) * outer, 0, sin(b) * outer)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(ai)
+			st.add_vertex(bo)
+			st.add_vertex(ao)
+			st.add_vertex(ai)
+			st.add_vertex(bi)
+			st.add_vertex(bo)
+	return st.commit()
+
+
+## A low-poly agent in a combat suit, styled like the city: matte
+## team-colored jacket, dark trousers and boots, skin-tone head with hair,
+## glowing team-colored trim, and a role weapon from the loadout (glowing
+## blade for attackers, long rifle for snipers, floating energy cube for
+## shooters). A chevron on the ground shows which way the unit faces. Local +Z is "forward"; the node rotates to the unit's facing.
 func _build_figure(u: UnitState, team_color: Color) -> Node3D:
 	var fig := Node3D.new()
 	fig.name = "Figure"
@@ -475,6 +838,15 @@ func _build_figure(u: UnitState, team_color: Color) -> Node3D:
 	fig.add_child(_part(SphereMesh.new(), Vector3(0.25, 0.27, 0.25), Vector3(0, 1.27, 0), skin))
 	var hair_cap := _part(SphereMesh.new(), Vector3(0.27, 0.2, 0.28), Vector3(0, 1.34, -0.02), hair)
 	fig.add_child(hair_cap)
+
+	# Facing chevron on the ground in front of the feet.
+	var chevron := MeshInstance3D.new()
+	chevron.name = "FacingChevron"
+	chevron.mesh = _chevron_mesh()
+	chevron.material_override = _make_emissive(team_color.lightened(0.2), 2.0)
+	chevron.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	chevron.position = Vector3(0, 0.02, 0.42)
+	fig.add_child(chevron)
 
 	_add_weapon(fig, u, team_color)
 	_body_materials[u] = [suit, dark, boots, skin, hair]
@@ -516,10 +888,33 @@ func _add_weapon(fig: Node3D, u: UnitState, team_color: Color) -> void:
 		spin.tween_property(cube, "rotation:y", TAU, 2.4).from(0.0)
 
 
-func _part_material(u: UnitState, color: Color, xray: Material) -> StandardMaterial3D:
+## A "V" pointing along +Z, flat on the ground.
+func _chevron_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tip := Vector3(0, 0, 0.12)
+	var notch := Vector3(0, 0, 0.05)
+	var quads := [
+		[Vector3(-0.14, 0, -0.05), Vector3(-0.14, 0, 0.02), tip, notch],
+		[Vector3(0.14, 0, 0.02), Vector3(0.14, 0, -0.05), notch, tip],
+	]
+	for q in quads:
+		st.set_normal(Vector3.UP)
+		for i in [0, 1, 2, 0, 2, 3]:
+			st.add_vertex(q[i])
+	return st.commit()
+
+
+## Body part material: matte with a soft toon-like rim so figures separate
+## from the street and facades behind them, plus the x-ray pass.
+func _part_material(_u: UnitState, color: Color, xray: Material) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
-	mat.roughness = 0.75
+	mat.roughness = 0.7
+	mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	mat.rim_enabled = true
+	mat.rim = 0.55
+	mat.rim_tint = 0.35
 	mat.next_pass = xray
 	_base_colors[mat] = color
 	return mat
@@ -576,7 +971,7 @@ func _apply_body_style(u: UnitState) -> void:
 ## Radar Signal marker: a pulsing team-colored ring with a "?" — presence
 ## only, no identity or HP (GDD 4.3).
 func _build_ping(u: UnitState) -> Node3D:
-	var color := Color(0.15, 0.62, 1.0) if u.team == 0 else Color(1.0, 0.3, 0.22)
+	var color := BoardUnits.team_color(u.team)
 	var root := Node3D.new()
 	root.name = "RadarPing"
 

@@ -23,6 +23,7 @@ static func encode_unit(u: UnitData) -> Dictionary:
 		"attack": u.attack_rating,
 		"defense": u.defense_rating,
 		"trion_capacity": u.max_trion_capacity,
+		"talents": { "stamina": u.talent_stamina, "hp": u.talent_hp, "atk": u.talent_atk },
 		"main": _names(u.main_trigger_slots),
 		"sub": _names(u.sub_trigger_slots),
 	}
@@ -38,12 +39,13 @@ static func decode_squad(arr: Array) -> Array[UnitData]:
 static func decode_unit(d: Dictionary) -> UnitData:
 	var u := UnitData.new()
 	u.unit_name = str(d.get("name", "Unit"))
-	u.base_trion_hp = int(d.get("trion_hp", 100))
-	u.base_at_pool = int(d.get("at_pool", 8))
-	u.mobility_rating = int(d.get("mobility", 5))
-	u.attack_rating = int(d.get("attack", 5))
-	u.defense_rating = int(d.get("defense", 5))
-	u.max_trion_capacity = int(d.get("trion_capacity", 100))
+	# Stats come only from talents (validate_squad has checked them).
+	var talents: Variant = d.get("talents", {})
+	if talents is Dictionary:
+		u.talent_stamina = clampi(_whole(talents.get("stamina", 0)), 0, Talents.MAX_PER_STAT)
+		u.talent_hp = clampi(_whole(talents.get("hp", 0)), 0, Talents.MAX_PER_STAT)
+		u.talent_atk = clampi(_whole(talents.get("atk", 0)), 0, Talents.MAX_PER_STAT)
+	Talents.apply(u)
 	u.main_trigger_slots = _cards(d.get("main", []))
 	u.sub_trigger_slots = _cards(d.get("sub", []))
 	u.ensure_slot_arrays()
@@ -115,29 +117,67 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 # a legal loadout, and plans may only use cards the unit actually equips.
 # Each validator returns "" when valid, otherwise a human-readable error.
 
-const SQUAD_SIZE := 4
+const SQUAD_SIZE := 3
+## Largest coordinate / floor accepted in a plan target. The map is 32x32;
+## anything outside it is ignored by the engine, this only bounds the numbers.
+const MAX_TARGET_COORD := 256
+const MAX_TARGET_FLOOR := 16
 
 
 static func validate_squad(arr: Array) -> String:
 	if arr.size() != SQUAD_SIZE:
 		return "squad must have exactly %d units" % SQUAD_SIZE
+	var points := 0
 	for i in arr.size():
 		if not (arr[i] is Dictionary):
 			return "unit %d: malformed" % i
 		var err := _validate_unit(arr[i])
 		if err != "":
 			return "unit %d: %s" % [i, err]
+		var t: Variant = arr[i].get("talents", {})
+		for stat in Talents.STATS:
+			points += _whole(t.get(stat, 0)) if t is Dictionary else 0
+	if points > Talents.POINTS:
+		return "squad spends %d talent points (max %d)" % [points, Talents.POINTS]
 	return ""
 
 
+## A JSON number as an int (non-numbers become 0; callers validate first).
+static func _whole(v: Variant) -> int:
+	if typeof(v) == TYPE_INT:
+		return v
+	if typeof(v) == TYPE_FLOAT and is_finite(v) and absf(v) < 1.0e9:
+		return int(v)
+	return 0
+
+
 static func _validate_unit(d: Dictionary) -> String:
+	var talents: Variant = d.get("talents", {})
+	if not (talents is Dictionary):
+		return "malformed talents"
+	for stat in Talents.STATS:
+		var v: Variant = talents.get(stat, 0)
+		if not _in_range(v, 0, Talents.MAX_PER_STAT):
+			return "%s talent must be 0-%d" % [stat, Talents.MAX_PER_STAT]
+	# Names are shown to the opponent: text only, short, no markup.
+	if d.has("name"):
+		if not (d["name"] is String) or not NameRules.is_clean(d["name"], NameRules.UNIT_NAME_MAX):
+			return "name must be 1-%d plain characters" % NameRules.UNIT_NAME_MAX
+		if not NameRules.is_allowed(d["name"]):
+			return "name is not allowed"
+	# Stats a client sends must be exactly what its talents give.
+	var derived := UnitData.new()
+	derived.talent_stamina = int(talents.get("stamina", 0))
+	derived.talent_hp = int(talents.get("hp", 0))
+	derived.talent_atk = int(talents.get("atk", 0))
+	Talents.apply(derived)
 	var expected := {
-		"trion_hp": TriggerLibrary.STANDARD_TRION_HP,
-		"at_pool": TriggerLibrary.STANDARD_AT_POOL,
-		"mobility": TriggerLibrary.STANDARD_RATING,
-		"attack": TriggerLibrary.STANDARD_RATING,
-		"defense": TriggerLibrary.STANDARD_RATING,
-		"trion_capacity": TriggerLibrary.STANDARD_TRION_CAPACITY,
+		"trion_hp": derived.base_trion_hp,
+		"at_pool": derived.base_at_pool,
+		"mobility": derived.mobility_rating,
+		"attack": derived.attack_rating,
+		"defense": derived.defense_rating,
+		"trion_capacity": derived.max_trion_capacity,
 	}
 	for key in expected:
 		if d.has(key) and (not _is_number(d[key]) or int(d[key]) != int(expected[key])):
@@ -146,6 +186,12 @@ static func _validate_unit(d: Dictionary) -> String:
 	var sub: Variant = d.get("sub", [])
 	if not (main is Array) or not (sub is Array):
 		return "malformed trigger slots"
+	if main.size() > UnitData.MAX_MAIN_SLOTS or sub.size() > UnitData.MAX_SUB_SLOTS:
+		return "too many trigger slots"
+	for slot_list in [main, sub]:
+		for n in slot_list:
+			if n != null and not (n is String):
+				return "malformed trigger name"
 	if _count_cards(main) > UnitData.MAX_MAIN_SLOTS or _count_cards(sub) > UnitData.MAX_SUB_SLOTS:
 		return "too many triggers"
 	var total := 0
@@ -167,6 +213,15 @@ static func _validate_unit(d: Dictionary) -> String:
 
 static func _is_number(v: Variant) -> bool:
 	return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
+
+
+## A finite whole number within [lo, hi].
+static func _in_range(v: Variant, lo: int, hi: int) -> bool:
+	if typeof(v) == TYPE_INT:
+		return v >= lo and v <= hi
+	if typeof(v) == TYPE_FLOAT:
+		return is_finite(v) and v >= lo and v <= hi and v == floorf(v)
+	return false
 
 
 static func _count_cards(names: Array) -> int:
@@ -200,6 +255,8 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictio
 				var card_name: Variant = tdata.get("main" if slot == TurnPlan.MAIN_SLOT else "sub")
 				if card_name == null:
 					continue
+				if not (card_name is String):
+					return { "plan": null, "error": "unit %d tick %d: malformed card" % [u, t] }
 				if not allowed.has(str(card_name)):
 					return { "plan": null, "error": "unit %d tick %d: '%s' not equipped" % [u, t, str(card_name)] }
 				if not plan.assign(u, t, slot, TriggerLibrary.get_card(str(card_name))):
@@ -209,10 +266,11 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictio
 				var target: Variant = tdata.get(prefix + "target")
 				if target == null:
 					continue
-				if not (target is Array) or target.size() != 2 or not _is_number(target[0]) or not _is_number(target[1]):
+				if not (target is Array) or target.size() != 2 or not _in_range(target[0], -MAX_TARGET_COORD, MAX_TARGET_COORD) \
+						or not _in_range(target[1], -MAX_TARGET_COORD, MAX_TARGET_COORD):
 					return { "plan": null, "error": "unit %d tick %d: malformed target" % [u, t] }
 				var target_floor: Variant = tdata.get(prefix + "target_floor", 0)
-				if not _is_number(target_floor) or int(target_floor) < 0:
+				if not _in_range(target_floor, 0, MAX_TARGET_FLOOR):
 					return { "plan": null, "error": "unit %d tick %d: malformed target floor" % [u, t] }
 				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor), slot)
 	return { "plan": plan, "error": "" }

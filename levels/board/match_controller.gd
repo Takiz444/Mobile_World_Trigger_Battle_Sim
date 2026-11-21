@@ -70,6 +70,14 @@ var _rematch_btn: Button
 var _hangar_btn: Button
 var _prediction_label: Label
 
+# Focus on the character being commanded.
+## Camera zoom (ortho size) when a character is selected.
+const FOCUS_SIZE := 13.0
+var _spotlight: Spotlight
+var _markers: SquadMarkers
+## World distance between neighbouring hex centers.
+var _hex_step := 1.0
+
 
 func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
 	_board = board
@@ -80,6 +88,23 @@ func setup(board: HexBoard, timeline: TimelineUI, event_log: EventLogUI, ui_laye
 	_units_view = BoardUnits.new()
 	_units_view.name = "BoardUnits"
 	_board.add_child(_units_view)
+
+	_spotlight = Spotlight.new()
+	_spotlight.name = "Spotlight"
+	_spotlight.camera = camera
+	ui_layer.add_child(_spotlight)
+	ui_layer.move_child(_spotlight, 0)   # under every HUD panel
+	_markers = SquadMarkers.new()
+	_markers.name = "SquadMarkers"
+	_markers.camera = camera
+	ui_layer.add_child(_markers)
+	ui_layer.move_child(_markers, 1)     # over the spotlight, under the HUD
+	_markers.unit_tapped.connect(func(i: int) -> void:
+		if not _resolving and not _over_shown:
+			_timeline.select_unit(i)
+		else:
+			_focus_camera_only(i))
+	_hex_step = HexCoord.axial_to_world(Vector2i(1, 0), _board.hex_size).length()
 
 	_build_prediction_label(ui_layer)
 	_build_overlay(ui_layer)
@@ -118,6 +143,8 @@ func _start_match() -> void:
 	_event_log.add_message("Match started — plan your turn.", Color(0.6, 0.9, 0.6))
 	_timeline.set_locked(false)
 	_timeline.begin_new_turn()
+	_sync_unit_status()
+	_focus_unit(_timeline.get_current_unit())
 
 
 ## Places both squads and builds a fresh MatchState (the enemy plan is rebuilt
@@ -128,7 +155,8 @@ func _build_squads() -> void:
 	for u in _enemy_data:
 		u.ensure_slot_arrays()
 	_data_teams = [player_data, _enemy_data]
-	_ms = MatchRunner.build_match(player_data, _enemy_data, MATCH_SEED)
+	# A new seed every match: start positions (and hit rolls) differ each time.
+	_ms = MatchRunner.build_match(player_data, _enemy_data, randi() & 0x7FFFFFFF)
 	_player_states = _ms.teams[0]
 	_enemy_states = _ms.teams[1]
 	_build_board_view()
@@ -140,6 +168,9 @@ func _build_squads() -> void:
 func _build_board_view() -> void:
 	_board.set_map(_ms.tiles)
 	_units_view.setup(_ms.all_units(), _board.hex_size)
+	_markers.view = _units_view
+	_markers.set_units(_player_states)
+	_markers.visible = true
 	_board.set_cover(_ms.cover)
 	_board.set_buildings(_ms.buildings)
 	_board.set_wires(_ms.wires)
@@ -207,6 +238,7 @@ func _setup_online() -> void:
 
 	# The timeline plans only the local team's units.
 	_timeline.setup(_data_teams[_team])
+	_sync_unit_status()
 
 	_turn = int(body.get("turn", 1))
 	_overlay.visible = false
@@ -219,12 +251,32 @@ func _setup_online() -> void:
 		_show_match_over(winner)
 		return
 	_timeline.set_locked(false)
+	_focus_unit(_timeline.get_current_unit())
 	if MatchSession.live:
 		_start_live(body)
 
 
 func _on_tile_selected(hex: Vector2i) -> void:
+	if _resolving or _over_shown:
+		return
+	# Tapping one of your characters commands it.
+	var own := _own_unit_at(hex)
+	if own != -1 and own != _timeline.get_current_unit():
+		_timeline.select_unit(own)
+		return
+	if own != -1 and not _timeline.has_selected_slot():
+		_focus_unit(own)
+		return
 	_timeline.set_target_for_selected_slot(hex, _target_floor_for_click(hex))
+
+
+## Index of the local player's living character standing on `hex`, or -1.
+func _own_unit_at(hex: Vector2i) -> int:
+	for i in _player_states.size():
+		var u := _player_states[i]
+		if not u.is_bailed and u.hex == hex:
+			return i
+	return -1
 
 
 ## Picks the destination floor for a clicked hex. Movement cards may climb or
@@ -328,7 +380,9 @@ func _submit_online() -> void:
 	_show_waiting("Plan submitted.\nWaiting for opponent…")
 	var poll := await _poll_for_result()
 	if poll.is_empty():
-		_show_waiting("Lost connection to server.")
+		if is_inside_tree():
+			_show_waiting("This match is no longer available.")
+			_btn_row.visible = true
 		_resolving = false
 		return
 	_overlay.visible = false
@@ -345,12 +399,31 @@ func _submit_online() -> void:
 		_event_log.add_message("Rating %+d" % delta, Color(0.6, 0.85, 1.0))
 
 
+## Waits for the turn's result. Correspondence turns can take hours, so this
+## never gives up on its own: it polls slower over time, rides out network
+## blips ("Reconnecting…"), and only stops for an answer the server will not
+## change (the match or our seat is gone).
 func _poll_for_result() -> Dictionary:
-	for _i in 300:  # up to ~5 minutes
-		await get_tree().create_timer(POLL_INTERVAL).timeout
-		var resp := await _backend.get_match(_match_id, _token)
+	var polls := 0
+	var failures := 0
+	while is_inside_tree():
+		var wait := POLL_INTERVAL if polls < 60 else (5.0 if polls < 300 else 15.0)
+		await get_tree().create_timer(wait).timeout
+		if not is_inside_tree():
+			break
+		polls += 1
+		var resp := await _backend.get_match(_match_id, _token, _turn)
 		if not resp.get("success", false):
-			return {}
+			var status := int(resp.get("status", 0))
+			if status == 404 or status == 403:
+				return {}
+			failures += 1
+			if failures == 3:
+				_show_waiting("Connection lost.\nReconnecting…")
+			continue
+		if failures >= 3:
+			_show_waiting("Plan submitted.\nWaiting for opponent…")
+		failures = 0
 		var b: Dictionary = resp["body"]
 		if int(b.get("winner", -1)) != -1:
 			return resp
@@ -432,16 +505,12 @@ func _animate_frame(snapshots: Dictionary, events: Array) -> void:
 	var by_name := {}
 	for u in _ms.all_units():
 		by_name[u.display_name()] = u
+	var shown: Array = []
 	for ev in events:
-		if int(ev.get("phase", -1)) != CombatEvent.Phase.RESOLUTION or int(ev.get("damage", 0)) <= 0:
-			continue
-		var target: UnitState = by_name.get(str(ev.get("target", "")))
-		if target == null:
-			continue
-		if target.is_bailed:
-			_units_view.play_bail(target)
-		else:
-			_units_view.flash_hit(target)
+		shown.append({ "phase": int(ev.get("phase", -1)), "message": str(ev.get("message", "")),
+			"actor": by_name.get(str(ev.get("actor", ""))), "target": by_name.get(str(ev.get("target", ""))),
+			"damage": int(ev.get("damage", 0)) })
+	_present_combat(shown)
 
 
 ## Local mode: resolves + animates a full 6-tick turn and returns the winner
@@ -467,6 +536,8 @@ func _replay_turn(player_plan: TurnPlan, enemy_plan: TurnPlan) -> int:
 
 
 func _begin_replay() -> void:
+	_spotlight.clear()
+	_units_view.hide_squad_vision()
 	_event_log.clear()
 	_board.clear_highlights()
 	_units_view.clear_ghost()
@@ -531,9 +602,13 @@ func _after_resolution(winner: int) -> void:
 		_refresh_fog_local(_view_salt())
 	_event_log.set_turn(_turn)
 	_event_log.add_message("Turn %d — plan your next move." % _turn, Color(0.6, 0.9, 0.6))
-	_timeline.set_locked(false)
-	_timeline.begin_new_turn()
+	# Not resolving any more *before* the new plan view is built, so vision
+	# cones and the spotlight come back for it.
 	_resolving = false
+	_timeline.set_locked(false)
+	_sync_unit_status()
+	_timeline.begin_new_turn()
+	_focus_unit(_timeline.get_current_unit())
 
 
 func _snapshot_units() -> Dictionary:
@@ -561,20 +636,209 @@ func _animate_moves(snapshots: Dictionary) -> void:
 
 func _animate_transitions(snapshots: Dictionary, events: Array[CombatEvent]) -> void:
 	_animate_moves(snapshots)
+	var states := Visibility.enemy_states(_ms, _team)
+	var shown: Array = []
 	for ev in events:
-		if ev.phase == CombatEvent.Phase.RESOLUTION and ev.damage > 0 and ev.target != null:
-			if ev.target.is_bailed:
-				_units_view.play_bail(ev.target)
-			else:
-				_units_view.flash_hit(ev.target)
+		if Visibility.event_visible(ev, _team, states):
+			shown.append({ "phase": ev.phase, "message": ev.message, "actor": ev.actor, "target": ev.target, "damage": ev.damage })
+	_present_combat(shown)
+
+
+# --- Combat presentation ------------------------------------------------------
+# Purely cosmetic: turns one tick's visible events ({phase, message, actor,
+# target, damage}; actor/target are UnitStates or null) into attack motions,
+# tracers, slashes, shield flares, hit reactions, damage numbers, and camera
+# shake. Attacks fire once the tick's movement has mostly played; nothing
+# here changes how long a tick takes.
+
+const ATTACK_DELAY := 0.2
+const BLADE_COLOR := Color(0.75, 1.0, 0.9)
+const MISS_COLOR := Color(0.8, 0.84, 0.9)
+const GUARD_COLOR := Color(0.55, 0.9, 1.0)
+
+var _present_serial := 0
+
+
+func _present_combat(events: Array) -> void:
+	_present_serial += 1
+	var serial := _present_serial
+	var fx: BoardFx = _units_view.fx
+	if fx == null:
+		return
+	var attackers := {}   # target UnitState -> world position the hit came from
+	var attacks: Array = []
+	var results: Array = []
+	for ev in events:
+		var actor: UnitState = ev["actor"]
+		var target: UnitState = ev["target"]
+		var message: String = ev["message"]
+		match int(ev["phase"]):
+			CombatEvent.Phase.STATE:
+				if _on_board(actor) and message.contains("Bagworm"):
+					fx.ground_pulse(_units_view.chest_pos(actor) - Vector3(0, 0.9, 0), Color(0.6, 0.7, 1.0))
+			CombatEvent.Phase.DEFENSE:
+				if _on_board(actor):
+					fx.shield_flash(_units_view.chest_pos(actor), Vector3.ZERO, GUARD_COLOR, true)
+			CombatEvent.Phase.ATTACK:
+				if actor != null and target != null and actor != target and actor.team != target.team:
+					attacks.append(ev)
+			CombatEvent.Phase.RESOLUTION:
+				if target != null and (int(ev["damage"]) > 0 or message.contains("weighed down")):
+					results.append(ev)
+	if attacks.is_empty() and results.is_empty():
+		return
+	await get_tree().create_timer(ATTACK_DELAY).timeout
+	if serial != _present_serial or not is_inside_tree():
+		return   # a newer tick (or a scene change) took over
+	var impact_delay := 0.0
+	for ev in attacks:
+		var actor: UnitState = ev["actor"]
+		var target: UnitState = ev["target"]
+		var message: String = ev["message"]
+		if not _on_board(actor) or not _on_board(target):
+			continue   # one side is in the fog: no line drawn back to a hidden shooter
+		var from := _units_view.chest_pos(actor)
+		var to := _units_view.chest_pos(target)
+		var card := _card_in_message(message)
+		var melee := HexCoord.distance(actor.hex, target.hex) <= 1 and actor.floor == target.floor
+		if card != null:
+			melee = card.card_type == TriggerCard.CardType.MELEE
+		var heavy := card != null and card.power >= 6
+		var missed := message.contains("misses")
+		var color := BoardUnits.team_color(actor.team)
+		attackers[target] = from
+		_units_view.play_attack(actor, to, melee)
+		if melee:
+			fx.slash(to, to - from, BLADE_COLOR.lerp(color, 0.35), heavy)
+		else:
+			var aim := to
+			if missed:
+				var side := (to - from).cross(Vector3.UP).normalized()
+				aim = to + side * 0.55 + Vector3(0, 0.25, 0) + (to - from).normalized() * 1.5
+			fx.muzzle_flash(from + (to - from).normalized() * 0.35, color, heavy)
+			var arc := 0.0
+			if card != null and card.curved:
+				arc = 1.0
+			elif card != null and card.homing:
+				arc = 0.45
+			impact_delay = maxf(impact_delay, fx.tracer(from, aim, color, arc, heavy))
+		if missed:
+			fx.popup(_units_view.head_pos(target), "MISS", MISS_COLOR)
+		elif message.contains("mitigated") and not message.contains("mitigated 0.0"):
+			fx.shield_flash(to, from - to, GUARD_COLOR)
+	if results.is_empty():
+		return
+	if impact_delay > 0.0:
+		await get_tree().create_timer(impact_delay).timeout
+		if serial != _present_serial or not is_inside_tree():
+			return
+	var worst := 0
+	for ev in results:
+		var target: UnitState = ev["target"]
+		if not _units_view.has_marker(target):
+			continue
+		var damage := int(ev["damage"])
+		var at := _units_view.chest_pos(target)
+		var from_dir := Vector3.ZERO
+		if attackers.has(target):
+			from_dir = (attackers[target] as Vector3) - at
+		if damage <= 0:
+			fx.popup(_units_view.head_pos(target), "WEIGHTED", Color(0.75, 0.75, 0.85))
+			fx.ground_pulse(at - Vector3(0, 0.9, 0), Color(0.6, 0.6, 0.7))
+			continue
+		if target.is_bailed:
+			_units_view.play_bail(target)
+			fx.popup(_units_view.head_pos(target), "BAIL OUT", Color(1.0, 0.9, 0.5), true)
+			worst = maxi(worst, 12)
+		elif _on_board(target):
+			_units_view.flash_hit(target, from_dir)
+			fx.impact(at, BoardUnits.team_color(1 - target.team), damage >= 8)
+			fx.popup(_units_view.head_pos(target), "-%d" % damage, Color(1.0, 0.5, 0.4), damage >= 8)
+			worst = maxi(worst, damage)
+	if worst > 0 and _camera != null:
+		_camera.shake(clampf(worst / 12.0, 0.25, 1.0))
+
+
+## Whether the local player currently sees `u` standing on the board.
+func _on_board(u: UnitState) -> bool:
+	return u != null and u.hex != OFFBOARD and _is_known(u) and _units_view.has_marker(u)
+
+
+## The trigger named in an attack message ("... with Asteroid for 5"), or null.
+func _card_in_message(message: String) -> TriggerCard:
+	if message.contains("Lead Bullet"):
+		return TriggerLibrary.get_card("Lead Bullet")
+	for card in TriggerLibrary.all_cards():
+		if message.contains(" with %s " % card.card_name):
+			return card
+	return null
 
 
 # --- Targeting / Camera -----------------------------------------------------
 
 func _on_unit_selected(i: int) -> void:
-	if _camera == null or i < 0 or i >= _player_states.size():
+	_focus_unit(i)
+
+
+## Zooms the camera onto character `i` and lights it up.
+func _focus_unit(i: int) -> void:
+	if i < 0 or i >= _player_states.size() or _player_states[i].is_bailed:
 		return
-	_camera.recenter(_board.hex_to_world(_player_states[i].hex))
+	var u := _player_states[i]
+	if _camera != null and u.hex != OFFBOARD:
+		_camera.focus_on(_board.hex_to_world_at(u.hex, u.floor), minf(_camera.size, FOCUS_SIZE))
+	_update_spotlight(_timeline.get_selected_target_info())
+
+
+## Copies each character's HP / bail-out into the timeline tabs.
+func _sync_unit_status() -> void:
+	for i in _player_states.size():
+		var u := _player_states[i]
+		_timeline.set_unit_status(i, u.trion_hp, u.unit_data.base_trion_hp, u.is_bailed)
+
+
+## Fog-of-war spotlight: lights exactly what the commanded character can see
+## from where it will be (and the way it will face) when the selected action
+## fires; everything else is dimmed. Zooms out if the action's reach doesn't
+## fit on screen.
+func _update_spotlight(info: Dictionary) -> void:
+	if _spotlight == null:
+		return
+	var idx: int = info.get("unit", _timeline.get_current_unit())
+	if _resolving or _over_shown or idx < 0 or idx >= _player_states.size() or _player_states[idx].is_bailed:
+		_spotlight.clear()
+		return
+	var tick: int = info.get("tick", -1)
+	var hex := _projected_hex(idx, tick)
+	var floor := _projected_floor(idx, tick)
+	if hex == OFFBOARD:
+		_spotlight.clear()
+		return
+	# Lit area = what this character can see (its vision shape, drawn by
+	# _update_vision at the same projected position and facing).
+	_spotlight.focus_shape(_units_view.vision_center(), _units_view.vision_outline())
+	# Keep the selected action's reach on screen.
+	var radius := (_action_reach(info.get("card")) + 0.65) * _hex_step
+	if _camera != null and info.get("card") != null and radius * 2.3 > _camera.size:
+		_camera.focus_on(_board.hex_to_world_at(hex, floor), radius * 2.3, 0.3)
+
+
+## How many hexes the action can reach (what the spotlight must show).
+func _action_reach(card: TriggerCard) -> float:
+	if card == null:
+		return 1.6
+	if TickEngine.is_move_card(card):
+		return float(maxi(TickEngine.JUMP_RANGE, TickEngine.WIRE_DASH_RANGE))
+	match card.card_type:
+		TriggerCard.CardType.MELEE:
+			return 1.0
+		TriggerCard.CardType.RANGED:
+			return float(card.attack_range)
+	if card.card_name == "Spider":
+		return float(TickEngine.SPIDER_RANGE)
+	if card.card_name == "Look":
+		return 3.0
+	return 1.0
 
 
 func _update_targeting() -> void:
@@ -586,7 +850,39 @@ func _update_targeting() -> void:
 	var idx := _timeline.get_current_unit()
 	if idx >= 0 and idx < _player_states.size():
 		_units_view.set_selected(_player_states[idx])
+	_markers.selected = idx
 	_update_vision(info)
+	_update_squad_vision(idx)
+	_update_spotlight(info)
+
+
+## Faint vision for every other living character in the squad (where it
+## stands and looks now), so the whole squad's view is readable at a glance.
+func _update_squad_vision(selected_idx: int) -> void:
+	if _resolving or _over_shown:
+		_units_view.hide_squad_vision()
+		return
+	var entries: Array = []
+	for i in _player_states.size():
+		var u := _player_states[i]
+		if i == selected_idx or u.is_bailed or u.hex == OFFBOARD:
+			continue
+		var own_rect: Dictionary = {}
+		if u.floor < _ms.building_floors(u.hex):
+			var ri := _ms.building_rect_index(u.hex)
+			if ri != -1:
+				own_rect = _ms.building_rects()[ri]
+		entries.append({ "unit": u, "hex": u.hex, "floor": u.floor, "facing": u.facing, "own_rect": own_rect })
+	_units_view.show_squad_vision(entries)
+
+
+## Camera glide only (badge taps while a turn is playing out).
+func _focus_camera_only(i: int) -> void:
+	if _camera == null or i < 0 or i >= _player_states.size():
+		return
+	var u := _player_states[i]
+	if u.hex != OFFBOARD and not u.is_bailed:
+		_camera.focus_on(_board.hex_to_world_at(u.hex, u.floor))
 
 
 ## Shows the selected character's vision cones where it will be (and which
@@ -892,7 +1188,7 @@ func _fit_prediction_label() -> void:
 	if _prediction_label == null:
 		return
 	var vs := get_viewport().get_visible_rect().size
-	_prediction_label.position = Vector2(0, 48)
+	_prediction_label.position = Vector2(0, TimelineUI.TOP_BAR_HEIGHT + 4.0)
 	_prediction_label.size = Vector2(vs.x, 34)
 
 
@@ -953,7 +1249,7 @@ func _build_overlay(ui_layer: CanvasLayer) -> void:
 	_hangar_btn = Button.new()
 	_hangar_btn.text = "Return to Hangar"
 	_hangar_btn.pressed.connect(func() -> void:
-		get_tree().change_scene_to_file("res://ui/hangar/hangar.tscn"))
+		UiTheme.change_scene(get_tree(), "res://ui/hangar/hangar.tscn"))
 	_btn_row.add_child(_hangar_btn)
 
 	ui_layer.add_child(_overlay)
@@ -978,6 +1274,9 @@ func _show_match_over(winner: int) -> void:
 	if _over_shown:
 		return
 	_over_shown = true
+	_spotlight.clear()
+	_markers.visible = false
+	_units_view.hide_squad_vision()
 	var won := winner == _team
 	var draw := winner == MatchRunner.DRAW
 	_result_label.text = "DRAW" if draw else ("VICTORY" if won else "DEFEAT")
@@ -1043,6 +1342,7 @@ func _submit_live() -> void:
 func _process(_delta: float) -> void:
 	if _live == null or _clock_label == null or _over_shown:
 		return
+	_live.since_turn = _turn   # a reconnect only needs turns we haven't replayed
 	var left := -1.0
 	if _live_deadline_ms >= 0:
 		left = maxf(0.0, (_live_deadline_ms - Time.get_ticks_msec()) / 1000.0)
@@ -1172,7 +1472,7 @@ func _build_surrender_button(ui_layer: CanvasLayer) -> void:
 	_surrender_btn.name = "SurrenderButton"
 	_surrender_btn.custom_minimum_size = Vector2(150, 40)
 	# Top-left, under the unit bar (the event log owns the top-right).
-	_surrender_btn.position = Vector2(12, 52)
+	_surrender_btn.position = Vector2(12, TimelineUI.TOP_BAR_HEIGHT + 6.0)
 	_surrender_btn.icon = _white_flag_icon()
 	_surrender_btn.pressed.connect(_on_surrender_pressed)
 	ui_layer.add_child(_surrender_btn)

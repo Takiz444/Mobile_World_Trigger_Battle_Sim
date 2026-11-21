@@ -147,7 +147,7 @@ All existing tests still pass. Older match stores still load: missing fields get
 ## 5. App Store launch checklist
 
 **Accounts & privacy**
-- [ ] **In-app account deletion** (Guideline 5.1.1(v)): the API exists (`POST /account/delete`). **TODO:** a Settings → Delete Account screen.
+- [x] **In-app account deletion** (Guideline 5.1.1(v)): `POST /account/delete` plus a two-tap **Delete Account** button in the Hangar.
 - [ ] **Sign in with Apple** (4.8): required if we add Google/Facebook login. Plan: a guest account first (as today), then optional linking to Apple ID / Game Center so progress survives a reinstall. Verify Apple identity tokens on the server.
 - [ ] **Keychain storage:** the client keeps its account secret in `user://account.json` as plain text. Move it to the iOS Keychain (needs a small native plugin) and switch to short-lived session tokens.
 - [ ] Privacy policy URL, App Privacy "nutrition labels", data retention policy.
@@ -155,12 +155,12 @@ All existing tests still pass. Older match stores still load: missing fields get
 
 **Networking**
 - [x] Protocol versioning: old builds are told to update (`NetProtocol`, bump on breaking changes).
-- [ ] **HTTPS/WSS only.** App Transport Security blocks `http://` and `ws://`. Ship the production URL as the default; the Hangar default is currently `http://127.0.0.1:8080`, and the URL field should be hidden in release builds.
+- [x] **HTTPS/WSS only.** Release builds refuse `http://` / `ws://` and hide the Server URL field (`ServerConfig`). **TODO (human):** set `ServerConfig.PRODUCTION_URL` to the deployed address.
 - [ ] Export compliance: HTTPS only → set `ITSAppUsesNonExemptEncryption = NO`.
 - [ ] Handle app backgrounding mid-match. iOS suspends the socket; LiveClient reconnects and resyncs on resume. Test this on real devices.
 
 **Content & community**
-- [ ] **Player names are user-generated content** (1.2): add a profanity filter, report/block, and a way to rename offenders.
+- [ ] **Player names are user-generated content** (1.2): names are cleaned of markup and checked against `common/net/blocked_names.txt` (`NameRules`). **TODO (human):** fill the blocklist (shipped empty); add report/block and a way to rename offenders.
 - [ ] Age rating questionnaire (cartoon/fantasy violence → likely 9+ or 12+).
 - [ ] **IP licensing (blocker, see §7).**
 

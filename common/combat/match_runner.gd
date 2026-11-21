@@ -7,11 +7,14 @@ extends RefCounted
 const DEFAULT_SEED := 12345
 ## Result code for a drawn match (live matches that hit the turn cap even).
 const DRAW := 2
+## No two characters (of either team) start closer than this many hexes.
+const SPAWN_MIN_DISTANCE := 3
 
 
 ## Builds a fresh MatchState on the city map (MapData) and places both
-## squads on their spawn hexes facing the map center. Team 0 starts on the
-## bottom half, team 1 on the top half.
+## squads at random street hexes (random_spawns), facing the map center.
+## The placement follows from `seed`, so the server can rebuild a match; the
+## server never reveals the seed, so nobody can predict where enemies start.
 static func build_match(
 	player_data: Array[UnitData],
 	enemy_data: Array[UnitData],
@@ -23,14 +26,96 @@ static func build_match(
 	ms.buildings = map.buildings
 	ms.cover = map.cover
 	var squads := [player_data, enemy_data]
+	var spots := random_spawns(ms, player_data.size() + enemy_data.size(), seed)
+	var next := 0
 	for team in 2:
 		var states: Array[UnitState] = []
 		var data: Array = squads[team]
 		for i in data.size():
-			var hex: Vector2i = map.spawns[team][i % map.spawns[team].size()]
-			states.append(UnitState.new(data[i], team, hex, map.facing_toward_center(hex)))
+			var hex: Vector2i = spots[next]
+			next += 1
+			states.append(UnitState.new(data[i], team, hex, open_facing(ms, hex, map.facing_toward_center(hex))))
 		ms.setup_team(team, states)
 	return ms
+
+
+## The direction with the longest open street ahead of `hex` (so nobody
+## starts the match staring at a wall); ties go to `preferred`.
+static func open_facing(ms: MatchState, hex: Vector2i, preferred: int) -> int:
+	var best := preferred
+	var best_run := -1
+	for k in 6:
+		var d := posmod(preferred + (k + 1) / 2 * (1 if k % 2 == 1 else -1), 6)
+		var run := 0
+		var at := hex
+		while run < Visibility.SIGHT_RANGE:
+			at = HexCoord.neighbor(at, d)
+			if not ms.floor_legal(at, 0):
+				break
+			run += 1
+		if run > best_run:
+			best_run = run
+			best = d
+	return best
+
+
+## `count` distinct open street hexes, at least SPAWN_MIN_DISTANCE apart,
+## chosen from `seed` (its own RNG, so the combat RNG sequence is untouched).
+## Only hexes in the largest connected street area are used, so every
+## character can reach every other.
+static func random_spawns(ms: MatchState, count: int, seed: int) -> Array[Vector2i]:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([seed, "spawns"])
+	var open := _largest_street_area(ms)
+	# Fisher-Yates over a sorted list, so the result depends only on the seed.
+	open.sort()
+	for i in range(open.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp: Vector2i = open[i]
+		open[i] = open[j]
+		open[j] = tmp
+	var out: Array[Vector2i] = []
+	for min_gap in [SPAWN_MIN_DISTANCE, 2, 1]:
+		out.clear()
+		for hex in open:
+			var ok := true
+			for other in out:
+				if HexCoord.distance(hex, other) < min_gap:
+					ok = false
+					break
+			if ok:
+				out.append(hex)
+				if out.size() == count:
+					return out
+	push_error("not enough street hexes for %d spawns" % count)
+	return out
+
+
+static func _largest_street_area(ms: MatchState) -> Array[Vector2i]:
+	var seen := {}
+	var best: Array[Vector2i] = []
+	var keys: Array = ms.tiles.keys()
+	keys.sort()
+	for start in keys:
+		if seen.has(start) or not _spawnable(ms, start):
+			continue
+		var area: Array[Vector2i] = []
+		var queue: Array[Vector2i] = [start]
+		seen[start] = true
+		while not queue.is_empty():
+			var hex: Vector2i = queue.pop_back()
+			area.append(hex)
+			for n in HexCoord.neighbors(hex):
+				if not seen.has(n) and _spawnable(ms, n):
+					seen[n] = true
+					queue.append(n)
+		if area.size() > best.size():
+			best = area
+	return best
+
+
+static func _spawnable(ms: MatchState, hex: Vector2i) -> bool:
+	return ms.tiles.has(hex) and ms.floor_legal(hex, 0) and int(ms.cover.get(hex, 0)) == 0
 
 
 ## Resolves a full 6-tick turn deterministically.
@@ -39,10 +124,11 @@ static func resolve_turn(ms: MatchState, plan0: TurnPlan, plan1: TurnPlan) -> Ar
 	return engine.resolve(ms, plan0, plan1)
 
 
-## Returns the winning team (0 or 1), or -1 while the match is ongoing.
+## Returns the winning team (0 or 1), DRAW when both squads bailed out on the
+## same tick (attacks land simultaneously), or -1 while the match is ongoing.
 static func winner(ms: MatchState) -> int:
 	if team_all_bailed(ms, 0):
-		return 1
+		return DRAW if team_all_bailed(ms, 1) else 1
 	if team_all_bailed(ms, 1):
 		return 0
 	return -1

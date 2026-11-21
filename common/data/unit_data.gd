@@ -15,6 +15,10 @@ const MAX_SUB_SLOTS: int = 4
 ## Max Trion loadout budget (section 6.1 of the GDD).
 @export var max_trion_capacity: int = 100
 @export var main_trigger_slots: Array[TriggerCard] = []   # Max 4
+## Talent points spent on this character (see Talents; stats derive from them).
+@export var talent_stamina: int = 0
+@export var talent_hp: int = 0
+@export var talent_atk: int = 0
 @export var sub_trigger_slots: Array[TriggerCard] = []    # Max 4
 
 

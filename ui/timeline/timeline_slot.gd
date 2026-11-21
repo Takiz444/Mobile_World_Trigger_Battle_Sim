@@ -25,7 +25,8 @@ func _init(p_unit: int, p_tick: int, p_slot: int) -> void:
 	tick_index = p_tick
 	slot_id = p_slot
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	custom_minimum_size = Vector2(96, 44)
+	custom_minimum_size = Vector2(112, 44)
+	mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
 	_label = Label.new()
 	_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -60,19 +61,29 @@ func set_selected(sel: bool) -> void:
 
 
 func refresh() -> void:
+	# Coordinates mean nothing to players: show whether the action is aimed.
+	var needs_aim := card != null and TurnPlan.needs_target(card) and not has_target
+	_label.remove_theme_color_override("font_color")
 	if card != null:
 		_label.text = card.card_name
-		if has_target:
-			_label.text += " →%d,%d" % [target_hex.x, target_hex.y]
+		if has_target and TurnPlan.needs_target(card):
+			_label.text += " ✓"
 			if target_floor > 0:
-				_label.text += "·f%d" % target_floor
+				_label.text += " (floor %d)" % target_floor
+		elif needs_aim:
+			_label.text += " · aim"
+			_label.add_theme_color_override("font_color", Color(1.0, 0.8, 0.45))
 	else:
-		_label.text = "--"
+		_label.text = "+"
+		_label.add_theme_color_override("font_color", Color(0.45, 0.52, 0.65))
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.14, 0.2, 0.3, 0.95) if slot_id == 0 else Color(0.11, 0.15, 0.23, 0.95)
 	if is_selected:
 		sb.border_color = Color(0.55, 1.0, 0.4, 1.0)
 		sb.set_border_width_all(3)
+	elif needs_aim:
+		sb.border_color = Color(1.0, 0.75, 0.35, 0.95)
+		sb.set_border_width_all(2)
 	elif card != null:
 		sb.border_color = Color(0.45, 0.85, 1.0, 0.9)
 		sb.set_border_width_all(2)

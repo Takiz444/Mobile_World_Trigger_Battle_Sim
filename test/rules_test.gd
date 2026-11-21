@@ -188,7 +188,7 @@ func _test_split_targets() -> void:
 
 
 func _test_bagworm_cost() -> void:
-	var units := TriggerLibrary.sample_units()
+	var units := TestUnits.legacy()
 	var plan := TurnPlan.new(units)
 	var bag := TriggerLibrary.get_card("Bagworm")
 	for t in 3:
@@ -422,21 +422,22 @@ func _test_vision_profiles() -> void:
 	var sniper: UnitState = ms.teams[0][1]
 	var pa := Visibility.profile(attacker)
 	var ps := Visibility.profile(sniper)
-	_check(int(ps["focus_range"]) == int(pa["focus_range"]) + Visibility.SCOPE_BONUS, "sniper scope extends focus range")
+	_check(int(ps["sight_range"]) == int(pa["sight_range"]) + Visibility.SCOPE_BONUS, "sniper scope extends sight range")
+	_check(int(ps["detect"]) == int(pa["detect"]), "scopes don't change the detection radius")
 	sniper.floor = 3
-	_check(int(Visibility.profile(sniper)["focus_range"]) == int(ps["focus_range"]) + 3, "elevation extends vision")
+	_check(int(Visibility.profile(sniper)["sight_range"]) == int(ps["sight_range"]) + 3, "elevation extends sight")
 
-	# Focus cone is long and narrow; peripheral is wide and short.
+	# A long sight cone ahead, a short detection radius all round.
 	var viewer := attacker
-	var far_ahead := HexCoord.neighbor(Vector2i(0, 0), 0) * 7
-	_check(Visibility.in_view(viewer, far_ahead), "sees far straight ahead (focus cone)")
-	var side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 7
-	_check(not Visibility.in_view(viewer, side), "doesn't see far off to the side")
-	var near_side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 4
-	_check(Visibility.in_view(viewer, near_side), "peripheral vision catches nearby flanks")
-	var behind := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[3] * 4
-	_check(not Visibility.in_view(viewer, behind), "can't see behind")
-	_check(Visibility.sees_position(ms, viewer, HexCoord.neighbor(Vector2i(0, 0), 3), 0), "hears an adjacent enemy behind it")
+	var o := Vector2i(0, 0)
+	var r := Visibility.DETECT_RANGE
+	_check(Visibility.in_view(viewer, o + HexCoord.AXIAL_DIRECTIONS[0] * Visibility.SIGHT_RANGE), "sees far straight ahead (sight cone)")
+	_check(not Visibility.in_view(viewer, o + HexCoord.AXIAL_DIRECTIONS[0] * (Visibility.SIGHT_RANGE + 1)), "not past the sight range")
+	_check(not Visibility.in_view(viewer, o + HexCoord.AXIAL_DIRECTIONS[2] * (r + 1)), "doesn't see past the detection radius off to the side")
+	_check(not Visibility.in_view(viewer, o + HexCoord.AXIAL_DIRECTIONS[3] * (r + 1)), "can't see far behind")
+	for d in 6:
+		_check(Visibility.in_view(viewer, o + HexCoord.AXIAL_DIRECTIONS[d] * r), "detects within %d hexes in direction %d" % [r, d])
+	_check(Visibility.sees_position(ms, viewer, HexCoord.neighbor(o, 3), 0), "detects an adjacent enemy behind it")
 
 
 func _test_los_3d() -> void:
@@ -592,7 +593,69 @@ func _test_squad_validation() -> void:
 	unknown[0]["main"] = ["Black Trigger", null, null, null]
 	_check(PlanCodec.validate_squad(unknown) != "", "rejects unknown trigger")
 
-	_check(PlanCodec.validate_squad(squad.slice(0, 3)) != "", "rejects wrong squad size")
+	_check(PlanCodec.validate_squad(squad.slice(0, 2)) != "", "rejects wrong squad size")
+	_test_talents(squad)
+
+
+func _test_talents(squad: Array) -> void:
+	var units := TriggerLibrary.sample_units()
+	_check(Talents.squad_total(units) == Talents.POINTS, "default squad spends the whole talent pool")
+	_check(units.size() == 3 and units[0].unit_name == "Assassin" and units[1].unit_name == "Sniper"
+		and units[2].unit_name == "Scout", "three playable characters")
+
+	var u := UnitData.new()
+	Talents.set_points(u, "stamina", 2)
+	Talents.set_points(u, "hp", 1)
+	Talents.set_points(u, "atk", 3)
+	_check(u.base_at_pool == TriggerLibrary.STANDARD_AT_POOL + 2 * Talents.AT_PER_POINT
+		and u.base_trion_hp == TriggerLibrary.STANDARD_TRION_HP + Talents.HP_PER_POINT
+		and u.attack_rating == TriggerLibrary.STANDARD_RATING + 3 * Talents.ATK_PER_POINT, "talents raise AT, HP and ATK")
+	Talents.set_points(u, "atk", 99)
+	_check(u.talent_atk == Talents.MAX_PER_STAT, "a stat is capped at MAX_PER_STAT")
+	_check(not Talents.can_add(units, units[0], "hp"), "no points can be added once the pool is spent")
+
+	# Stamina still counts for melee characters (the penchant is a bonus).
+	var blade := TriggerLibrary.sample_units()[0]
+	var pool_before := TurnPlan.new([blade]).get_at_pool(0)
+	blade.talent_stamina += 1
+	Talents.apply(blade)
+	_check(TurnPlan.new([blade]).get_at_pool(0) == pool_before + Talents.AT_PER_POINT, "Stamina adds AT for melee characters")
+
+	var greedy := squad.duplicate(true)
+	greedy[0]["talents"] = { "stamina": 4, "hp": 4, "atk": 4 }
+	_check(PlanCodec.validate_squad(greedy) != "", "rejects a squad over the talent pool")
+	var capped := squad.duplicate(true)
+	capped[0]["talents"] = { "stamina": 5, "hp": 0, "atk": 0 }
+	_check(PlanCodec.validate_squad(capped) != "", "rejects more than MAX_PER_STAT in one stat")
+	var forged := squad.duplicate(true)
+	forged[0]["attack"] = int(forged[0]["attack"]) + 3
+	_check(PlanCodec.validate_squad(forged) != "", "rejects stats that don't match the talents")
+	var stripped := squad.duplicate(true)
+	stripped[0].erase("trion_hp")
+	var decoded := PlanCodec.decode_squad(stripped)
+	_check(decoded[0].base_trion_hp == units[0].base_trion_hp, "stats are derived from talents, not sent values")
+
+	# Random spawns: distinct, apart, on open ground, reproducible per seed.
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242)
+	var hexes: Array = []
+	var ok := true
+	for x in ms.all_units():
+		ok = ok and ms.floor_legal(x.hex, 0) and x.floor == 0
+		for h in hexes:
+			ok = ok and HexCoord.distance(h, x.hex) >= MatchRunner.SPAWN_MIN_DISTANCE
+		hexes.append(x.hex)
+	_check(ok and hexes.size() == 6, "spawns are on open ground and at least %d hexes apart" % MatchRunner.SPAWN_MIN_DISTANCE)
+	var facing_open := true
+	for x in ms.all_units():
+		facing_open = facing_open and ms.floor_legal(HexCoord.neighbor(x.hex, x.facing), 0)
+	_check(facing_open, "nobody starts facing straight into a wall")
+	var again := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242)
+	var other := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4243)
+	_check(again.teams[1][2].hex == ms.teams[1][2].hex, "the same seed gives the same spawns")
+	var differs := false
+	for i in 3:
+		differs = differs or other.teams[0][i].hex != ms.teams[0][i].hex
+	_check(differs, "a different seed gives different spawns")
 
 
 func _test_plan_validation() -> void:
@@ -643,7 +706,7 @@ func _test_state_snapshot() -> void:
 func _match(specs: Array) -> MatchState:
 	var ms := MatchState.new(1)
 	var teams: Array = [[], []]
-	var data := TriggerLibrary.sample_units()
+	var data := TestUnits.legacy()
 	for i in specs.size():
 		var spec: Array = specs[i]
 		var unit_data: UnitData = data[spec[3]] if spec.size() > 3 else data[i]

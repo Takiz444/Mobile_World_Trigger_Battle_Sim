@@ -49,6 +49,17 @@ func set_slot_target(slot: int, hex: Vector2i, floor: int = 0) -> void:
 		has_target = true
 
 
+func clear_slot_target(slot: int) -> void:
+	if slot == SUB:
+		sub_has_target = false
+		sub_target_hex = Vector2i.ZERO
+		sub_target_floor = 0
+	else:
+		has_target = false
+		target_hex = Vector2i.ZERO
+		target_floor = 0
+
+
 ## Both slots used by real actions (free actions like Look add no Mental Load).
 func is_dual_slot_active() -> bool:
 	return main_card != null and sub_card != null and not main_card.free_action and not sub_card.free_action

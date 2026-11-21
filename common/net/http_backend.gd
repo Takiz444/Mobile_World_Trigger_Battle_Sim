@@ -8,6 +8,10 @@ extends Node
 ## Each call uses its own HTTPRequest, so calls may overlap. GETs are retried
 ## on transport failures and 5xx/429 (mobile networks blip); POSTs are not,
 ## since the server may have applied them.
+##
+## Credentials (`auth`: a match token or account secret) are sent as an
+## "Authorization: Bearer" header or in the JSON body, never in the URL.
+## In release builds only https:// servers are accepted (see ServerConfig).
 
 const TIMEOUT_SEC := 10.0
 const GET_RETRY_DELAYS := [0.5, 1.5]
@@ -18,15 +22,17 @@ signal reachability_changed(reachable: bool)
 var _reachable := true
 
 
-func request(method: String, path: String, body: Dictionary = {}) -> Dictionary:
-	var out := await _request_once(method, path, body)
+func request(method: String, path: String, body: Dictionary = {}, auth: String = "") -> Dictionary:
+	if not ServerConfig.url_allowed(server_url):
+		return { "success": false, "status": 0, "body": {}, "error": "insecure server address (https required)" }
+	var out := await _request_once(method, path, body, auth)
 	if method == "GET":
 		for delay in GET_RETRY_DELAYS:
 			var status := int(out.get("status", 0))
 			if status != 0 and status != 429 and status < 500:
 				break
 			await get_tree().create_timer(delay).timeout
-			out = await _request_once(method, path, body)
+			out = await _request_once(method, path, body, auth)
 	var reachable := int(out.get("status", 0)) != 0
 	if reachable != _reachable:
 		_reachable = reachable
@@ -34,14 +40,17 @@ func request(method: String, path: String, body: Dictionary = {}) -> Dictionary:
 	return out
 
 
-func _request_once(method: String, path: String, body: Dictionary) -> Dictionary:
+func _request_once(method: String, path: String, body: Dictionary, auth: String = "") -> Dictionary:
 	var url := server_url.rstrip("/") + path
 	var http_method := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
 	var data := JSON.stringify(body) if not body.is_empty() else ""
 	var http := HTTPRequest.new()
 	http.timeout = TIMEOUT_SEC
 	add_child(http)
-	var err := http.request(url, ["Content-Type: application/json"], http_method, data)
+	var headers := PackedStringArray(["Content-Type: application/json"])
+	if auth != "":
+		headers.append("Authorization: Bearer %s" % auth)
+	var err := http.request(url, headers, http_method, data)
 	if err != OK:
 		http.queue_free()
 		return { "success": false, "status": 0, "body": {}, "error": "request failed (%d)" % err }
@@ -64,8 +73,9 @@ func health() -> Dictionary:
 	return await request("GET", "/health")
 
 
-func create_match(seed: int, squad: Array) -> Dictionary:
-	return await request("POST", "/match/create", { "seed": seed, "squad": squad })
+## The server picks the match seed; `mode` is "async" or "live".
+func create_match(squad: Array, mode: String = "async") -> Dictionary:
+	return await request("POST", "/match/create", { "squad": squad, "mode": mode })
 
 
 func join_match(match_id: String, squad: Array) -> Dictionary:
@@ -107,7 +117,13 @@ func queue_ranked(player_id: String, secret: String, squad: Array, mode := "asyn
 
 
 func poll_queue(ticket: String, secret: String) -> Dictionary:
-	return await request("GET", "/queue/%s?secret=%s" % [ticket, secret.uri_encode()])
+	return await request("GET", "/queue/%s" % ticket, {}, secret)
+
+
+## The account's unfinished matches ({matches: [{match_id, team, token, mode,
+## turn, live_url?}]}), for getting back into a match after a restart.
+func active_matches(player_id: String, secret: String) -> Dictionary:
+	return await request("POST", "/account/matches", { "player_id": player_id, "secret": secret })
 
 
 func cancel_queue(ticket: String, secret: String) -> Dictionary:
@@ -116,8 +132,10 @@ func cancel_queue(ticket: String, secret: String) -> Dictionary:
 
 ## With a player token the response includes that team's fogged view,
 ## replay frames, and own plans; without one only public match info.
-func get_match(match_id: String, token: String = "") -> Dictionary:
+## `since` limits the returned history to turns >= since (polling clients
+## only need the turns they have not replayed yet).
+func get_match(match_id: String, token: String = "", since: int = 0) -> Dictionary:
 	var path := "/match/%s" % match_id
-	if token != "":
-		path += "?token=%s" % token.uri_encode()
-	return await request("GET", path)
+	if since > 0:
+		path += "?since=%d" % since
+	return await request("GET", path, {}, token)

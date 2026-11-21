@@ -26,6 +26,13 @@ const WIRE_EVADE_BONUS := 0.1
 const WEIGHT_TICKS := 6
 const JUMP_RANGE := 2
 const WIRE_DASH_RANGE := 2
+## Spider wires are strung within this many hexes of the unit (the planning
+## UI highlights the same radius).
+const SPIDER_RANGE := 3
+## Targets further than this from the acting unit are ignored outright. Plans
+## come from clients: an absurd target must never reach HexCoord.line(), whose
+## cost grows with the distance.
+const MAX_TARGET_DISTANCE := 64
 
 ## Test hook: when true, skip hit rolls so every valid attack lands.
 var always_hit := false
@@ -126,7 +133,11 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 		var ta: TickAction = row[3]
 		for slot in [TickAction.MAIN, TickAction.SUB]:
 			if _is_spider(ta.slot_card(slot)) and ta.slot_has_target(slot):
-				_deploy_wire(ms, u, ta.slot_target(slot), tick, events)
+				var wire_hex := ta.slot_target(slot)
+				if _target_sane(ms, u.hex, wire_hex) and HexCoord.distance(u.hex, wire_hex) <= SPIDER_RANGE:
+					_deploy_wire(ms, u, wire_hex, tick, events)
+				else:
+					events.append(CombatEvent.new(tick, CombatEvent.Phase.MOVEMENT, "%s cannot string Spider wire that far" % u.display_name(), u))
 
 	# Then position shifts (movement), resolved simultaneously.
 	var intents: Array = []  # [UnitState, target cell Vector3i(q, r, floor), card]
@@ -156,7 +167,8 @@ func _movement_phase(ms: MatchState, plans: Array, tick: int, events: Array[Comb
 		var ta: TickAction = row[3]
 		for slot in [TickAction.MAIN, TickAction.SUB]:
 			var card := ta.slot_card(slot)
-			if card != null and card.card_name == "Look" and ta.slot_has_target(slot):
+			if card != null and card.card_name == "Look" and ta.slot_has_target(slot) \
+					and _target_sane(ms, u.hex, ta.slot_target(slot)):
 				var dir := attack_direction(u.hex, ta.slot_target(slot))
 				if dir != -1 and dir != u.facing:
 					u.facing = dir
@@ -283,9 +295,11 @@ static func _wire_path(ms: MatchState, a: Vector2i, b: Vector2i, team: int, need
 ##     (any building's top floor), over obstacles.
 ## Occupancy is checked by the caller.
 static func is_valid_move(ms: MatchState, from_hex: Vector2i, from_floor: int, to_hex: Vector2i, to_floor: int, card: TriggerCard = null, team: int = -1) -> bool:
-	if to_floor < 0 or not ms.has_tile(to_hex):
+	if to_floor < 0 or not ms.has_tile(to_hex) or absi(to_hex.x) > 100000 or absi(to_hex.y) > 100000:
 		return false
 	var d_hex := HexCoord.distance(from_hex, to_hex)
+	if d_hex > maxi(JUMP_RANGE, WIRE_DASH_RANGE):
+		return false
 	var d_floor := absi(to_floor - from_floor)
 	if card != null and card.jump and d_hex <= JUMP_RANGE and (d_hex > 0 or to_floor != from_floor):
 		var roof := ms.building_floors(to_hex)
@@ -430,33 +444,36 @@ func _resolve_attack(ms: MatchState, attacker: UnitState, card: TriggerCard, tar
 		attacker.stealth_active = false
 		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s reveals itself attacking" % attacker.display_name(), attacker))
 
-	var target := ms.get_unit_at_any_floor(target_hex)
+	# Failed attacks must not tell the attacker whether somebody stands on the
+	# hex (that would turn every attack into a free scanner through fog and
+	# Bagworm): out of range, no line of sight, stealth, and an empty hex all
+	# read the same, and none of them names a unit.
+	var reach := 1 if card.card_type == TriggerCard.CardType.MELEE else card.attack_range
+	if not _target_sane(ms, attacker.hex, target_hex) or HexCoord.distance(attacker.hex, target_hex) > reach \
+			or target_hex == attacker.hex:
+		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s attacks %s but it is out of range" % [attacker.display_name(), str(target_hex)], attacker))
+		return null
+	var dist := HexCoord.distance(attacker.hex, target_hex)
+
+	# Enemies first: a friendly unit on another floor of the same hex must not
+	# shadow the enemy standing there.
+	var target := ms.get_unit_at_any_floor(target_hex, 1 - attacker.team)
 	if target == null:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s attacks %s but no target present" % [attacker.display_name(), str(target_hex)], attacker))
-		return null
-	if target.team == attacker.team:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s skips friendly fire on %s" % [attacker.display_name(), target.display_name()], attacker, target))
-		return null
-
-	var dist := HexCoord.distance(attacker.hex, target.hex)
-
-	# Stealth concealment: cannot be targeted beyond the reveal range.
-	if target.stealth_active and dist > STEALTH_REVEAL_RANGE:
-		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s cannot find %s (stealth)" % [attacker.display_name(), target.display_name()], attacker, target))
-		return null
-
-	# Range check.
-	if card.card_type == TriggerCard.CardType.MELEE:
-		if dist != 1 or target.floor != attacker.floor:
-			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s melee out of range on %s" % [attacker.display_name(), target.display_name()], attacker, target))
+		var friend := ms.get_unit_at_any_floor(target_hex, attacker.team)
+		if friend != null:
+			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s skips friendly fire on %s" % [attacker.display_name(), friend.display_name()], attacker, friend))
 			return null
-	else:
-		if dist > card.attack_range:
-			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s %s out of range on %s" % [attacker.display_name(), card.card_name, target.display_name()], attacker, target))
-			return null
-		if not card.curved and not Visibility.has_los(ms, attacker.hex, attacker.floor, target.hex, target.floor):
-			events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s shot blocked (no line of sight)" % attacker.display_name(), attacker, target))
-			return null
+	var reachable := target != null
+	if reachable and target.stealth_active and dist > STEALTH_REVEAL_RANGE:
+		reachable = false   # Bagworm: cannot be targeted beyond the reveal range
+	if reachable and card.card_type == TriggerCard.CardType.MELEE and target.floor != attacker.floor:
+		reachable = false
+	if reachable and card.card_type != TriggerCard.CardType.MELEE and not card.curved \
+			and not Visibility.has_los(ms, attacker.hex, attacker.floor, target.hex, target.floor):
+		reachable = false
+	if not reachable:
+		events.append(CombatEvent.new(tick, CombatEvent.Phase.ATTACK, "%s attacks %s but hits nothing" % [attacker.display_name(), str(target_hex)], attacker))
+		return null
 
 	# The attacker turns toward its target (its vision cone and shield follow).
 	var face := attack_direction(attacker.hex, target.hex)
@@ -553,6 +570,14 @@ func _resolution_phase(ms: MatchState, pending: Array, tick: int, events: Array[
 
 
 # --- Card Classification ----------------------------------------------------
+
+## Whether a planned target is worth looking at: on the board and not absurdly
+## far from the acting unit.
+static func _target_sane(ms: MatchState, from: Vector2i, hex: Vector2i) -> bool:
+	if absi(hex.x) > 100000 or absi(hex.y) > 100000:
+		return false
+	return ms.has_tile(hex) and HexCoord.distance(from, hex) <= MAX_TARGET_DISTANCE
+
 
 func _card_is(card: TriggerCard, type: int) -> bool:
 	return card != null and card.card_type == type

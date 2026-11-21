@@ -34,10 +34,10 @@ func _run() -> void:
 	# Cheated squad (inflated HP) is rejected at create time.
 	var cheat_squad := PlanCodec.encode_squad(squad0)
 	cheat_squad[0]["trion_hp"] = 9999
-	var cheat := await b0.create_match(12345, cheat_squad)
+	var cheat := await b0.create_match(cheat_squad)
 	_check(int(cheat.get("status", 0)) == 400, "create rejects invalid squad")
 
-	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
+	var created := await b0.create_match(PlanCodec.encode_squad(squad0))
 	_check(created.get("success", false), "create match")
 	var match_id := str(created["body"].get("match_id", ""))
 	var token0 := str(created["body"].get("token", ""))
@@ -87,14 +87,15 @@ func _run() -> void:
 	_check((body.get("history", []) as Array).size() == 1, "history has one turn")
 	_check(int(body.get("turn", 0)) == 2, "server advanced to turn 2")
 
-	# At spawn the squads are far apart: enemies must not appear in sight.
+	# Spawns are random, so enemies may or may not be in sight; any that
+	# aren't must arrive without their position.
 	var view: Dictionary = body.get("view", {})
-	var enemy_exact := 0
+	var leaked := 0
 	var units: Array = view.get("units", [])
-	for i in range(4, units.size()):
-		if int(units[i].get("vis", -1)) == Visibility.State.SIGHT:
-			enemy_exact += 1
-	_check(units.size() == 8 and enemy_exact == 0, "distant enemies hidden by fog of war")
+	for i in range(PlanCodec.SQUAD_SIZE, units.size()):
+		if int(units[i].get("vis", -1)) != Visibility.State.SIGHT and units[i].has("hex"):
+			leaked += 1
+	_check(units.size() == 2 * PlanCodec.SQUAD_SIZE and leaked == 0, "unseen enemies arrive without a position")
 
 	# --- Accounts + ranked matchmaking ---
 	var acc_a := await b0.register_account("Mikumo")
@@ -146,7 +147,7 @@ func _test_connection_layer(b: HttpBackend) -> void:
 	# Account recovery: a server that forgot the account gets a fresh one.
 	AccountStore.clear_for(conn.server_url)
 	var acc := await conn.ensure_account("Hyuse")
-	_check(not acc.is_empty() and str(acc.get("name")) == "Hyuse", "connection registers an account")
+	_check(not acc.is_empty() and str(acc.get("name")) == "Hyuse", "connection registers an account (%s)" % conn.last_error)
 	_server._accounts.erase(acc["player_id"])
 	var again := await conn.ensure_account("Hyuse")
 	_check(not again.is_empty() and again["player_id"] != acc["player_id"], "forgotten account is re-registered")
@@ -181,11 +182,8 @@ func _test_connection_layer(b: HttpBackend) -> void:
 	add_child(ws)
 	var got := [false]
 	ws.outdated.connect(func() -> void: got[0] = true)
+	ws.protocol = 1
 	ws.open("ws://127.0.0.1:18081", "nope", "nope")
-	end = Time.get_ticks_msec() + 3000
-	while not ws.is_open() and Time.get_ticks_msec() < end:
-		await get_tree().process_frame
-	ws._send({ "type": "hello", "match_id": "x", "token": "y", "protocol": 1 })
 	end = Time.get_ticks_msec() + 3000
 	while not got[0] and Time.get_ticks_msec() < end:
 		await get_tree().process_frame

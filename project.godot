@@ -23,6 +23,10 @@ window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=4
 
+[gui]
+
+theme/custom="res://ui/theme.tres"
+
 [input_devices]
 
 pointing/emulate_mouse_from_touch=true

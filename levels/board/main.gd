@@ -13,6 +13,7 @@ var _camera: BoardCamera
 
 
 func _ready() -> void:
+	UiTheme.install(get_tree())
 	_setup_environment()
 	_setup_lights()
 	_setup_board()
@@ -96,7 +97,7 @@ func _setup_board() -> void:
 	cam.pitch = deg_to_rad(50.0)
 	# Center the board in the area left free by the UI: the combat log covers
 	# ~380 px on the right, the top bar 44 px, the timeline ~250 px at the bottom.
-	cam.screen_offset_px = Vector2(-190.0, -103.0)
+	cam.screen_offset_px = Vector2(-190.0, -(TimelineUI.PANEL_HEIGHT - TimelineUI.TOP_BAR_HEIGHT) / 2.0)
 	add_child(cam)
 	_camera = cam
 

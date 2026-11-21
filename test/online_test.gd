@@ -30,7 +30,7 @@ func _run() -> void:
 	b1.server_url = "http://127.0.0.1:18080"
 	add_child(b1)
 
-	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
+	var created := await b0.create_match(PlanCodec.encode_squad(squad0))
 	_check(created.get("success", false), "create match")
 	var match_id := str(created["body"].get("match_id", ""))
 
@@ -75,8 +75,8 @@ func _run() -> void:
 	# Client's own units must match the server's authoritative view.
 	var info := await b0.get_match(match_id, str(created["body"].get("token", "")))
 	var units: Array = info["body"].get("view", {}).get("units", [])
-	var synced := units.size() == 8
-	for i in 4:
+	var synced := units.size() == 2 * PlanCodec.SQUAD_SIZE
+	for i in PlanCodec.SQUAD_SIZE:
 		if not synced:
 			break
 		var u: UnitState = controller._ms.teams[0][i]

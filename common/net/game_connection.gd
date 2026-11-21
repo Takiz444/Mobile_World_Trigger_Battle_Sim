@@ -98,6 +98,13 @@ func find_match(squad: Array, mode: String, keep_waiting: Callable) -> Dictionar
 		last_error = "no account"
 		return {}
 	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
+	# Already in a live match (e.g. the app was closed mid-match): rejoin it.
+	if int(res.get("status", 0)) == 409 and res["body"].get("active") is Dictionary:
+		var active: Dictionary = res["body"]["active"]
+		active["status"] = "matched"
+		if str(active.get("live_url", "")) == "" and live_url != "":
+			active["live_url"] = live_url
+		return active
 	if not res.get("success", false):
 		last_error = "Matchmaking failed: %s" % str(res.get("error", "?"))
 		return {}
@@ -114,6 +121,19 @@ func find_match(squad: Array, mode: String, keep_waiting: Callable) -> Dictionar
 	await backend.cancel_queue(str(ticket.get("ticket", "")), account["secret"])
 	last_error = "Search cancelled."
 	return {}
+
+
+## Unfinished matches of this account on the server (see
+## HttpBackend.active_matches), or [] when there are none / no account.
+func resumable_matches() -> Array:
+	var saved := AccountStore.load_for(server_url)
+	if saved.is_empty():
+		return []
+	var res := await backend.active_matches(str(saved["player_id"]), str(saved["secret"]))
+	if not res.get("success", false):
+		return []
+	var matches: Variant = res["body"].get("matches", [])
+	return matches if matches is Array else []
 
 
 ## Deletes the account on the server and forgets it locally.

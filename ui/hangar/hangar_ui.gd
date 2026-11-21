@@ -25,10 +25,17 @@ var _searching := false
 var _host_live: CheckBox
 var _conn: GameConnection
 var _search_mode := ""
+var _resume_btn: Button
+var _delete_btn: Button
+var _delete_armed_at := -1
+const DELETE_CONFIRM_MS := 4000
 
 
 func _ready() -> void:
-	set_anchors_preset(Control.PRESET_FULL_RECT)
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	UiTheme.install(get_tree())
+	if MatchSession.server_url == ServerConfig.DEV_URL or not ServerConfig.allow_custom_server():
+		MatchSession.server_url = ServerConfig.default_url()
 	_conn = GameConnection.new()
 	_conn.name = "GameConnection"
 	add_child(_conn)
@@ -48,7 +55,7 @@ func _load_squad() -> void:
 
 func _build_layout() -> void:
 	var bg := ColorRect.new()
-	bg.color = Color(0.05, 0.07, 0.11)
+	bg.color = UiTheme.BG
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
@@ -57,15 +64,15 @@ func _build_layout() -> void:
 	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	vbox.offset_left = 48
 	vbox.offset_right = -48
-	vbox.offset_top = 24
-	vbox.offset_bottom = -24
-	vbox.add_theme_constant_override("separation", 12)
+	vbox.offset_top = 10
+	vbox.offset_bottom = -10
+	vbox.add_theme_constant_override("separation", 6)
 	add_child(vbox)
 
 	var title := Label.new()
-	title.text = "HANGAR — Trigger Holder"
+	title.text = "SQUAD SETUP"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 30)
+	title.add_theme_font_size_override("font_size", 26)
 	vbox.add_child(title)
 
 	_unit_tabs = HBoxContainer.new()
@@ -73,28 +80,40 @@ func _build_layout() -> void:
 	_unit_tabs.add_theme_constant_override("separation", 8)
 	vbox.add_child(_unit_tabs)
 
+	# Middle: talent points (left) and the selected character's loadout (right).
+	var middle := HBoxContainer.new()
+	middle.alignment = BoxContainer.ALIGNMENT_CENTER
+	middle.add_theme_constant_override("separation", 28)
+	middle.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(middle)
+	_build_talent_panel(middle)
+
+	var loadout := VBoxContainer.new()
+	loadout.add_theme_constant_override("separation", 6)
+	middle.add_child(loadout)
+
 	var budget_row := HBoxContainer.new()
 	budget_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	budget_row.add_theme_constant_override("separation", 12)
-	vbox.add_child(budget_row)
+	loadout.add_child(budget_row)
 
 	_budget_label = Label.new()
-	_budget_label.add_theme_font_size_override("font_size", 18)
+	_budget_label.add_theme_font_size_override("font_size", 16)
+	_budget_label.tooltip_text = "Equipped triggers cost Trion; each character can carry up to %d." % TriggerLibrary.STANDARD_TRION_CAPACITY
 	budget_row.add_child(_budget_label)
 
 	_budget_bar = ProgressBar.new()
-	_budget_bar.custom_minimum_size = Vector2(320, 22)
+	_budget_bar.custom_minimum_size = Vector2(260, 16)
 	_budget_bar.show_percentage = false
 	budget_row.add_child(_budget_bar)
 
 	var columns := HBoxContainer.new()
 	columns.alignment = BoxContainer.ALIGNMENT_CENTER
-	columns.add_theme_constant_override("separation", 48)
-	columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(columns)
+	columns.add_theme_constant_override("separation", 20)
+	loadout.add_child(columns)
 
-	_main_col = _build_column("Main Slots (Dominant Hand)", columns)
-	_sub_col = _build_column("Sub Slots (Off Hand)", columns)
+	_main_col = _build_column("Main Slots", columns)
+	_sub_col = _build_column("Sub Slots", columns)
 
 	var palette_label := Label.new()
 	palette_label.text = "Available Triggers (drag into slots · right-click or double-tap a slot to clear)"
@@ -104,7 +123,7 @@ func _build_layout() -> void:
 	var palette_scroll := ScrollContainer.new()
 	palette_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	palette_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	palette_scroll.custom_minimum_size = Vector2(0, 64)
+	palette_scroll.custom_minimum_size = Vector2(0, 58)
 	vbox.add_child(palette_scroll)
 
 	_palette = HBoxContainer.new()
@@ -144,6 +163,8 @@ func _build_layout() -> void:
 	_server_input.text = MatchSession.server_url
 	_server_input.placeholder_text = "Server URL"
 	_server_input.custom_minimum_size = Vector2(240, 0)
+	# Store builds always talk to the production server (ServerConfig).
+	_server_input.visible = ServerConfig.allow_custom_server()
 	mp_row.add_child(_server_input)
 
 	_host_btn = Button.new()
@@ -194,6 +215,24 @@ func _build_layout() -> void:
 	_ranked_btn.pressed.connect(_on_find_ranked.bind("async"))
 	ranked_row.add_child(_ranked_btn)
 
+	_resume_btn = Button.new()
+	_resume_btn.text = "Resume Match"
+	_resume_btn.tooltip_text = "Get back into a ranked match that is still running"
+	_resume_btn.pressed.connect(_on_resume_pressed)
+	ranked_row.add_child(_resume_btn)
+
+	# Account deletion must be available in-app (App Store 5.1.1(v), Google
+	# Play data-deletion policy). Two taps: the first only arms it.
+	_delete_btn = Button.new()
+	_delete_btn.text = "Delete Account"
+	_delete_btn.add_theme_color_override("font_color", UiTheme.DANGER)
+	_delete_btn.visible = not saved.is_empty()
+	_delete_btn.pressed.connect(_on_delete_account_pressed)
+	ranked_row.add_child(_delete_btn)
+
+	for b in find_children("*", "BaseButton", true, false):
+		UiTheme.add_press_feedback(b)
+
 	_net_status = Label.new()
 	_net_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_net_status.modulate = Color(1.0, 0.7, 0.5)
@@ -219,14 +258,18 @@ func _refresh_all() -> void:
 	_refresh_slots()
 	_refresh_palette()
 	_refresh_budget()
+	_refresh_talents()
 
 
 func _refresh_unit_tabs() -> void:
 	for c in _unit_tabs.get_children():
 		c.queue_free()
 	for i in _units.size():
+		var u := _units[i]
 		var b := Button.new()
-		b.text = "%d. %s" % [i + 1, _units[i].unit_name]
+		b.text = u.unit_name
+		b.tooltip_text = "HP %d · AT %d · ATK %d" % [u.base_trion_hp, TurnPlan.new([u]).get_at_pool(0), u.attack_rating]
+		b.custom_minimum_size = Vector2(150, 0)
 		b.toggle_mode = true
 		b.button_pressed = (i == _current_unit)
 		b.pressed.connect(_on_unit_tab.bind(i))
@@ -239,14 +282,18 @@ func _refresh_slots() -> void:
 
 	var u := _units[_current_unit]
 	var main_header := Label.new()
-	main_header.text = "Main Slots (Dominant Hand)"
+	main_header.text = "Main Slots"
+	main_header.tooltip_text = "Dominant hand: any trigger"
+	main_header.mouse_filter = Control.MOUSE_FILTER_PASS
 	main_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	main_header.add_theme_font_size_override("font_size", 18)
+	main_header.add_theme_font_size_override("font_size", 16)
 	_main_col.add_child(main_header)
 	var sub_header := Label.new()
-	sub_header.text = "Sub Slots (Off Hand)"
+	sub_header.text = "Sub Slots"
+	sub_header.tooltip_text = "Off hand: only triggers marked (sub)"
+	sub_header.mouse_filter = Control.MOUSE_FILTER_PASS
 	sub_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub_header.add_theme_font_size_override("font_size", 18)
+	sub_header.add_theme_font_size_override("font_size", 16)
 	_sub_col.add_child(sub_header)
 
 	for i in UnitData.MAX_MAIN_SLOTS:
@@ -314,12 +361,128 @@ func _on_slot_dropped(slot: HangarSlot, data: Dictionary) -> void:
 
 	_refresh_slots()
 	_refresh_budget()
+	_refresh_talents()   # the Melee Penchant can change the AT pool
+	SquadStore.save()
 
 
 func _on_slot_clear(slot: HangarSlot) -> void:
 	_units[_current_unit].clear_slot(slot.slot_is_sub, slot.index)
 	_refresh_slots()
 	_refresh_budget()
+	_refresh_talents()
+	SquadStore.save()
+
+
+# --- Talents ------------------------------------------------------------------
+
+var _talent_left: Label
+var _talent_rows := {}   # stat -> {minus, plus, pips, value}
+var _talent_note: Label
+
+
+func _build_talent_panel(parent: Control) -> void:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(380, 0)
+	panel.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	parent.add_child(panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	var head := HBoxContainer.new()
+	box.add_child(head)
+	var title := Label.new()
+	title.text = "Talent Points"
+	title.add_theme_font_size_override("font_size", 18)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	_talent_left = Label.new()
+	_talent_left.add_theme_font_size_override("font_size", 18)
+	_talent_left.tooltip_text = "Shared by the whole squad"
+	_talent_left.mouse_filter = Control.MOUSE_FILTER_PASS
+	head.add_child(_talent_left)
+
+	for stat in Talents.STATS:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		row.tooltip_text = Talents.HINTS[stat]
+		row.mouse_filter = Control.MOUSE_FILTER_PASS
+		box.add_child(row)
+
+		var stat_label := Label.new()
+		stat_label.text = Talents.LABELS[stat]
+		stat_label.custom_minimum_size = Vector2(76, 0)
+		row.add_child(stat_label)
+
+		var minus := Button.new()
+		minus.text = "−"
+		minus.custom_minimum_size = Vector2(44, 44)
+		minus.tooltip_text = "Take a point back"
+		minus.pressed.connect(_on_talent.bind(stat, -1))
+		row.add_child(minus)
+
+		var pips := Label.new()
+		pips.custom_minimum_size = Vector2(76, 0)
+		pips.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pips.add_theme_color_override("font_color", UiTheme.ACCENT)
+		row.add_child(pips)
+
+		var plus := Button.new()
+		plus.text = "+"
+		plus.custom_minimum_size = Vector2(44, 44)
+		plus.tooltip_text = Talents.HINTS[stat]
+		plus.pressed.connect(_on_talent.bind(stat, 1))
+		row.add_child(plus)
+
+		var value := Label.new()
+		value.custom_minimum_size = Vector2(80, 0)
+		value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		row.add_child(value)
+		_talent_rows[stat] = { "minus": minus, "plus": plus, "pips": pips, "value": value }
+
+	_talent_note = Label.new()
+	_talent_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_talent_note.custom_minimum_size = Vector2(356, 0)
+	_talent_note.add_theme_color_override("font_color", UiTheme.TEXT_DIM)
+	_talent_note.add_theme_font_size_override("font_size", 14)
+	box.add_child(_talent_note)
+
+
+func _refresh_talents() -> void:
+	if _talent_left == null or _units.is_empty():
+		return
+	var u := _units[_current_unit]
+	var left := Talents.remaining(_units)
+	_talent_left.text = "%d / %d left" % [left, Talents.POINTS]
+	_talent_left.add_theme_color_override("font_color", UiTheme.ACCENT if left > 0 else UiTheme.TEXT_DIM)
+	var pool := TurnPlan.new([u]).get_at_pool(0)
+	for stat in Talents.STATS:
+		var row: Dictionary = _talent_rows[stat]
+		var pts := Talents.get_points(u, stat)
+		(row["pips"] as Label).text = "●".repeat(pts) + "○".repeat(Talents.MAX_PER_STAT - pts)
+		(row["minus"] as Button).disabled = pts <= 0
+		(row["plus"] as Button).disabled = not Talents.can_add(_units, u, stat)
+		match stat:
+			"stamina":
+				(row["value"] as Label).text = "%d AT" % pool
+			"hp":
+				(row["value"] as Label).text = "%d HP" % u.base_trion_hp
+			"atk":
+				(row["value"] as Label).text = "%d ATK" % u.attack_rating
+	if left > 0:
+		_talent_note.text = "%d point%s unspent. Points are shared by all three characters." % [left, "" if left == 1 else "s"]
+	else:
+		_talent_note.text = "All points spent. Take one back with − to move it."
+
+
+func _on_talent(stat: String, delta: int) -> void:
+	var u := _units[_current_unit]
+	if delta > 0 and not Talents.can_add(_units, u, stat):
+		return
+	Talents.set_points(u, stat, Talents.get_points(u, stat) + delta)
+	_refresh_talents()
+	_refresh_unit_tabs()
+	SquadStore.save()
 
 
 func _on_reset_pressed() -> void:
@@ -336,7 +499,11 @@ func _on_start_pressed() -> void:
 ## Connects (or reconnects) the GameConnection to the Server URL field.
 ## Returns false and shows why when the server can't be used.
 func _connect_server() -> bool:
-	var url := _server_input.text.strip_edges().rstrip("/")
+	var url := _server_input.text.strip_edges().rstrip("/") if ServerConfig.allow_custom_server() \
+		else ServerConfig.default_url()
+	if url == "":
+		_net_status.text = "Online play is not configured in this build."
+		return false
 	MatchSession.server_url = url
 	if _conn.server_url != url or not _conn.is_online():
 		_net_status.text = "Connecting to %s…" % url
@@ -359,11 +526,9 @@ func _on_host_online() -> void:
 	if not await _connect_server():
 		return
 	_prepare_online_squad()
-	MatchSession.seed = 12345
 	# Friendly battles: the host picks the live clock or async turns.
 	var mode := "live" if _host_live.button_pressed else "async"
-	var res := await _conn.backend.request("POST", "/match/create",
-		{ "seed": MatchSession.seed, "squad": PlanCodec.encode_squad(MatchSession.squad), "mode": mode })
+	var res := await _conn.backend.create_match(PlanCodec.encode_squad(MatchSession.squad), mode)
 	if not res.get("success", false):
 		_net_status.text = "Host failed: %s" % str(res.get("error", "?"))
 		return
@@ -414,6 +579,7 @@ func _on_find_ranked(mode: String) -> void:
 		_net_status.text = _conn.last_error
 		return
 	_prepare_online_squad()
+	_delete_btn.visible = true
 
 	var button := _live_btn if mode == "live" else _ranked_btn
 	var idle_text := button.text
@@ -440,4 +606,56 @@ func _on_find_ranked(mode: String) -> void:
 func _start_match_scene() -> void:
 	for u in _units:
 		u.ensure_slot_arrays()
-	get_tree().change_scene_to_file("res://levels/board/main.tscn")
+	UiTheme.change_scene(get_tree(), "res://levels/board/main.tscn")
+
+
+## Re-enters a ranked match that is still running on the server (the app was
+## closed or crashed mid-match). Live matches first: their clock is running.
+func _on_resume_pressed() -> void:
+	if _searching or not await _connect_server():
+		return
+	var matches := await _conn.resumable_matches()
+	if matches.is_empty():
+		_net_status.text = "No match in progress."
+		return
+	var pick: Dictionary = matches[0]
+	for m in matches:
+		if str(m.get("mode", "")) == "live":
+			pick = m
+			break
+	_prepare_online_squad()
+	MatchSession.live = str(pick.get("mode", "async")) == "live"
+	MatchSession.live_url = str(pick.get("live_url", _conn.live_url))
+	MatchSession.match_id = str(pick.get("match_id", ""))
+	MatchSession.team = int(pick.get("team", 0))
+	MatchSession.token = str(pick.get("token", ""))
+	_net_status.text = "Rejoining match %s" % MatchSession.match_id
+	_start_match_scene()
+
+
+func _on_delete_account_pressed() -> void:
+	var now := Time.get_ticks_msec()
+	if _delete_armed_at < 0 or now - _delete_armed_at > DELETE_CONFIRM_MS:
+		_delete_armed_at = now
+		_delete_btn.text = "Tap again to delete"
+		_net_status.text = "This permanently deletes your account, trophies, and rating."
+		await get_tree().create_timer(DELETE_CONFIRM_MS / 1000.0).timeout
+		if is_inside_tree() and _delete_armed_at == now:
+			_delete_armed_at = -1
+			_delete_btn.text = "Delete Account"
+		return
+	_delete_armed_at = -1
+	_delete_btn.text = "Delete Account"
+	if not await _connect_server():
+		return
+	_conn.account = AccountStore.load_for(_conn.server_url)
+	if _conn.account.is_empty():
+		_net_status.text = "No account on this server."
+		_delete_btn.visible = false
+		return
+	if await _conn.delete_account():
+		_net_status.text = "Account deleted."
+		_delete_btn.visible = false
+		_name_input.text = ""
+	else:
+		_net_status.text = "Could not delete the account: %s" % _conn.last_error

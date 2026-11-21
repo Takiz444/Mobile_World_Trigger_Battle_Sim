@@ -15,7 +15,8 @@ func _ready() -> void:
 	var out := args[0] if args.size() > 0 else "user://screenshot.png"
 	get_window().size = Vector2i(1280, 720)
 	if args.size() > 1 and args[1] == "hangar":
-		add_child(load("res://ui/hangar/hangar.tscn").instantiate())
+		# Under the window itself, as in the real game (full-rect anchors).
+		get_tree().root.add_child.call_deferred(load("res://ui/hangar/hangar.tscn").instantiate())
 		await _save_after_frames(out)
 		return
 	var main: Node = load("res://levels/board/main.tscn").instantiate()

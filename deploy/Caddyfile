@@ -5,15 +5,32 @@
 {$TT_DOMAIN} {
 	encode gzip
 
-	# Live channel: WebSocket upgrade is proxied transparently.
-	handle /live* {
-		reverse_proxy server:8081
+	# The API only speaks JSON to the game client: no framing, no sniffing,
+	# HTTPS only from now on.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Same cap as the game server (HttpServer.MAX_BODY_BYTES); oversized
+	# uploads are refused here before they reach it.
+	request_body {
+		max_size 256KB
 	}
 
 	# Admin endpoints are never exposed publicly; call them from the host
 	# (docker compose exec server ...) or over a VPN.
-	handle /admin/* {
+	@admin path /admin /admin/*
+	handle @admin {
 		respond "Not found" 404
+	}
+
+	# Live channel: WebSocket upgrade is proxied transparently.
+	handle /live* {
+		reverse_proxy server:8081
 	}
 
 	handle {

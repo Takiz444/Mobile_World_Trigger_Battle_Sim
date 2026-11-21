@@ -132,7 +132,7 @@ func _test_postgrest() -> void:
 	# Database outage: writes queue up and drain once it's back.
 	fake.stop()
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
-	var created := await b.create_match(5, squad)
+	var created := await b.create_match(squad)
 	var match_id := str(created["body"]["match_id"])
 	await get_tree().create_timer(0.8).timeout
 	_check(s1.store.pending() > 0, "writes wait while the database is down")
@@ -209,6 +209,7 @@ class FakePostgrest extends Node:
 
 	func start(port: int) -> void:
 		_http = HttpServer.new()
+		_http.allowed_methods = ["GET", "POST", "DELETE"]
 		_http.start(port, _handle)
 
 	func stop() -> void:
@@ -220,7 +221,7 @@ class FakePostgrest extends Node:
 		if _http != null:
 			_http.poll()
 
-	func _handle(method: String, path: String, body: Dictionary) -> Dictionary:
+	func _handle(method: String, path: String, body: Dictionary, _ctx: Dictionary = {}) -> Dictionary:
 		var kind := path.trim_prefix("/")
 		if not tables.has(kind):
 			return { "status": 404, "body": { "message": "no table" } }

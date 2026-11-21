@@ -11,7 +11,8 @@ const MAIN_SLOT := 0
 const SUB_SLOT := 1
 const MENTAL_LOAD_COST := 1
 const FULL_GUARD_COST := 4
-const MELEE_PENCHANT_POOL := 10
+## Melee Penchant: a blade in a Main slot adds this many AT to the pool.
+const MELEE_PENCHANT_BONUS := 2
 
 var units: Array[UnitData] = []
 var _ticks: Array = []  # _ticks[unit][tick] -> TickAction
@@ -89,6 +90,7 @@ func assign(unit: int, tick: int, slot: int, card: TriggerCard) -> bool:
 	return true
 
 
+## Removes the card (and its target) from a slot.
 func clear(unit: int, tick: int, slot: int) -> bool:
 	var ta: TickAction = _ticks[unit][tick]
 	if slot == SUB_SLOT:
@@ -99,18 +101,29 @@ func clear(unit: int, tick: int, slot: int) -> bool:
 		if ta.main_card == null:
 			return false
 		ta.main_card = null
+	ta.clear_slot_target(slot)
 	return true
+
+
+## Whether `card` needs a hex picked on the board (a destination or target).
+static func needs_target(card: TriggerCard) -> bool:
+	if card == null:
+		return false
+	return card.card_type == TriggerCard.CardType.MOVE or card.card_type == TriggerCard.CardType.MELEE \
+		or card.card_type == TriggerCard.CardType.RANGED or card.jump \
+		or card.card_name == "Look" or card.card_name == "Spider"
 
 
 # --- AT Economy -------------------------------------------------------------
 
 func get_at_pool(unit: int) -> int:
 	var u := units[unit]
-	var pool := u.base_at_pool
+	# A bonus on top of the pool (not a minimum), so Stamina talents still
+	# count for melee characters.
 	for card in u.main_trigger_slots:
 		if card != null and card.card_type == TriggerCard.CardType.MELEE:
-			pool = max(pool, MELEE_PENCHANT_POOL)
-	return pool
+			return u.base_at_pool + MELEE_PENCHANT_BONUS
+	return u.base_at_pool
 
 
 ## Bagworm is a maintained toggle (GDD 5.2: 1 AT maintenance per turn): only

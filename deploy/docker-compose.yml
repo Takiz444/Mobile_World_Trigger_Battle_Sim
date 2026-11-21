@@ -36,12 +36,29 @@ services:
     expose:
       - "8080"
       - "8081"
+    # Least privilege: no extra capabilities, no privilege escalation, and a
+    # memory ceiling so a runaway process can't take the host down.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
 
   caddy:
     image: caddy:2.8
     restart: unless-stopped
     depends_on:
       - server
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
     environment:
       TT_DOMAIN: ${TT_DOMAIN}
     ports:
@@ -61,6 +78,8 @@ services:
       POSTGRES_USER: trion_admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       PGRST_AUTHENTICATOR_PASSWORD: ${PGRST_AUTHENTICATOR_PASSWORD:-}
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
@@ -77,10 +96,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
     environment:
       PGRST_DB_URI: postgres://authenticator:${PGRST_AUTHENTICATOR_PASSWORD}@db:5432/trion
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: game_server
+      # Never serve the OpenAPI description of the store.
+      PGRST_OPENAPI_MODE: disabled
     expose:
       - "3000"
 

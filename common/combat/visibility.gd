@@ -4,12 +4,14 @@ extends RefCounted
 ## stealth (GDD 4.3). Shared by the server (to filter what each player
 ## receives) and the client (to render the fog and vision cones).
 ##
-## Every character has its own vision profile (see profile()):
-##   - focus cone: narrow and long (where the character is looking),
-##   - peripheral cone: wide and short,
-##   - awareness: a small all-round radius (still needs a clear sight line),
-##   - scopes: sniper rifles (Egret / Ibis) extend the focus range,
-##   - elevation: each floor above the street adds range (rooftop overlook).
+## Every character's vision has two parts (see profile()):
+##   - detection radius: short and all-round (DETECT_RANGE). Enemies this
+##     close are noticed whichever way the character faces.
+##   - sight cone: long, in the facing direction (SIGHT_RANGE, half-angle
+##     SIGHT_HALF_ANGLE_DEG). What the character sees with its eyes.
+##   Both still need a clear sight line: nobody detects through a building.
+##   - scopes: sniper rifles (Egret / Ibis) extend the sight range,
+##   - elevation: each floor above the street extends the sight range.
 ## Line of sight is traced in 3D from eye height to body height against the
 ## real building boxes: nobody sees through a building, and full cover blocks
 ## low lines. Units inside a building see and are seen only through its outer
@@ -21,16 +23,16 @@ extends RefCounted
 
 enum State { SIGHT, RADAR, HIDDEN }
 
-const FOCUS_RANGE := 8
-const FOCUS_HALF_ANGLE_DEG := 30.0
-const PERIPHERAL_RANGE := 5
-const PERIPHERAL_HALF_ANGLE_DEG := 70.0
-const AWARENESS_RANGE := 2
+## All-round detection radius (hexes).
+const DETECT_RANGE := 2
+## Forward sight cone: range (hexes) and half-angle (degrees).
+const SIGHT_RANGE := 9
+const SIGHT_HALF_ANGLE_DEG := 45.0
 ## How far a sight line may run inside a unit's own building before leaving
 ## it (standing at the window). Covers hexes along the outer wall.
 const WINDOW_REACH := 1.4
 const SAME_ROOM_RANGE := 1
-const SCOPE_BONUS := 4
+const SCOPE_BONUS := 3
 const MAX_ELEVATION_BONUS := 4
 const STEALTH_REVEAL_RANGE := 3
 ## Heights in floors above a unit's floor.
@@ -42,21 +44,18 @@ const FULL_COVER_HEIGHT := 1.0
 
 # --- Vision Profiles ---------------------------------------------------------
 
-## A character's vision: ranges (hexes) and half-angles (degrees).
+## A character's vision: {detect, sight_range} in hexes, sight_half in degrees.
 static func profile(u: UnitState) -> Dictionary:
-	var focus := FOCUS_RANGE
+	var sight := SIGHT_RANGE
 	for slots in [u.unit_data.main_trigger_slots, u.unit_data.sub_trigger_slots]:
 		for c in slots:
 			var card: TriggerCard = c
 			if card != null and card.card_type == TriggerCard.CardType.RANGED and card.attack_range >= 9:
-				focus = FOCUS_RANGE + SCOPE_BONUS  # sniper scope
-	var height_bonus := mini(u.floor, MAX_ELEVATION_BONUS)
+				sight = SIGHT_RANGE + SCOPE_BONUS  # sniper scope
 	return {
-		"focus_range": focus + height_bonus,
-		"focus_half": FOCUS_HALF_ANGLE_DEG,
-		"peripheral_range": PERIPHERAL_RANGE + height_bonus,
-		"peripheral_half": PERIPHERAL_HALF_ANGLE_DEG,
-		"awareness": AWARENESS_RANGE,
+		"detect": DETECT_RANGE,
+		"sight_range": sight + mini(u.floor, MAX_ELEVATION_BONUS),
+		"sight_half": SIGHT_HALF_ANGLE_DEG,
 	}
 
 
@@ -69,9 +68,9 @@ static func view_angle(viewer: UnitState, hex: Vector2i) -> float:
 	return rad_to_deg(fwd.normalized().angle_to(to.normalized()))
 
 
-## Whether `hex` lies inside the viewer's peripheral arc (its "firing arc").
+## Whether `hex` lies inside the viewer's sight cone angle (its "firing arc").
 static func in_cone(viewer: UnitState, hex: Vector2i) -> bool:
-	return view_angle(viewer, hex) <= PERIPHERAL_HALF_ANGLE_DEG
+	return view_angle(viewer, hex) <= SIGHT_HALF_ANGLE_DEG
 
 
 ## Whether `hex` is within the viewer's vision volume (range + angle only).
@@ -79,14 +78,11 @@ static func in_view(viewer: UnitState, hex: Vector2i, p: Dictionary = {}) -> boo
 	if p.is_empty():
 		p = profile(viewer)
 	var dist := HexCoord.distance(viewer.hex, hex)
-	if dist <= int(p["awareness"]):
+	if dist <= int(p["detect"]):
 		return true
-	if dist > int(p["focus_range"]):
+	if dist > int(p["sight_range"]):
 		return false
-	var angle := view_angle(viewer, hex)
-	if dist <= int(p["peripheral_range"]) and angle <= float(p["peripheral_half"]):
-		return true
-	return angle <= float(p["focus_half"])
+	return view_angle(viewer, hex) <= float(p["sight_half"])
 
 
 # --- Line of Sight ----------------------------------------------------------
@@ -229,7 +225,7 @@ static func visible_hexes(ms: MatchState, team: int) -> Dictionary:
 ## Adds into `out` (and returns it) so team views can accumulate.
 static func unit_visible_hexes(ms: MatchState, u: UnitState, out: Dictionary = {}) -> Dictionary:
 	var p := profile(u)
-	for hex in HexCoord.spiral(u.hex, int(p["focus_range"])):
+	for hex in HexCoord.spiral(u.hex, int(p["sight_range"])):
 		if out.has(hex) or not ms.has_tile(hex) or not in_view(u, hex, p):
 			continue
 		var roof := ms.building_floors(hex)
@@ -257,8 +253,12 @@ static func radar_ping(ms: MatchState, enemy: UnitState, unit_index: int, salt: 
 
 ## Serializable snapshot of the match as seen by `team`. Own units are exact;
 ## enemies are exact only in SIGHT, a ping position in RADAR, nothing when
-## HIDDEN. `salt` varies the radar offsets (e.g. turn * 10 + tick).
-static func encode_view(ms: MatchState, team: int, salt: int) -> Dictionary:
+## HIDDEN. `salt` varies the radar offsets; the server passes a value keyed
+## with a per-match secret so the offsets can't be reproduced by a client.
+## With `fog_wires`, enemy Spider wires are included only on hexes the team
+## can currently see (wires are traps: knowing all of them would give away
+## where unseen enemies have been).
+static func encode_view(ms: MatchState, team: int, salt: int, fog_wires: bool = false) -> Dictionary:
 	var states := enemy_states(ms, team)
 	var units: Array = []
 	var index := 0
@@ -283,8 +283,17 @@ static func encode_view(ms: MatchState, team: int, salt: int) -> Dictionary:
 				units.append({ "vis": State.HIDDEN })
 		index += 1
 	var wires: Array = []
+	var seen_hexes := {}
+	var need_seen := fog_wires
 	for hex in ms.wires:
-		wires.append([hex.x, hex.y, int(ms.wires[hex])])
+		var owner := int(ms.wires[hex])
+		if fog_wires and owner != team:
+			if need_seen:
+				seen_hexes = visible_hexes(ms, team)
+				need_seen = false
+			if not seen_hexes.has(hex):
+				continue
+		wires.append([hex.x, hex.y, owner])
 	return { "units": units, "wires": wires }
 
 

@@ -11,11 +11,17 @@
 FROM debian:bookworm-slim
 
 ARG GODOT_VERSION=4.7.2
+# SHA-512 of the Godot zip. Empty skips the check; set it for production
+# builds (copy it from SHA512-SUMS.txt on the Godot release page) so a
+# tampered download can never end up in the image:
+#   docker build --build-arg GODOT_SHA512=<hash> ...
+ARG GODOT_SHA512=""
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl unzip libfontconfig1 \
 	&& rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL -o /tmp/godot.zip \
 		"https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" \
+	&& if [ -n "$GODOT_SHA512" ]; then echo "$GODOT_SHA512  /tmp/godot.zip" | sha512sum -c -; fi \
 	&& unzip /tmp/godot.zip -d /tmp/godot \
 	&& mv /tmp/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot \
 	&& chmod +x /usr/local/bin/godot \
@@ -33,6 +39,8 @@ ENV TT_PORT=8080 \
 	TT_LIVE_PORT=8081 \
 	TT_DATA_FILE=/data/matches.json
 EXPOSE 8080 8081
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=4 \
+	CMD curl -fsS "http://127.0.0.1:${TT_PORT}/health" || exit 1
 VOLUME /data
 
 CMD ["godot", "--headless", "--path", "/app", "res://server/server.tscn"]

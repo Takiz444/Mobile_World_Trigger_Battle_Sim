@@ -1,0 +1,3 @@
+# Blocked words for player and unit names (NameRules.is_allowed).
+# One lowercase word or phrase per line; a name containing it is refused.
+# Intentionally empty: fill this in before public launch.
