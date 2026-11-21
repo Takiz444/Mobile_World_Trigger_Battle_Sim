@@ -57,9 +57,10 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   rectangular segments (towers with lower wings), each with its own height
   (1–4 floors), mirrored across the map so both sides stay fair. Edit the
   digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
-- Spawns: random open street hexes (one connected street area), every
-  character at least `MatchRunner.SPAWN_MIN_DISTANCE` (3) hexes from every
-  other, friend or foe. Derived from the hidden match seed, so the server can
+- Spawns: random open street hexes (one connected street area); nobody,
+  friend or foe, starts within a 3-hex radius of anyone else (at least
+  `MatchRunner.SPAWN_MIN_DISTANCE` = 4 hexes apart, never relaxed on a
+  playable map). Derived from the hidden match seed, so the server can
   rebuild a match but players can't predict enemy positions.
 
 ### Squad & Talents — `common/data/talents.gd`

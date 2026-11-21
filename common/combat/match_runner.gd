@@ -7,8 +7,11 @@ extends RefCounted
 const DEFAULT_SEED := 12345
 ## Result code for a drawn match (live matches that hit the turn cap even).
 const DRAW := 2
-## No two characters (of either team) start closer than this many hexes.
-const SPAWN_MIN_DISTANCE := 3
+## Every character starts with nobody else, friend or foe, within a 3-hex
+## radius: any two are at least this many hexes apart.
+const SPAWN_MIN_DISTANCE := 4
+## Random placements tried before giving up on SPAWN_MIN_DISTANCE.
+const SPAWN_ATTEMPTS := 64
 
 
 ## Builds a fresh MatchState on the city map (MapData) — the whole sheet, or
@@ -70,28 +73,48 @@ static func random_spawns(ms: MatchState, count: int, seed: int) -> Array[Vector
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([seed, "spawns"])
 	var open := _largest_street_area(ms)
-	# Fisher-Yates over a sorted list, so the result depends only on the seed.
-	open.sort()
-	for i in range(open.size() - 1, 0, -1):
-		var j := rng.randi_range(0, i)
-		var tmp: Vector2i = open[i]
-		open[i] = open[j]
-		open[j] = tmp
-	var out: Array[Vector2i] = []
-	for min_gap in [SPAWN_MIN_DISTANCE, 2, 1]:
-		out.clear()
-		for hex in open:
-			var ok := true
-			for other in out:
-				if HexCoord.distance(hex, other) < min_gap:
-					ok = false
-					break
-			if ok:
-				out.append(hex)
-				if out.size() == count:
-					return out
+	open.sort()   # so the result depends only on the seed
+	# A random order, then the first hexes that keep the distance. If that
+	# runs out of room, reshuffle and try again: the rule is never relaxed on
+	# a playable map.
+	for _attempt in SPAWN_ATTEMPTS:
+		_shuffle(open, rng)
+		var out := _spread(open, count, SPAWN_MIN_DISTANCE)
+		if out.size() == count:
+			return out
+	# Only a map far too small for the squad gets here.
+	push_warning("could not place %d characters %d hexes apart; placing them closer" % [count, SPAWN_MIN_DISTANCE])
+	for gap in range(SPAWN_MIN_DISTANCE - 1, 0, -1):
+		var out := _spread(open, count, gap)
+		if out.size() == count:
+			return out
 	push_error("not enough street hexes for %d spawns" % count)
+	return _spread(open, count, 0)
+
+
+## The first hexes of `order` that are all at least `gap` apart (up to `count`).
+static func _spread(order: Array[Vector2i], count: int, gap: int) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for hex in order:
+		var ok := true
+		for other in out:
+			if HexCoord.distance(hex, other) < gap:
+				ok = false
+				break
+		if ok:
+			out.append(hex)
+			if out.size() == count:
+				break
 	return out
+
+
+## Fisher-Yates shuffle in place.
+static func _shuffle(list: Array[Vector2i], rng: RandomNumberGenerator) -> void:
+	for i in range(list.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp: Vector2i = list[i]
+		list[i] = list[j]
+		list[j] = tmp
 
 
 static func _largest_street_area(ms: MatchState) -> Array[Vector2i]:

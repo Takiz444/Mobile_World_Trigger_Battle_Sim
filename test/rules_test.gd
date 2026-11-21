@@ -699,6 +699,16 @@ func _test_talents(squad: Array) -> void:
 			ok = ok and HexCoord.distance(h, x.hex) >= MatchRunner.SPAWN_MIN_DISTANCE
 		hexes.append(x.hex)
 	_check(ok and hexes.size() == 6, "spawns are on open ground and at least %d hexes apart" % MatchRunner.SPAWN_MIN_DISTANCE)
+	# Across many random play areas, no character ever starts within a
+	# 3-hex radius of another (friend or foe).
+	var closest := 999
+	for seed in 200:
+		var m := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), seed, MapData.random_section(seed))
+		var all := m.all_units()
+		for i in all.size():
+			for j in range(i + 1, all.size()):
+				closest = mini(closest, HexCoord.distance(all[i].hex, all[j].hex))
+	_check(closest > 3, "nobody spawns within 3 hexes of anyone else (closest pair over 200 maps: %d)" % closest)
 	var facing_open := true
 	for x in ms.all_units():
 		facing_open = facing_open and ms.floor_legal(HexCoord.neighbor(x.hex, x.facing), 0)
