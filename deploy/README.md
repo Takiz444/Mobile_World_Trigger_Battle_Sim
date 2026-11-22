@@ -65,6 +65,10 @@ Caddy, plus the Godot server with the file store (`TT_STORE=dir`, in
   ```
   The bundle is built from committed code (`git archive HEAD`), so commit first.
 - Logs: `sudo journalctl -u trion-server -u caddy -f`
+- Off-VM backups: the Windows scheduled task "Trion backup pull" runs
+  `deploy/native/pull_backups.ps1` daily, copying the VM's backups to
+  `Documents\Trion-Backups` (newest 60 kept). It only runs when that PC is on.
+- SSH: key-only, no root (`/etc/ssh/sshd_config.d/01-trion-hardening.conf`).
 - Season reset: `sudo bash -c 'source /etc/trion/trion.env; curl -fsS -X POST -H "Authorization: Bearer $TT_ADMIN_KEY" http://127.0.0.1:8080/admin/season/reset'`
 
 When an A1 VM (more RAM) is available, use the Docker path above. To move data
