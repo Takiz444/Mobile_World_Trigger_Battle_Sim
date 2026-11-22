@@ -58,6 +58,8 @@ var _live_queue: Array[Dictionary] = []
 var _live_replaying := false
 var _live_over: Dictionary = {}
 var _opponent_online := true
+## Whether the opponent has connected at least once (loading vs. reconnecting).
+var _opponent_seen := false
 var _opponent_locked := false
 var _over_shown := false
 var _clock_label: Label
@@ -1104,7 +1106,8 @@ func _start_live(body: Dictionary) -> void:
 	_live.submit_acked.connect(_on_live_ack)
 	_live.match_over.connect(_on_live_match_over)
 	_live.presence_changed.connect(func(connected: Array) -> void:
-		_opponent_online = bool(connected[1 - _team]))
+		_opponent_online = bool(connected[1 - _team])
+		_opponent_seen = _opponent_seen or _opponent_online)
 	_live.connection_changed.connect(func(connected: bool) -> void:
 		if not connected:
 			_event_log.add_message("Connection lost — reconnecting…", Color(1.0, 0.7, 0.4)))
@@ -1134,7 +1137,7 @@ func _process(_delta: float) -> void:
 	if _opponent_locked:
 		status += "  ·  opponent locked in"
 	if not _opponent_online:
-		status += "  ·  opponent reconnecting…"
+		status += "  ·  opponent reconnecting…" if _opponent_seen else "  ·  opponent loading…"
 	if not _live.is_open():
 		status += "  ·  reconnecting…"
 	var clock := "--:--"
