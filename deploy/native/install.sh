@@ -71,6 +71,13 @@ if command -v dnf >/dev/null 2>&1; then
 			--enablerepo='ol*_baseos_latest' --enablerepo='ol*_appstream' $missing >/dev/null
 	fi
 	systemctl enable --now crond >/dev/null 2>&1 || true
+	# The hourly package-cache refresh (dnf-makecache) needs ~330 MB: on a
+	# 1 GB VM it swapped the machine to a standstill for ~40 minutes until
+	# the kernel killed it (2026-11-22). Turn it and PackageKit off; update
+	# by hand with `sudo dnf --disablerepo='*' --enablerepo='ol*_baseos_latest'
+	# --enablerepo='ol*_appstream' upgrade` when the game is quiet.
+	systemctl disable --now dnf-makecache.timer >/dev/null 2>&1 || true
+	systemctl mask --now packagekit.service >/dev/null 2>&1 || true
 else
 	apt-get update -qq && apt-get install -y -qq curl unzip tar gzip libfontconfig1 cron >/dev/null
 fi
