@@ -79,6 +79,8 @@ func _test_server_restart() -> void:
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
 	var q0 := await b.queue_ranked(a0["player_id"], a0["secret"], squad, "live")
 	var q1 := await b.queue_ranked(a1["player_id"], a1["secret"], squad, "live")
+	await b.accept_queue(q0["body"]["ticket"], a0["secret"])
+	q1 = await b.accept_queue(q1["body"]["ticket"], a1["secret"])
 	var match_id := str(q1["body"]["match_id"])
 	var token0 := str((await b.poll_queue(q0["body"]["ticket"], a0["secret"]))["body"]["token"])
 	var plan := PlanCodec.encode_plan(MatchRunner.build_fallback_plan(TriggerLibrary.sample_units()))

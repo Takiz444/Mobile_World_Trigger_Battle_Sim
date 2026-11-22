@@ -20,8 +20,10 @@ extends RefCounted
 ## 6: detection radius 2.
 ## 7: each match is played on a random section of the city ("map" field).
 ## 8: free movement in continuous space and time-based turns (no hexes, no AT).
-const VERSION := 8
-const MIN_SUPPORTED := 8
+## 9: matchmaking ready check (ticket status "found" + POST /queue/{t}/accept),
+##    queue heartbeats, Glicko-2 ratings.
+const VERSION := 9
+const MIN_SUPPORTED := 9
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

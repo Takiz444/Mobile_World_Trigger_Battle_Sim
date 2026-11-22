@@ -112,6 +112,9 @@ func _run() -> void:
 	var qa := await b0.queue_ranked(str(a["player_id"]), str(a["secret"]), PlanCodec.encode_squad(squad0))
 	_check(qa.get("success", false) and str(qa["body"].get("status")) == "queued", "first player waits in queue")
 	var qb := await b1.queue_ranked(str(b["player_id"]), str(b["secret"]), PlanCodec.encode_squad(squad1))
+	_check(str(qb["body"].get("status")) == "found", "second player finds the first (ready check)")
+	await b0.accept_queue(str(qa["body"]["ticket"]), str(a["secret"]))
+	qb = await b1.accept_queue(str(qb["body"]["ticket"]), str(b["secret"]))
 	_check(str(qb["body"].get("status")) == "matched" and int(qb["body"].get("team", -1)) == 1, "second player is matched as team 1")
 	var pa := await b0.poll_queue(str(qa["body"]["ticket"]), str(a["secret"]))
 	_check(str(pa["body"].get("status")) == "matched" and str(pa["body"].get("match_id")) == str(qb["body"].get("match_id")),

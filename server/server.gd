@@ -31,13 +31,26 @@ extends Node
 ## Accounts, matchmaking, and rating:
 ##   POST /account/register  {name}                   -> {player_id, secret, name, rating}
 ##   GET  /account/{id}                               -> {name, rating, wins, losses}
-##   GET  /leaderboard                                -> {players: [...top 20 by rating]}
-##   POST /queue             {player_id, secret, squad} -> {status: queued|matched, ticket, ...}
-##   GET  /queue/{ticket}    (Bearer secret)          -> {status, match_id, team, token}
+##   GET  /leaderboard                                -> {players: [...top 20 by trophies]}
+##   POST /queue             {player_id, secret, squad, mode} -> ticket view (below)
+##   GET  /queue/{ticket}    (Bearer secret)          -> ticket view; also the ticket's heartbeat
+##   POST /queue/{ticket}/accept {secret}             -> confirm a found match (ready check)
 ##   POST /queue/{ticket}/cancel {secret}
-## Ranked matches pair waiting players by hidden rating (the accepted gap
-## widens the longer they wait, Ladder.search_window), and update both
-## players' Elo ratings when the match ends.
+##   ticket view: {ticket, status, mode, wait_sec, searching, estimated_wait,
+##                 accept_sec_left (found), match_id/team/token/live_url (matched)}
+##
+## Matchmaking (Matchmaker): a ticket goes queued -> found -> matched.
+##   - Tickets must be polled (QUEUE_HEARTBEAT): one not seen for
+##     TICKET_STALE_SEC is skipped by the matchmaker, and expires after
+##     TICKET_EXPIRE_SEC (a closed tab never gets matched).
+##   - Every MATCHMAKER_INTERVAL the matchmaker scores every acceptable pair
+##     (Glicko-2 win probability incl. both players' uncertainty; the accepted
+##     unfairness widens with waiting) and takes the best pairs first.
+##   - A found pair must both accept within ACCEPT_SEC (clients do it
+##     automatically, proving they are still there). If one doesn't, the
+##     other goes back into the queue keeping its place, and the no-show's
+##     ticket expires.
+## Finished ranked matches update both players' Glicko-2 ratings.
 ##
 ## Live ranked play (the competitive ladder, `mode: "live"` on /queue):
 ##   Short simultaneous turns on a server clock (Ladder.LIVE_*), a turn cap
@@ -102,7 +115,13 @@ var data_file := DEFAULT_DATA_FILE
 var admin_key := ""
 
 const START_RATING := 1000
-const ELO_K := 32
+## Queue liveness (see the header): clients poll their ticket every second.
+const TICKET_STALE_SEC := 6.0
+const TICKET_EXPIRE_SEC := 20.0
+## Time both players have to confirm a found match.
+const ACCEPT_SEC := 10.0
+## Weight of the newest sample in the per-mode average wait (estimated_wait).
+const WAIT_EWMA := 0.3
 const NAME_MAX := NameRules.PLAYER_NAME_MAX
 ## Correspondence matches end by tiebreak after this many turns, so a match
 ## (and its stored history) can't grow without bound.
@@ -122,7 +141,11 @@ var _http := HttpServer.new()
 var _hub := LiveHub.new()
 var _matches: Dictionary = {}     # id -> match dict
 var _accounts: Dictionary = {}    # player_id -> {id, name, secret, rating, trophies, best_trophies, wins, losses, draws}
-var _tickets: Dictionary = {}     # ticket -> {ticket, player_id, status, mode, squad, rating, queued_at, match_id, team, token}
+## ticket -> {ticket, player_id, status, mode, squad, queued_at, last_seen,
+##            partner, seat, found_at, accepted, match_id, team, token}
+var _tickets: Dictionary = {}
+## mode -> average seconds from queueing to a confirmed match.
+var _avg_wait: Dictionary = {}
 var _season := 1
 var _mm_timer := 0.0
 var _prune_timer := 0.0
@@ -241,6 +264,8 @@ func _dispatch(method: String, path: String, body: Dictionary, ip: String, beare
 		return _enqueue(_with_cred(body, "secret", bearer))
 	if method == "POST" and path.begins_with("/queue/") and path.ends_with("/cancel"):
 		return _cancel_ticket(_path_id(path), _cred(body, "secret", bearer))
+	if method == "POST" and path.begins_with("/queue/") and path.ends_with("/accept"):
+		return _accept_ticket(_path_id(path), _cred(body, "secret", bearer))
 	if method == "GET" and path.begins_with("/queue/"):
 		return _poll_ticket(_path_id(path), _cred(body, "secret", bearer))
 	return _err(404, "not found")
@@ -540,7 +565,7 @@ func _end_match(m: Dictionary, winner: int, reason: String) -> void:
 	m["ended_at"] = Time.get_unix_time_from_system()
 	_touch("matches", m["id"])
 	if m.get("ranked", false):
-		_apply_elo(m, winner)
+		_apply_rating(m, winner)
 		if m.get("mode", "async") == "live":
 			_apply_trophies(m, winner)
 	for team in 2:
@@ -688,12 +713,23 @@ func _open_store() -> bool:
 		_accounts[id]["id"] = str(id)
 		if had_plain_secret:
 			_touch("accounts", id)   # rewrite it hashed
+	var now := Time.get_unix_time_from_system()
 	for id in data.get("tickets", {}):
 		var ticket: Dictionary = data["tickets"][id]
 		ticket["team"] = int(ticket.get("team", -1))
-		ticket["rating"] = int(ticket.get("rating", START_RATING))
 		ticket["mode"] = str(ticket.get("mode", "async"))
-		ticket["queued_at"] = float(ticket.get("queued_at", Time.get_unix_time_from_system()))
+		ticket["queued_at"] = float(ticket.get("queued_at", now))
+		ticket["seat"] = int(ticket.get("seat", -1))
+		ticket["accepted"] = bool(ticket.get("accepted", false))
+		ticket["partner"] = str(ticket.get("partner", ""))
+		ticket["found_at"] = float(ticket.get("found_at", 0.0))
+		# Searches that were open during the restart: give their clients a
+		# fresh heartbeat window, and re-run any unconfirmed pairing.
+		if ticket["status"] == "queued" or ticket["status"] == "found":
+			ticket["status"] = "queued"
+			ticket["partner"] = ""
+			ticket["accepted"] = false
+			ticket["last_seen"] = now
 		_tickets[id] = ticket
 	_season = int(data.get("meta", {}).get("server", {}).get("season", 1))
 	_save()
@@ -719,7 +755,7 @@ func _prune() -> void:
 	var now := Time.get_unix_time_from_system()
 	for id in _tickets.keys():
 		var t: Dictionary = _tickets[id]
-		if t["status"] != "queued" and now - float(t["queued_at"]) > TICKET_TTL_SEC:
+		if not (t["status"] in ["queued", "found"]) and now - float(t["queued_at"]) > TICKET_TTL_SEC:
 			_tickets.erase(id)
 			_drop("tickets", id)
 	for id in _matches.keys():
@@ -740,7 +776,13 @@ func _normalize_account(a: Dictionary) -> Dictionary:
 		a.erase("secret")
 	a["secret_hash"] = str(a.get("secret_hash", ""))
 	a["name"] = str(a.get("name", "Player"))
-	a["rating"] = int(a.get("rating", START_RATING))
+	# Glicko-2 skill (Matchmaker). Accounts from the Elo era keep their
+	# rating but start fully uncertain, so it settles again quickly.
+	a["rating"] = float(a.get("rating", START_RATING))
+	a["rd"] = float(a.get("rd", Matchmaker.START_RD))
+	a["volatility"] = float(a.get("volatility", Matchmaker.START_VOLATILITY))
+	a["rated_at"] = float(a.get("rated_at", 0.0))
+	a["last_opponent"] = str(a.get("last_opponent", ""))
 	a["trophies"] = int(a.get("trophies", 0))
 	a["best_trophies"] = maxi(int(a.get("best_trophies", 0)), int(a["trophies"]))
 	a["wins"] = int(a.get("wins", 0))
@@ -853,7 +895,7 @@ func _register(body: Dictionary) -> Dictionary:
 	_save()
 	var a: Dictionary = _accounts[id]
 	# The only time the secret is ever sent; the server keeps just its hash.
-	return _ok({ "player_id": id, "secret": secret, "name": player_name, "rating": a["rating"],
+	return _ok({ "player_id": id, "secret": secret, "name": player_name, "rating": roundi(float(a["rating"])),
 		"trophies": a["trophies"] })
 
 
@@ -888,9 +930,8 @@ func _delete_account(body: Dictionary) -> Dictionary:
 	if not _authed(pid, str(body.get("secret", ""))):
 		return _err(403, "invalid player credentials")
 	for t in _tickets.values():
-		if t["player_id"] == pid and t["status"] == "queued":
-			t["status"] = "cancelled"
-			_touch("tickets", t["ticket"])
+		if t["player_id"] == pid and (t["status"] == "queued" or t["status"] == "found"):
+			_end_search(t, "cancelled")
 	for m in _matches.values():
 		var seat: int = (m.get("players", ["", ""]) as Array).find(pid)
 		if seat != -1 and int(m["winner"]) == -1 and m["ms"] != null:
@@ -926,16 +967,16 @@ func _leaderboard() -> Dictionary:
 	players.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if int(a["trophies"]) != int(b["trophies"]):
 			return int(a["trophies"]) > int(b["trophies"])
-		return int(a["rating"]) > int(b["rating"]))
+		return float(a["rating"]) > float(b["rating"]))
 	var top: Array = []
 	for a in players.slice(0, 20):
 		top.append(_public_account(a))
 	return _ok({ "season": _season, "players": top })
 
 
-## Joins the ranked queue (`mode`: "async" or "live"). Returns the ticket,
-## already matched if a compatible opponent was waiting; otherwise poll it
-## (the matchmaker re-runs every second as search windows widen).
+## Joins the ranked queue (`mode`: "async" or "live") and returns the ticket
+## view. The client then polls it (its heartbeat) and accepts when it turns
+## "found"; see the header for the whole flow.
 func _enqueue(body: Dictionary) -> Dictionary:
 	var pid := str(body.get("player_id", ""))
 	if not _authed(pid, str(body.get("secret", ""))):
@@ -959,13 +1000,13 @@ func _enqueue(body: Dictionary) -> Dictionary:
 	if err != "":
 		return _err(400, "invalid squad: %s" % err)
 
-	# One search per player: drop any stale ticket of ours.
+	# One search per player: end any other search of ours.
 	for t in _tickets.values():
-		if t["player_id"] == pid and t["status"] == "queued":
-			t["status"] = "cancelled"
-			_touch("tickets", t["ticket"])
+		if t["player_id"] == pid and (t["status"] == "queued" or t["status"] == "found"):
+			_end_search(t, "cancelled")
+	var now := Time.get_unix_time_from_system()
 	var ticket := { "ticket": _new_id(), "player_id": pid, "status": "queued", "mode": mode, "squad": squad,
-		"rating": int(_accounts[pid]["rating"]), "queued_at": Time.get_unix_time_from_system(),
+		"queued_at": now, "last_seen": now, "partner": "", "seat": -1, "found_at": 0.0, "accepted": false,
 		"match_id": "", "team": -1, "token": "" }
 	_tickets[ticket["ticket"]] = ticket
 	_touch("tickets", ticket["ticket"])
@@ -974,47 +1015,117 @@ func _enqueue(body: Dictionary) -> Dictionary:
 	return _ok(_ticket_view(ticket))
 
 
-## Pairs queued tickets of the same mode whose search windows both accept
-## the rating gap, oldest ticket first, each with its closest candidate.
-## Returns the number of matches made.
+## One matchmaker tick: expires abandoned searches, times out unconfirmed
+## pairs, and pairs fresh tickets (Matchmaker.pair). Returns the number of
+## changes (the caller saves when > 0).
 func _run_matchmaker() -> int:
 	var now := Time.get_unix_time_from_system()
-	var queued: Array = []
+	var changes := 0
+	var fresh: Array = []
 	for t in _tickets.values():
-		if t["status"] == "queued":
-			queued.append(t)
-	queued.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["queued_at"]) < float(b["queued_at"]))
-	var made := 0
-	for a in queued:
-		if a["status"] != "queued":
-			continue
-		var best: Dictionary = {}
-		for b in queued:
-			if b == a or b["status"] != "queued" or b["mode"] != a["mode"] or b["player_id"] == a["player_id"]:
-				continue
-			if not Ladder.can_pair(int(a["rating"]), now - float(a["queued_at"]),
-					int(b["rating"]), now - float(b["queued_at"])):
-				continue
-			if best.is_empty() or absi(int(b["rating"]) - int(a["rating"])) < absi(int(best["rating"]) - int(a["rating"])):
-				best = b
-		if best.is_empty():
-			continue
+		var status := str(t["status"])
+		var seen := float(t.get("last_seen", t["queued_at"]))
+		if status == "found" and now - float(t["found_at"]) > ACCEPT_SEC:
+			var partner: Dictionary = _tickets.get(str(t["partner"]), {})
+			# Whoever confirmed goes back to the queue, keeping their place;
+			# whoever didn't is gone.
+			for side in [t, partner]:
+				if side.is_empty() or side["status"] != "found":
+					continue
+				if bool(side["accepted"]):
+					_requeue(side)
+				else:
+					_end_search(side, "expired")
+			changes += 1
+		elif status == "queued" and now - seen > TICKET_EXPIRE_SEC:
+			_end_search(t, "expired")
+			changes += 1
+		elif status == "queued" and now - seen <= TICKET_STALE_SEC and _accounts.has(t["player_id"]):
+			var acc: Dictionary = _accounts[t["player_id"]]
+			fresh.append({ "ticket": t["ticket"], "player_id": t["player_id"], "mode": t["mode"],
+				"rating": float(acc["rating"]), "rd": _current_rd(acc),
+				"wait": now - float(t["queued_at"]), "last_opponent": str(acc.get("last_opponent", "")) })
+	for p in Matchmaker.pair(fresh):
+		var a: Dictionary = _tickets[p[0]["ticket"]]
+		var b: Dictionary = _tickets[p[1]["ticket"]]
 		# The player who waited longer hosts (team 0).
-		var m := _new_match(a["squad"], fixed_seed if fixed_seed >= 0 else _new_seed(), true, str(a["mode"]))
-		var token1 := _seat_second(m, best["squad"])
-		m["players"] = [a["player_id"], best["player_id"]]
-		a.merge({ "status": "matched", "match_id": m["id"], "team": 0, "token": m["tokens"][0] }, true)
-		best.merge({ "status": "matched", "match_id": m["id"], "team": 1, "token": token1 }, true)
+		a.merge({ "status": "found", "partner": b["ticket"], "seat": 0, "found_at": now, "accepted": false }, true)
+		b.merge({ "status": "found", "partner": a["ticket"], "seat": 1, "found_at": now, "accepted": false }, true)
 		_touch("tickets", a["ticket"])
-		_touch("tickets", best["ticket"])
-		made += 1
-	return made
+		_touch("tickets", b["ticket"])
+		changes += 1
+	return changes
 
 
+## Ready check: the client confirms a found match (proving it's still
+## there). When both have, the match is created.
+func _accept_ticket(id: String, secret: String) -> Dictionary:
+	var t: Dictionary = _tickets.get(id, {})
+	if t.is_empty() or not _authed(str(t["player_id"]), secret):
+		return _err(404, "ticket not found")
+	t["last_seen"] = Time.get_unix_time_from_system()
+	if t["status"] != "found":
+		return _ok(_ticket_view(t))
+	t["accepted"] = true
+	_touch("tickets", id)
+	var partner: Dictionary = _tickets.get(str(t["partner"]), {})
+	if not partner.is_empty() and partner["status"] == "found" and bool(partner["accepted"]):
+		if int(t["seat"]) == 0:
+			_start_found_match(t, partner)
+		else:
+			_start_found_match(partner, t)
+	_save()
+	return _ok(_ticket_view(t))
+
+
+## Creates the ranked match for a confirmed pair (`host` is team 0).
+func _start_found_match(host: Dictionary, guest: Dictionary) -> void:
+	var now := Time.get_unix_time_from_system()
+	var mode := str(host["mode"])
+	var m := _new_match(host["squad"], fixed_seed if fixed_seed >= 0 else _new_seed(), true, mode)
+	var token1 := _seat_second(m, guest["squad"])
+	m["players"] = [host["player_id"], guest["player_id"]]
+	host.merge({ "status": "matched", "match_id": m["id"], "team": 0, "token": m["tokens"][0] }, true)
+	guest.merge({ "status": "matched", "match_id": m["id"], "team": 1, "token": token1 }, true)
+	for t in [host, guest]:
+		_touch("tickets", t["ticket"])
+		var waited := now - float(t["queued_at"])
+		_avg_wait[mode] = waited if not _avg_wait.has(mode) \
+			else lerpf(float(_avg_wait[mode]), waited, WAIT_EWMA)
+
+
+## Puts a found ticket back in the queue (its partner didn't confirm). It
+## keeps its original queue time, so it's first in line.
+func _requeue(t: Dictionary) -> void:
+	t.merge({ "status": "queued", "partner": "", "seat": -1, "found_at": 0.0, "accepted": false }, true)
+	_touch("tickets", t["ticket"])
+
+
+## Ends a search (`status` "cancelled" or "expired"). A found partner goes
+## back to the queue.
+func _end_search(t: Dictionary, status: String) -> void:
+	if t["status"] == "found":
+		var partner: Dictionary = _tickets.get(str(t["partner"]), {})
+		if not partner.is_empty() and partner["status"] == "found":
+			_requeue(partner)
+	t["status"] = status
+	t["partner"] = ""
+	_touch("tickets", t["ticket"])
+
+
+## The player's current rating deviation, grown back over idle time.
+func _current_rd(acc: Dictionary) -> float:
+	var rated_at := float(acc.get("rated_at", 0.0))
+	var idle_days := 0.0 if rated_at <= 0.0 else (Time.get_unix_time_from_system() - rated_at) / 86400.0
+	return Matchmaker.decayed_rd(float(acc["rd"]), idle_days)
+
+
+## Polling a ticket is also its heartbeat.
 func _poll_ticket(id: String, secret: String) -> Dictionary:
 	var t: Dictionary = _tickets.get(id, {})
 	if t.is_empty() or not _authed(str(t["player_id"]), secret):
 		return _err(404, "ticket not found")
+	t["last_seen"] = Time.get_unix_time_from_system()
 	return _ok(_ticket_view(t))
 
 
@@ -1022,15 +1133,26 @@ func _cancel_ticket(id: String, secret: String) -> Dictionary:
 	var t: Dictionary = _tickets.get(id, {})
 	if t.is_empty() or not _authed(str(t["player_id"]), secret):
 		return _err(404, "ticket not found")
-	if t["status"] == "queued":
-		t["status"] = "cancelled"
-		_touch("tickets", id)
+	if t["status"] == "queued" or t["status"] == "found":
+		_end_search(t, "cancelled")
 		_save()
 	return _ok(_ticket_view(t))
 
 
 func _ticket_view(t: Dictionary) -> Dictionary:
-	var out := { "ticket": t["ticket"], "status": t["status"], "mode": t.get("mode", "async") }
+	var now := Time.get_unix_time_from_system()
+	var mode := str(t.get("mode", "async"))
+	var searching := 0
+	for other in _tickets.values():
+		if other["mode"] == mode and (other["status"] == "queued" or other["status"] == "found") \
+				and now - float(other.get("last_seen", 0.0)) <= TICKET_STALE_SEC:
+			searching += 1
+	var out := { "ticket": t["ticket"], "status": t["status"], "mode": mode,
+		"wait_sec": snappedf(now - float(t["queued_at"]), 0.1), "searching": searching,
+		"estimated_wait": snappedf(float(_avg_wait.get(mode, -1.0)), 0.1) }
+	if t["status"] == "found":
+		out["accept_sec_left"] = snappedf(maxf(0.0, ACCEPT_SEC - (now - float(t["found_at"]))), 0.1)
+		out["accepted"] = bool(t["accepted"])
 	if t["status"] == "matched":
 		out.merge({ "match_id": t["match_id"], "team": int(t["team"]), "token": t["token"] })
 		if public_live_url != "":
@@ -1038,26 +1160,36 @@ func _ticket_view(t: Dictionary) -> Dictionary:
 	return out
 
 
-## Elo update for a finished ranked match (K = ELO_K).
-func _apply_elo(m: Dictionary, winner: int) -> void:
+## Glicko-2 update for a finished ranked match (one rating period each).
+func _apply_rating(m: Dictionary, winner: int) -> void:
 	var players: Array = m.get("players", ["", ""])
 	if not (_accounts.has(players[0]) and _accounts.has(players[1])):
 		return
-	var a: Dictionary = _accounts[players[0]]
-	var b: Dictionary = _accounts[players[1]]
-	var deltas := elo_deltas(int(a["rating"]), int(b["rating"]), winner)
-	a["rating"] = int(a["rating"]) + deltas[0]
-	b["rating"] = int(b["rating"]) + deltas[1]
-	_touch("accounts", a["id"])
-	_touch("accounts", b["id"])
+	var accs: Array = [_accounts[players[0]], _accounts[players[1]]]
+	var before: Array = []
+	for acc in accs:
+		before.append({ "rating": float(acc["rating"]), "rd": _current_rd(acc), "volatility": float(acc["volatility"]) })
+	var now := Time.get_unix_time_from_system()
+	var deltas := [0, 0]
+	for i in 2:
+		var score := 0.5
+		if winner == 0 or winner == 1:
+			score = 1.0 if winner == i else 0.0
+		var after := Matchmaker.rate(before[i], before[1 - i], score)
+		var acc: Dictionary = accs[i]
+		acc["rating"] = float(after["rating"])
+		acc["rd"] = clampf(float(after["rd"]), Matchmaker.MIN_RD, Matchmaker.MAX_RD)
+		acc["volatility"] = float(after["volatility"])
+		acc["rated_at"] = now
+		acc["last_opponent"] = str(players[1 - i])
+		deltas[i] = roundi(float(after["rating"])) - roundi(float(before[i]["rating"]))
+		_touch("accounts", acc["id"])
 	if winner == 0 or winner == 1:
-		var winner_acc: Dictionary = a if winner == 0 else b
-		var loser_acc: Dictionary = b if winner == 0 else a
-		winner_acc["wins"] = int(winner_acc["wins"]) + 1
-		loser_acc["losses"] = int(loser_acc["losses"]) + 1
+		accs[winner]["wins"] = int(accs[winner]["wins"]) + 1
+		accs[1 - winner]["losses"] = int(accs[1 - winner]["losses"]) + 1
 	else:
-		a["draws"] = int(a["draws"]) + 1
-		b["draws"] = int(b["draws"]) + 1
+		for acc in accs:
+			acc["draws"] = int(acc["draws"]) + 1
 	m["rating_change"] = deltas
 
 
@@ -1075,14 +1207,6 @@ func _apply_trophies(m: Dictionary, winner: int) -> void:
 		accs[i]["best_trophies"] = maxi(int(accs[i]["best_trophies"]), int(accs[i]["trophies"]))
 		_touch("accounts", accs[i]["id"])
 	m["trophy_change"] = deltas
-
-
-## Rating changes [team0, team1] when `winner` (0, 1, or MatchRunner.DRAW) wins.
-static func elo_deltas(r0: int, r1: int, winner: int) -> Array:
-	var expected0 := 1.0 / (1.0 + pow(10.0, (r1 - r0) / 400.0))
-	var score0 := 1.0 if winner == 0 else (0.0 if winner == 1 else 0.5)
-	var d0 := roundi(ELO_K * (score0 - expected0))
-	return [d0, -d0]
 
 
 func _authed(pid: String, secret: String) -> bool:
@@ -1109,7 +1233,7 @@ static func _same(a: String, b: String) -> bool:
 
 
 func _public_account(a: Dictionary) -> Dictionary:
-	return { "player_id": a["id"], "name": a["name"], "rating": a["rating"], "trophies": a["trophies"],
+	return { "player_id": a["id"], "name": a["name"], "rating": roundi(float(a["rating"])), "trophies": a["trophies"],
 		"best_trophies": a["best_trophies"], "arena": Ladder.arena_name(int(a["best_trophies"])),
 		"wins": a["wins"], "losses": a["losses"], "draws": a["draws"] }
 

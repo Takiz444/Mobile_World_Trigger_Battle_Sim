@@ -568,14 +568,15 @@ func _test_squad_validation() -> void:
 # --- Server ---------------------------------------------------------------------
 
 func _test_elo() -> void:
-	_check(MatchServer.elo_deltas(1000, 1000, 0) == [16, -16], "even match: winner +16, loser -16")
 	var server := MatchServer.new()
 	server.persist = false
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
 	var a: Dictionary = server._register({ "name": "A" })["body"]
 	var b: Dictionary = server._register({ "name": "B" })["body"]
-	server._enqueue({ "player_id": a["player_id"], "secret": a["secret"], "squad": squad })
-	var matched: Dictionary = server._enqueue({ "player_id": b["player_id"], "secret": b["secret"], "squad": squad })["body"]
+	var ta: Dictionary = server._enqueue({ "player_id": a["player_id"], "secret": a["secret"], "squad": squad })["body"]
+	var tb: Dictionary = server._enqueue({ "player_id": b["player_id"], "secret": b["secret"], "squad": squad })["body"]
+	server._accept_ticket(str(ta["ticket"]), a["secret"])
+	var matched: Dictionary = server._accept_ticket(str(tb["ticket"]), b["secret"])["body"]
 	var m: Dictionary = server._matches[str(matched["match_id"])]
 	for u in (m["ms"] as MatchState).teams[1]:
 		(u as UnitState).is_bailed = true
@@ -584,8 +585,11 @@ func _test_elo() -> void:
 	server._resolve_turn(m)
 	var acc_a: Dictionary = server._accounts[a["player_id"]]
 	var acc_b: Dictionary = server._accounts[b["player_id"]]
-	_check(int(m["winner"]) == 0 and int(acc_a["rating"]) == 1016 and int(acc_b["rating"]) == 984,
-		"ranked result updates Elo (%d / %d)" % [acc_a["rating"], acc_b["rating"]])
+	_check(int(m["winner"]) == 0 and roundi(acc_a["rating"]) == 1162 and roundi(acc_b["rating"]) == 838
+		and m["rating_change"] == [162, -162],
+		"ranked result updates Glicko-2 ratings (%d / %d)" % [roundi(acc_a["rating"]), roundi(acc_b["rating"])])
+	_check(float(acc_a["rd"]) < Matchmaker.START_RD and float(acc_b["rd"]) < Matchmaker.START_RD,
+		"a rated match makes both ratings more certain")
 	server.free()
 
 

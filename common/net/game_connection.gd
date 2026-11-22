@@ -91,29 +91,44 @@ func ensure_account(player_name: String) -> Dictionary:
 
 
 ## Queues `squad` (encoded) in `mode` ("live" / "async") and waits for an
-## opponent. `keep_waiting` is polled each second; returning false cancels.
+## opponent, following the server's ticket flow (MatchServer header):
+##   queued  -> poll every QUEUE_POLL_SEC (the poll is the heartbeat),
+##   found   -> accept right away (the ready check),
+##   expired -> the search lapsed (e.g. the tab was hidden): search again,
+##   matched -> done.
+## `keep_waiting` is checked each step; returning false cancels.
+## `on_update` (optional) gets every ticket view, for the UI.
 ## Returns the matched ticket ({match_id, team, token, live_url?}), or {}.
-func find_match(squad: Array, mode: String, keep_waiting: Callable) -> Dictionary:
+func find_match(squad: Array, mode: String, keep_waiting: Callable, on_update := Callable()) -> Dictionary:
 	if account.is_empty():
 		last_error = "no account"
 		return {}
-	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
-	# Already in a live match (e.g. the app was closed mid-match): rejoin it.
-	if int(res.get("status", 0)) == 409 and res["body"].get("active") is Dictionary:
-		var active: Dictionary = res["body"]["active"]
-		active["status"] = "matched"
-		if str(active.get("live_url", "")) == "" and live_url != "":
-			active["live_url"] = live_url
-		return active
-	if not res.get("success", false):
-		last_error = "Matchmaking failed: %s" % str(res.get("error", "?"))
-		return {}
-	var ticket: Dictionary = res["body"]
-	while str(ticket.get("status", "")) == "queued" and keep_waiting.call():
+	var ticket := await _enqueue(squad, mode)
+	while not ticket.is_empty() and keep_waiting.call():
+		if on_update.is_valid():
+			on_update.call(ticket)
+		var status := str(ticket.get("status", ""))
+		if status == "matched":
+			break
+		if status == "expired":
+			ticket = await _enqueue(squad, mode)
+			continue
+		if status == "cancelled":
+			last_error = "Search cancelled (is this account searching in another window?)"
+			return {}
+		if status == "found" and not bool(ticket.get("accepted", false)):
+			var acc := await backend.accept_queue(str(ticket["ticket"]), account["secret"])
+			if acc.get("success", false):
+				ticket = acc["body"]
+				continue
 		await get_tree().create_timer(QUEUE_POLL_SEC).timeout
 		var poll := await backend.poll_queue(str(ticket["ticket"]), account["secret"])
 		if poll.get("success", false):
 			ticket = poll["body"]
+		elif int(poll.get("status", 0)) == 404:
+			ticket["status"] = "expired"   # e.g. the server was wiped: start over
+	if ticket.is_empty():
+		return {}
 	if str(ticket.get("status", "")) == "matched":
 		if str(ticket.get("live_url", "")) == "" and live_url != "":
 			ticket["live_url"] = live_url
@@ -121,6 +136,21 @@ func find_match(squad: Array, mode: String, keep_waiting: Callable) -> Dictionar
 	await backend.cancel_queue(str(ticket.get("ticket", "")), account["secret"])
 	last_error = "Search cancelled."
 	return {}
+
+
+## Puts a search in; the ticket view, or {} (last_error says why). Already
+## being in a live match (e.g. the app was closed mid-match) returns that
+## match as a matched ticket, so the client rejoins it.
+func _enqueue(squad: Array, mode: String) -> Dictionary:
+	var res := await backend.queue_ranked(account["player_id"], account["secret"], squad, mode)
+	if int(res.get("status", 0)) == 409 and res["body"].get("active") is Dictionary:
+		var active: Dictionary = res["body"]["active"]
+		active["status"] = "matched"
+		return active
+	if not res.get("success", false):
+		last_error = "Matchmaking failed: %s" % str(res.get("error", "?"))
+		return {}
+	return res["body"]
 
 
 ## Unfinished matches of this account on the server (see

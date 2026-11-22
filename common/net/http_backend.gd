@@ -110,14 +110,20 @@ func leaderboard() -> Dictionary:
 	return await request("GET", "/leaderboard")
 
 
-## Joins the ranked queue; the response is either matched or a ticket to poll.
+## Joins the ranked queue and returns the ticket to poll (MatchServer header).
 ## `mode` is "async" (correspondence) or "live" (trophy ladder).
 func queue_ranked(player_id: String, secret: String, squad: Array, mode := "async") -> Dictionary:
 	return await request("POST", "/queue", { "player_id": player_id, "secret": secret, "squad": squad, "mode": mode })
 
 
+## Polls a ticket; this is also its heartbeat, so poll about once a second.
 func poll_queue(ticket: String, secret: String) -> Dictionary:
 	return await request("GET", "/queue/%s" % ticket, {}, secret)
+
+
+## Confirms a "found" match (the ready check).
+func accept_queue(ticket: String, secret: String) -> Dictionary:
+	return await request("POST", "/queue/%s/accept" % ticket, { "secret": secret })
 
 
 ## The account's unfinished matches ({matches: [{match_id, team, token, mode,

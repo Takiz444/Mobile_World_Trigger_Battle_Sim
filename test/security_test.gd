@@ -264,7 +264,9 @@ func _test_accounts_and_resume() -> void:
 		"public profile exposes no secret material")
 
 	var q0 := await b.queue_ranked(a["player_id"], a["secret"], squad, "live")
-	await b.queue_ranked(c["player_id"], c["secret"], squad, "live")
+	var qc := await b.queue_ranked(c["player_id"], c["secret"], squad, "live")
+	await b.accept_queue(str(q0["body"]["ticket"]), a["secret"])
+	await b.accept_queue(str(qc["body"]["ticket"]), c["secret"])
 	var polled := await b.poll_queue(str(q0["body"]["ticket"]), a["secret"])
 	_check(str(polled["body"].get("status", "")) == "matched", "queue poll works with a bearer secret")
 	var in_url := await b.request("GET", "/queue/%s?secret=%s" % [q0["body"]["ticket"], a["secret"]])

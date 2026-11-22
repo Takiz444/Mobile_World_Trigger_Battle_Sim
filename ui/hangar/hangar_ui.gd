@@ -605,10 +605,14 @@ func _on_find_ranked(mode: String) -> void:
 	var idle_text := button.text
 	_searching = true
 	button.text = "Cancel Search"
-	_net_status.text = "Searching for an opponent…  (%s · %d trophies · %s)" % [
+	var who := "%s · %d trophies · %s" % [
 		account.get("name", ""), int(account.get("trophies", 0)), str(account.get("arena", ""))]
+	_net_status.text = "Searching for an opponent…  (%s)" % who
 	var ticket := await _conn.find_match(PlanCodec.encode_squad(MatchSession.squad), mode,
-		func() -> bool: return _searching)
+		func() -> bool: return _searching,
+		func(t: Dictionary) -> void:
+			if is_inside_tree() and _searching:
+				_net_status.text = search_status_text(t, who))
 	_searching = false
 	button.text = idle_text
 	if ticket.is_empty():
@@ -621,6 +625,32 @@ func _on_find_ranked(mode: String) -> void:
 	MatchSession.token = str(ticket["token"])
 	_net_status.text = "Opponent found — ranked match %s" % MatchSession.match_id
 	_start_match_scene()
+
+
+## The status line for a matchmaking ticket view (GameConnection.find_match).
+static func search_status_text(t: Dictionary, who: String) -> String:
+	match str(t.get("status", "")):
+		"found":
+			return "Opponent found!  Getting ready…"
+		"matched":
+			return "Opponent found!  Starting the battle…"
+		"expired":
+			return "Reconnecting to the queue…"
+	var text := "Searching for an opponent…  %s" % _clock(float(t.get("wait_sec", 0.0)))
+	var others := int(t.get("searching", 1)) - 1
+	if others > 0:
+		text += "  ·  %d other player%s searching" % [others, "" if others == 1 else "s"]
+	else:
+		text += "  ·  no one else is searching yet"
+	var usual := float(t.get("estimated_wait", -1.0))
+	if usual >= 0.0:
+		text += "  ·  usual wait %s" % _clock(usual)
+	return text + "\n(%s)" % who
+
+
+static func _clock(sec: float) -> String:
+	var s := maxi(0, int(sec))
+	return "%d:%02d" % [s / 60, s % 60]
 
 
 func _start_match_scene() -> void:

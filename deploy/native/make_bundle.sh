@@ -14,6 +14,8 @@ OUT="${1:-build/trion-bundle.tgz}"
 STAGE="build/bundle"
 
 rm -rf "$STAGE" && mkdir -p "$STAGE/app" "$STAGE/web"
+# Keep Godot from importing the staged copy of the project (duplicate classes).
+touch build/.gdignore
 git archive HEAD | tar -x -C "$STAGE/app"
 "$GODOT" --headless --path . --export-release "Web" "$STAGE/web/index.html" >/dev/null 2>&1
 test -s "$STAGE/web/index.wasm" || { echo "Web export failed" >&2; exit 1; }
