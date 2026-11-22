@@ -60,7 +60,13 @@ fi
 # 2. Packages ---------------------------------------------------------------
 say "Installing packages"
 if command -v dnf >/dev/null 2>&1; then
-	dnf install -y -q curl unzip tar gzip fontconfig cronie >/dev/null
+	# dnf loading every repo's metadata gets OOM-killed on a 1 GB VM: skip it
+	# when nothing is missing, and otherwise use only the two base repos.
+	missing=$(rpm -q curl unzip tar gzip fontconfig cronie openssl | awk '/is not installed/ { print $2 }')
+	if [ -n "$missing" ]; then
+		dnf install -y -q --setopt=install_weak_deps=False --disablerepo='*' \
+			--enablerepo='ol*_baseos_latest' --enablerepo='ol*_appstream' $missing >/dev/null
+	fi
 	systemctl enable --now crond >/dev/null 2>&1 || true
 else
 	apt-get update -qq && apt-get install -y -qq curl unzip tar gzip libfontconfig1 cron >/dev/null

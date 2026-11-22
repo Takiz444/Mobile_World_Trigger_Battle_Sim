@@ -47,6 +47,30 @@ Optional: on Oracle, idle Always Free VMs can be reclaimed after 7 days of
 very low use. Upgrading the account to Pay-As-You-Go prevents that, and
 Always Free resources stay free.
 
+## Small VM (1 GB, no Docker): the current production setup
+
+Production currently runs on an **Always Free VM.Standard.E2.1.Micro** (Oracle
+Linux 9, about 500 MB of usable RAM). Docker and Postgres don't fit there, so
+`deploy/native/install.sh` runs the same pieces as systemd services instead:
+Caddy, plus the Godot server with the file store (`TT_STORE=dir`, in
+`/var/lib/trion/store`, tarred daily to `/var/backups/trion`).
+
+- Live at: <https://150-136-143-127.sslip.io/>
+- Secrets: `/etc/trion/trion.env` on the VM (admin key, generated there).
+- Deploy or update, from this machine (Git Bash):
+  ```sh
+  GODOT=/path/to/godot deploy/native/make_bundle.sh      # -> build/trion-bundle.tgz
+  scp -i <key> build/trion-bundle.tgz opc@150.136.143.127:
+  ssh -i <key> opc@150.136.143.127 'rm -rf bundle && mkdir bundle && tar -xzf trion-bundle.tgz -C bundle && sudo bash bundle/app/deploy/native/install.sh'
+  ```
+  The bundle is built from committed code (`git archive HEAD`), so commit first.
+- Logs: `sudo journalctl -u trion-server -u caddy -f`
+- Season reset: `sudo bash -c 'source /etc/trion/trion.env; curl -fsS -X POST -H "Authorization: Bearer $TT_ADMIN_KEY" http://127.0.0.1:8080/admin/season/reset'`
+
+When an A1 VM (more RAM) is available, use the Docker path above. To move data
+from the file store to Postgres, the records would need to be imported; nothing
+does that yet.
+
 ## Updating
 
 ```sh

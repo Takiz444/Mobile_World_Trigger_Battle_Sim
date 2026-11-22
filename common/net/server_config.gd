@@ -12,9 +12,9 @@ extends RefCounted
 ## HTTPS origin as the API, so a web build talks to whatever host served it
 ## (no CORS, no hard-coded address).
 
-## TODO(human): the production server address for native (iOS/Steam) builds,
-## e.g. "https://play.example.com" (the TT_DOMAIN that deploy/bootstrap.sh prints).
-const PRODUCTION_URL := ""
+## The production server address for native (iOS/Steam) builds: the Oracle
+## Cloud VM (deploy/README.md). Changes if the VM's public IP or domain does.
+const PRODUCTION_URL := "https://150-136-143-127.sslip.io"
 const DEV_URL := "http://127.0.0.1:8080"
 
 
