@@ -355,9 +355,9 @@ func _refresh_ranked_info(account: Dictionary) -> void:
 
 ## While a search runs, other ways to start a match are locked.
 func _set_play_locked(locked: bool, searching_button: Button) -> void:
-	for b in [_start_button, _host_btn, _join_btn, _live_btn, _ranked_btn, _resume_btn]:
+	for b in [_start_button, _host_btn, _host_live, _join_btn, _live_btn, _ranked_btn, _resume_btn]:
 		if b != searching_button:
-			(b as Button).disabled = locked
+			(b as BaseButton).disabled = locked
 	_name_input.editable = not locked
 	_join_input.editable = not locked
 
@@ -674,6 +674,7 @@ func _connect_server() -> bool:
 		_net_status.text = _conn.last_error if _conn.status == GameConnection.Status.OUTDATED \
 			else "Server unavailable: %s" % _conn.last_error
 		return false
+	_net_status.text = ""
 	return true
 
 
