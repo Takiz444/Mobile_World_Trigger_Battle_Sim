@@ -27,10 +27,6 @@ window/handheld/orientation=4
 
 theme/custom="res://ui/theme.tres"
 
-[input_devices]
-
-pointing/emulate_mouse_from_touch=true
-
 [physics]
 
 3d/physics_engine="Jolt Physics"
@@ -38,3 +34,4 @@ pointing/emulate_mouse_from_touch=true
 [rendering]
 
 rendering_device/driver.windows="d3d12"
+textures/vram_compression/import_etc2_astc=true
