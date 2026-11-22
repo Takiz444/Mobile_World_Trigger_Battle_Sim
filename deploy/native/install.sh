@@ -56,6 +56,9 @@ if [ "$total_swap_mb" -lt 1500 ] && [ ! -f /swapfile-trion ]; then
 	swapon /swapfile-trion
 	echo "/swapfile-trion none swap sw 0 0" >> /etc/fstab
 fi
+# Prefer RAM: heavy swapping on a 1/8-CPU VM stalls everything, SSH included.
+echo "vm.swappiness = 10" > /etc/sysctl.d/90-trion.conf
+sysctl -q -p /etc/sysctl.d/90-trion.conf || true
 
 # 2. Packages ---------------------------------------------------------------
 say "Installing packages"
@@ -143,6 +146,8 @@ EOF
 elif [ -n "$DOMAIN_ARG" ]; then
 	sed -i "s/^TT_DOMAIN=.*/TT_DOMAIN=$DOMAIN_ARG/; s|^TT_PUBLIC_LIVE_URL=.*|TT_PUBLIC_LIVE_URL=wss://$DOMAIN_ARG/live|" "$ENV_FILE"
 fi
+# Small VM: keep finished matches in memory for an hour (they stay in the store).
+grep -q '^TT_MATCH_RETENTION_SEC=' "$ENV_FILE" || echo "TT_MATCH_RETENTION_SEC=3600" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 DOMAIN=$(grep -E '^TT_DOMAIN=' "$ENV_FILE" | cut -d= -f2-)
 cat > /etc/trion/caddy.env <<EOF
@@ -172,7 +177,11 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=$DATA
 CapabilityBoundingSet=
-MemoryHigh=450M
+# A hard cap: if memory ever runs away, the server is killed and restarted in
+# seconds (matches resume from the store) instead of swapping the VM to a halt.
+MemoryMax=320M
+MemorySwapMax=64M
+OOMScoreAdjust=300
 
 [Install]
 WantedBy=multi-user.target
@@ -200,6 +209,8 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/caddy
 LimitNOFILE=65536
+MemoryMax=160M
+MemorySwapMax=32M
 
 [Install]
 WantedBy=multi-user.target
