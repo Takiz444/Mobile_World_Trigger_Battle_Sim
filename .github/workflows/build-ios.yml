@@ -55,12 +55,6 @@ jobs:
           ./Godot.app/Contents/MacOS/Godot --headless --export-release "iOS" ios_build/GameSense.xcodeproj || true
           test -d ios_build/GameSense.xcodeproj
 
-      - name: Bump iOS Build Number
-        run: |
-          PLIST_PATH=$(find ios_build -name "Info.plist" -maxdepth 3 | head -n 1)
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST_PATH"
-          echo "Set CFBundleVersion to ${{ github.run_number }} in $PLIST_PATH"
-
       - name: Build and Archive
         run: |
           xcodebuild -project ios_build/GameSense.xcodeproj \
