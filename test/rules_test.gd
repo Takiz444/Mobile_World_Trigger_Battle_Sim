@@ -16,6 +16,7 @@ func _ready() -> void:
 	_test_geometry()
 	_test_timing()
 	_test_movement()
+	_test_building_levels()
 	_test_collisions()
 	_test_attacks()
 	_test_shields()
@@ -164,6 +165,56 @@ func _test_movement() -> void:
 	p0.add(0, _point("Move", box.get_center(), 2))
 	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
 	_check(a.level == 2 and a.pos.distance_to(box.get_center()) < 0.01, "a character can walk in and climb to the roof")
+
+
+## Buildings have a ground floor and a roof only, and a Grasshopper jump the
+## turn cuts off never leaves anyone inside a wall or in mid-air.
+func _test_building_levels() -> void:
+	var ms := _arena(_block(6, 7, 6, 9, 3))
+	var geo := ms.geometry()
+	var box := _box(ms)
+	var mid := box.get_center()
+	_check(geo.level_ok(mid, 1) and geo.level_ok(mid, 3) and not geo.level_ok(mid, 2),
+		"a 3-floor building has a ground floor and a roof, no middle floor")
+	_check(bool(geo.route(Vector2(box.position.x - 2.0, mid.y), 0, mid, 3)["ok"]), "the roof is still reachable on foot")
+	var stuck := geo.settle(mid, 0)
+	_check(geo.level_ok(stuck["pos"], stuck["level"]) and int(stuck["level"]) == 3, "someone at street level inside a building is put on its roof")
+	var floating := geo.settle(Vector2(box.position.x - 1.0, mid.y), 3)
+	_check(geo.level_ok(floating["pos"], floating["level"]) and int(floating["level"]) == 0, "someone in mid-air beside a building is put on the street")
+	var wall := geo.settle(Vector2(box.position.x - 0.1, mid.y), 0)
+	_check(geo.level_ok(wall["pos"], wall["level"]), "someone inside a wall is put somewhere legal")
+
+	var near := Vector2(box.position.x - 0.8, mid.y)
+	var on_roof := Vector2(box.position.x + 1.5, mid.y)
+	# The turn ends at 1/2, 1/3 and 1/6 of the way through a jump onto the
+	# roof, and of a jump off it.
+	for hold in [5.7, 5.8, 5.9]:
+		for up in [true, false]:
+			ms = _arena(_block(6, 7, 6, 9, 3))
+			geo = ms.geometry()
+			var start: Vector2 = near if up else on_roof
+			_duel(ms, start, Vector2(1, 1), 1, 1)
+			var a: UnitState = ms.teams[0][0]
+			a.level = 0 if up else 3
+			var p0 := _plan_for(ms, 0)
+			p0.add(0, _hold("Wait", hold), TurnPlan.MOVE_LANE)
+			p0.add(0, _point("Grasshopper", on_roof if up else near, 3 if up else 0))
+			TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+			var where := "%s, turn ends %.1f s into the jump" % ["up" if up else "down", TurnEngine.TURN_SECONDS - hold]
+			_check(geo.level_ok(a.pos, a.level), "a cut-off jump lands somewhere legal (%s: %s level %d)" % [where, a.pos, a.level])
+			_check(a.pos.distance_to(near) < 0.01 or a.pos.distance_to(on_roof) < 0.01, "a cut-off jump ends at its start or its landing (%s)" % where)
+			var step := geo.route(a.pos, a.level, Vector2(box.position.x - 3.0, mid.y), 0)
+			_check(bool(step["ok"]), "after a cut-off jump the character can move again (%s)" % where)
+
+	# A character already stranded (an older turn) is put back at turn start.
+	ms = _arena(_block(6, 7, 6, 9, 3))
+	geo = ms.geometry()
+	_duel(ms, mid, Vector2(1, 1), 1, 1)
+	var lost: UnitState = ms.teams[0][0]
+	lost.level = 0
+	var p1 := _plan_for(ms, 0)
+	TurnEngine.new().resolve(ms, p1, _plan_for(ms, 1))
+	_check(geo.level_ok(lost.pos, lost.level), "a character stuck inside a building is freed at the next turn")
 
 
 func _test_collisions() -> void:

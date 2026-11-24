@@ -4,8 +4,12 @@ extends RefCounted
 ## one place to another. Positions are 2D points on the ground plane (world
 ## X, Z in metres; one old hex spacing = sqrt(3) m) plus a level:
 ##   level 0           the street (outside every building)
-##   1 .. floors - 1   inside a building, on that floor (sees out of windows)
+##   1                 inside a building, on its ground floor (sees out of
+##                     windows); a one-floor building has no inside, 1 is
+##                     its roof
 ##   floors            on the building's roof
+## Buildings have no middle floors: inside is the ground floor only, and
+## stairs go straight between it and the roof.
 ##
 ## Buildings are the same world-space boxes the renderer draws and line of
 ## sight traces against (BuildingRects), so what blocks you is what you see.
@@ -75,6 +79,9 @@ func level_ok(p: Vector2, level: int) -> bool:
 		return false
 	if level == 0:
 		return ground_ok(p)
+	# Only the ground floor (1) and the roof exist; no middle floors.
+	if level != 1 and level != floors_at(p):
+		return false
 	# Inside buildings tall enough, and a little way from their outer walls.
 	# (Adjacent segments of one block share walls: a point on that seam is
 	# still inside, so the test looks at the union, not each box.)
@@ -99,6 +106,45 @@ func ground_ok(p: Vector2) -> bool:
 		if e.has_point(p):
 			return false
 	return true
+
+
+## The nearest legal spot to (p, level), as {pos, level}: (p, level) itself
+## when a character may stand there. Over a building it lands on the roof or
+## the ground floor (whichever is closer to `level`); otherwise it steps onto
+## the nearest open street. Used to put back a character a turn left
+## somewhere it can't stand (e.g. cut off in the middle of a jump).
+func settle(p: Vector2, level: int) -> Dictionary:
+	if level_ok(p, level):
+		return { "pos": p, "level": level }
+	if not _finite(p):
+		return { "pos": p, "level": level }
+	var roof := floors_at(p)
+	if roof > 0:
+		var order := [1, roof] if level > 0 and level < roof else [roof, 1]
+		var idx := rect_at(p)
+		var box: Rect2 = rects[idx]["rect"]
+		var inner := box.grow(-2.0 * WALL_MARGIN)
+		var spots := [p]
+		if inner.size.x > 0.0 and inner.size.y > 0.0:
+			spots.append(Vector2(clampf(p.x, inner.position.x, inner.end.x), clampf(p.y, inner.position.y, inner.end.y)))
+		for q in spots:
+			for l in order:
+				if level_ok(q, l):
+					return { "pos": q, "level": l }
+	# The street: here, or the nearest open spot around it.
+	if ground_ok(p):
+		return { "pos": p, "level": 0 }
+	for ring in range(1, 41):
+		var r := 0.15 * ring
+		var n := 8 + ring * 2
+		var best := Vector2.INF
+		for k in n:
+			var q := p + Vector2.from_angle(TAU * k / n) * r
+			if ground_ok(q) and (best == Vector2.INF or q.distance_squared_to(p) < best.distance_squared_to(p)):
+				best = q
+		if best != Vector2.INF:
+			return { "pos": best, "level": 0 }
+	return { "pos": p, "level": level }
 
 
 ## Whether `level` at `p` is inside a building (below its roof): such a

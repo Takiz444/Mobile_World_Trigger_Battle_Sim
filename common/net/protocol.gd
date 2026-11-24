@@ -22,7 +22,11 @@ extends RefCounted
 ## 8: free movement in continuous space and time-based turns (no hexes, no AT).
 ## 9: matchmaking ready check (ticket status "found" + POST /queue/{t}/accept),
 ##    queue heartbeats, Glicko-2 ratings.
-const VERSION := 9
+## 10: buildings have only a ground floor and a roof; a turn that ends
+##     mid-jump lands the character (nobody is left stuck inside a wall).
+##     Version 9 clients can still play: the server resolves turns and
+##     resyncs their state.
+const VERSION := 10
 const MIN_SUPPORTED := 9
 
 

@@ -318,10 +318,11 @@ func _place_point(a: PlanAction, p: Vector2, level: int, building: int) -> void:
 	var target_level := 0
 	if TurnPlan.is_move_card(a.card):
 		target_level = level
-		# Tapping the same building again walks down its floors (Move only).
+		# Tapping the same building again goes down to its ground floor (Move
+		# only; buildings have just a ground floor and a roof).
 		if not a.card.jump and building >= 0 and a.has_point and a.level > 1 \
 				and geo.rect_at(a.point) == geo.rect_at(p) and geo.rect_at(p) != -1:
-			target_level = a.level - 1
+			target_level = 1
 		if not geo.level_ok(p, target_level):
 			_timeline.flash("Nobody can stand there.")
 			return

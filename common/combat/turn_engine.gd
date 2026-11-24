@@ -79,6 +79,12 @@ func begin(ms: MatchState, plan0: TurnPlan, plan1: TurnPlan) -> void:
 			u.shield_active = false
 			u.full_guard = false
 			u.moving = false
+			# Never plan from a spot nobody can stand on (an older turn could
+			# leave a character mid-jump inside a building).
+			if not u.is_bailed:
+				var fix := ms.geometry().settle(u.pos, u.level)
+				u.pos = fix["pos"]
+				u.level = fix["level"]
 			var moves: Array = []
 			var acts: Array = []
 			if plan != null and i < plan.units.size() and not u.is_bailed:
@@ -108,7 +114,62 @@ func step() -> Array[CombatEvent]:
 		if u.weight_time > 0.0:
 			u.weight_time = maxf(0.0, u.weight_time - (t1 - t0))
 	time = t1
+	if done():
+		_land_all(t1, events)
 	return events
+
+
+## End of the turn: anyone cut off in the middle of a jump, or stepping
+## through a wall (blocked, weighed down, or out of time), finishes or undoes
+## that step, whichever is nearer, so nobody is left floating inside a
+## building or in mid-air. Anyone else somewhere illegal goes to the nearest
+## legal spot.
+func _land_all(t: float, events: Array[CombatEvent]) -> void:
+	var geo := _ms.geometry()
+	for r in _runs:
+		var u: UnitState = r["unit"]
+		if u.is_bailed:
+			continue
+		var choices: Array = []
+		var moves: Array = r["moves"]
+		var mi: int = r["move_i"]
+		if mi < moves.size() and float(r["seg_t"]) > 0.0:
+			var segs: Array = moves[mi]["segments"]
+			var si: int = r["seg_i"]
+			if si < segs.size() and float(segs[si]["fixed"]) > 0.0:
+				var s: Dictionary = segs[si]
+				var dur := TurnPlan.segment_time(s, u.unit_data)
+				var done_side := { "pos": s["to"], "level": int(s["l1"]) }
+				var start_side := { "pos": s["from"], "level": int(s["l0"]) }
+				choices = [done_side, start_side] if float(r["seg_t"]) >= 0.5 * dur else [start_side, done_side]
+		if choices.is_empty() and geo.level_ok(u.pos, u.level):
+			continue
+		var pick := {}
+		for c in choices:
+			if geo.level_ok(c["pos"], c["level"]) and not _crowded(u, c["pos"], c["level"]):
+				pick = c
+				break
+		if pick.is_empty():
+			for c in choices:
+				if geo.level_ok(c["pos"], c["level"]):
+					pick = c
+					break
+		if pick.is_empty():
+			pick = geo.settle(u.pos, u.level)
+		if (pick["pos"] as Vector2).distance_to(u.pos) > 0.0001 or int(pick["level"]) != u.level:
+			u.pos = pick["pos"]
+			u.level = pick["level"]
+			events.append(CombatEvent.new(t, CombatEvent.Phase.MOVEMENT, "%s lands" % u.display_name(), u))
+		u.moving = false
+
+
+## Another active character on `level` within two radii of `p`.
+func _crowded(me: UnitState, p: Vector2, level: int) -> bool:
+	for r in _runs:
+		var o: UnitState = r["unit"]
+		if o != me and not o.is_bailed and o.level == level and o.pos.distance_to(p) < CityGeometry.UNIT_RADIUS * 2.0:
+			return true
+	return false
 
 
 # --- Helpers ------------------------------------------------------------------
@@ -316,7 +377,7 @@ func _move_text(u: UnitState, e: Dictionary) -> String:
 	var floors := _ms.geometry().floors_at(e["to_pos"])
 	var where := ""
 	if to_level > 0:
-		where = " onto a roof" if to_level >= floors else " into a building (floor %d)" % to_level
+		where = " onto a roof" if to_level >= floors else " into a building"
 	elif int(e["from_level"]) > 0:
 		where = " down to the street"
 	if a.card.jump:
