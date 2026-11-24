@@ -22,8 +22,11 @@ const MATCH_SEED := 12345
 const OFFBOARD := Vector2(100000, 100000)
 ## Tapping within this distance of a character picks it.
 const PICK_RADIUS := 0.9
+## Height (m) of a figure plus its HP bar and name, for tapping by screen.
+const PICK_HEIGHT := 2.5
 
 var _board: CityBoard
+var _ui_layer: CanvasLayer
 var _timeline: TimelineUI
 var _event_log: EventLogUI
 var _units_view: BoardUnits
@@ -40,6 +43,8 @@ var _enemy_plan: TurnPlan
 var _resolving := false
 var _turn := 1
 var _hover_point := Vector2.INF
+## Enemy drawn under the pointer when it last moved (-1: none).
+var _hover_enemy := -1
 var _hover_level := 0
 
 # Online mode
@@ -90,6 +95,7 @@ func setup(board: CityBoard, timeline: TimelineUI, event_log: EventLogUI, ui_lay
 	_timeline = timeline
 	_event_log = event_log
 	_camera = camera
+	_ui_layer = ui_layer
 
 	_units_view = BoardUnits.new()
 	_units_view.name = "BoardUnits"
@@ -197,6 +203,20 @@ func _build_board_view() -> void:
 	_markers.visible = true
 	if _camera != null:
 		_camera.set_bounds(_board.get_bounds())
+	_warm_up_board()
+
+
+## Web build: compile the board's shaders a few per frame behind a curtain
+## instead of all in the first frame (which froze the page; see ShaderWarmup).
+func _warm_up_board() -> void:
+	if not GfxLite.enabled() or _ui_layer == null:
+		return
+	var extras := _units_view.add_warmup_extras()
+	var warm := ShaderWarmup.start(_board, _camera, _ui_layer)
+	warm.finished.connect(func() -> void:
+		for n in extras:
+			if is_instance_valid(n):
+				n.queue_free())
 
 
 func _setup_online() -> void:
@@ -264,11 +284,17 @@ func _on_point_selected(p: Vector2, level: int, building: int) -> void:
 	var a: PlanAction = sel.get("action")
 	# Attacks: tap an enemy (one we know about).
 	if a != null and a.is_attack():
-		var enemy := _enemy_near(p)
+		var enemy := _enemy_at_screen(_board.last_tap_screen)
+		if enemy == -1:
+			enemy = _enemy_near(p)
 		if enemy != -1:
 			a.target_unit = enemy
 			_timeline.plan_edited()
 			return
+	if p == CityBoard.OFF_BOARD:
+		if a != null and a.is_attack():
+			_timeline.flash("Tap an enemy you can see (or a radar ping) to target it.")
+		return
 	# Tapping one of your characters commands it (unless placing a point).
 	var own := _own_near(p)
 	if own != -1 and (a == null or not (a.needs_target() and _wants_point(a))):
@@ -360,6 +386,40 @@ func _enemy_near(p: Vector2) -> int:
 	return best
 
 
+## The enemy drawn at screen point `screen` (its body, HP bar, or name, all
+## stacked above its feet), or -1. The board's tap point is where the camera
+## ray meets the ground or a roof, which lands well behind a standing figure
+## (about 0.8 m per meter of height at this camera angle), so tapping a body
+## or a name label used to miss the enemy's ground spot.
+func _enemy_at_screen(screen: Vector2) -> int:
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null or not screen.is_finite():
+		return -1
+	var best := -1
+	var best_d := INF
+	for i in _enemy_states.size():
+		var e := _enemy_states[i]
+		if e.is_bailed:
+			continue
+		var at := _known_pos(e)
+		if at == OFFBOARD:
+			continue
+		# Radar pings are drawn on the street.
+		var lvl := e.level if e.fog == Visibility.State.SIGHT else 0
+		var foot := Vector3(at.x, HexCoord.GROUND_Y + lvl * HexCoord.FLOOR_HEIGHT, at.y)
+		var top := foot + Vector3(0, PICK_HEIGHT, 0)
+		if cam.is_position_behind(foot) or cam.is_position_behind(top):
+			continue
+		var a := cam.unproject_position(foot)
+		var b := cam.unproject_position(top)
+		var reach := clampf(a.distance_to(b) / PICK_HEIGHT * PICK_RADIUS, 22.0, 90.0)
+		var d := Geometry2D.get_closest_point_to_segment(screen, a, b).distance_to(screen)
+		if d <= reach and d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
 ## Where we believe an enemy is: exact in sight, the ping on radar, else OFFBOARD.
 func _known_pos(e: UnitState) -> Vector2:
 	if e.fog == Visibility.State.SIGHT and e.pos != OFFBOARD:
@@ -372,6 +432,7 @@ func _known_pos(e: UnitState) -> Vector2:
 func _on_point_hovered(p: Vector2, level: int) -> void:
 	_hover_point = p
 	_hover_level = level
+	_hover_enemy = _enemy_at_screen(_board.last_tap_screen)
 	var a := _timeline.get_selected_action()
 	if a != null and a.needs_target():
 		_update_targeting()
@@ -556,7 +617,7 @@ func _update_prediction(a: PlanAction, u: UnitState, pos: Vector2, lvl: int) -> 
 		return
 	var ti := a.target_unit
 	if ti < 0 and _hover_point != Vector2.INF:
-		ti = _enemy_near(_hover_point)
+		ti = _hover_enemy if _hover_enemy != -1 else _enemy_near(_hover_point)
 	if ti < 0 or ti >= _enemy_states.size():
 		return
 	var target := _enemy_states[ti]

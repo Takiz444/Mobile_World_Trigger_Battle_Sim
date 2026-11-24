@@ -68,6 +68,10 @@ func _setup_lights() -> void:
 	sun.shadow_enabled = true
 	sun.shadow_blur = 1.5
 	sun.directional_shadow_max_distance = 90.0
+	if GfxLite.enabled():
+		# One shadow map instead of four splits: much less shader code to
+		# compile on WebGL (see GfxLite).
+		sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
 	add_child(sun)
 
 	var fill := DirectionalLight3D.new()

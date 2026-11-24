@@ -204,6 +204,7 @@ func _check_planning_ui() -> void:
 	_controller._on_point_selected(ally.pos, ally.level, -1)
 	_check(_timeline.get_current_unit() == 1, "tapping a character on the board commands it")
 	_timeline.select_unit(0)
+	_check_tap_enemy_label()
 
 	# The live buzzer submits whatever is planned: half-made plans get cleaned.
 	_timeline.begin_new_turn()
@@ -223,6 +224,60 @@ func _check_planning_ui() -> void:
 	_timeline._on_card_tapped(TriggerLibrary.get_move_card())
 	_check(plan.lane(0, TurnPlan.MOVE_LANE).is_empty(), "a locked plan can't be edited")
 	_timeline.set_locked(false)
+	_timeline.begin_new_turn()
+
+
+## Aiming an attack by tapping the enemy as drawn: its name label and its
+## chest, not just the ground under its feet (the camera ray behind a
+## standing figure lands meters away from its feet).
+func _check_tap_enemy_label() -> void:
+	var ei := -1
+	for i in _controller._enemy_states.size():
+		if not _controller._enemy_states[i].is_bailed:
+			ei = i
+			break
+	_check(ei != -1, "an enemy is still in play to target")
+	if ei == -1:
+		return
+	var enemy: UnitState = _controller._enemy_states[ei]
+	var saved_fog := enemy.fog
+	var saved_pos := enemy.pos
+	var saved_level := enemy.level
+	# Fogged enemies have no position in our view: put this one in sight
+	# where it really stands.
+	var real: UnitState = _controller._truth.teams[1 - _controller._team][ei]
+	enemy.fog = Visibility.State.SIGHT
+	enemy.pos = real.pos
+	enemy.level = real.level
+	var foot := Vector3(enemy.pos.x, HexCoord.GROUND_Y + enemy.level * HexCoord.FLOOR_HEIGHT, enemy.pos.y)
+	# The game's view: orthographic, looking down the map at 50 degrees.
+	var cam := Camera3D.new()
+	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+	cam.size = 24.0
+	add_child(cam)
+	cam.look_at_from_position(foot + Vector3(0, sin(deg_to_rad(50.0)), cos(deg_to_rad(50.0))) * 40.0, foot)
+	cam.make_current()
+	for spot in [["name label", 2.3], ["chest", 0.95]]:
+		_timeline.begin_new_turn()
+		var weapon: TriggerCard = null
+		for c in _controller._player_states[0].unit_data.main_trigger_slots:
+			if c != null and (c as TriggerCard).card_type in [TriggerCard.CardType.MELEE, TriggerCard.CardType.RANGED]:
+				weapon = c
+				break
+		_timeline._on_card_tapped(weapon)
+		var a := _timeline.get_selected_action()
+		var screen := cam.unproject_position(foot + Vector3(0, spot[1], 0))
+		var hit := _board.pick(screen)
+		var ground: Vector2 = hit.get("point", CityBoard.OFF_BOARD)
+		_board.last_tap_screen = screen
+		_controller._on_point_selected(ground, int(hit.get("level", 0)), int(hit.get("building", -1)))
+		_board.last_tap_screen = Vector2.INF
+		_check(a != null and a.is_attack() and a.target_unit == ei,
+			"tapping an enemy's %s targets it (ground point %.1f m from its feet)" % [spot[0], ground.distance_to(enemy.pos)])
+	enemy.fog = saved_fog
+	enemy.pos = saved_pos
+	enemy.level = saved_level
+	cam.queue_free()
 	_timeline.begin_new_turn()
 
 

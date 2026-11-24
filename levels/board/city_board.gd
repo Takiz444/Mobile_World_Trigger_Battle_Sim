@@ -28,6 +28,11 @@ var _overlay: Node3D               # range circles, routes, markers
 var _wires: Node3D
 var _press_pos := Vector2.ZERO
 var _pressed := false
+## Screen position of the tap being reported by point_selected (INF otherwise),
+## so listeners can also hit-test what is drawn there (e.g. a character's body).
+var last_tap_screen := Vector2.INF
+## The point point_selected reports for a tap that misses the board.
+const OFF_BOARD := Vector2(100000, 100000)
 var _hover := Vector2.INF
 
 
@@ -47,7 +52,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		var hit := pick(event.position)
 		if not hit.is_empty() and (hit["point"] as Vector2).distance_to(_hover) > 0.05:
 			_hover = hit["point"]
+			last_tap_screen = event.position
 			point_hovered.emit(hit["point"], int(hit["level"]))
+			last_tap_screen = Vector2.INF
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
 			_pressed = true
@@ -56,9 +63,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			_pressed = false
 			if event.position.distance_to(_press_pos) > TAP_SLOP_PX:
 				return
+			# Off the board still reports (as OFF_BOARD): a figure standing
+			# at the edge can be drawn over the sky.
 			var hit := pick(event.position)
-			if not hit.is_empty():
-				point_selected.emit(hit["point"], int(hit["level"]), int(hit["building"]))
+			if hit.is_empty():
+				hit = { "point": OFF_BOARD, "level": 0, "building": -1 }
+			last_tap_screen = event.position
+			point_selected.emit(hit["point"], int(hit["level"]), int(hit["building"]))
+			last_tap_screen = Vector2.INF
 
 
 ## What lies under screen position `screen`: {point, level, building} — a
@@ -325,7 +337,7 @@ func _build_ground(buildings: Dictionary) -> void:
 	var mask := ImageTexture.create_from_image(img)
 
 	var mat := ShaderMaterial.new()
-	mat.shader = load("res://levels/board/street.gdshader")
+	mat.shader = GfxLite.shader("res://levels/board/street.gdshader")
 	mat.set_shader_parameter("sidewalk_mask", mask)
 	mat.set_shader_parameter("mask_origin", Vector2(x0, z0))
 	mat.set_shader_parameter("mask_size", Vector2(w, h) / MASK_PPU)
@@ -401,11 +413,13 @@ func _spawn_lamps(buildings: Dictionary) -> void:
 	pole_mat.albedo_color = Color(0.18, 0.19, 0.22)
 	pole_mat.metallic = 0.6
 	pole_mat.roughness = 0.4
+	GfxLite.lit(pole_mat)
 	var bulb_mat := StandardMaterial3D.new()
 	bulb_mat.albedo_color = Color(1.0, 0.86, 0.6)
 	bulb_mat.emission_enabled = true
 	bulb_mat.emission = Color(1.0, 0.8, 0.5)
 	bulb_mat.emission_energy_multiplier = 3.0
+	GfxLite.glow(bulb_mat, Color(1.0, 0.8, 0.5), 3.0)
 	for hex in _tiles.keys():
 		if buildings.has(hex) or (absi(hex.x * 73856093 ^ hex.y * 19349663) % 4) != 0:
 			continue

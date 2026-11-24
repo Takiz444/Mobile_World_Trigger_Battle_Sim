@@ -175,6 +175,26 @@ func set_selected(u: UnitState) -> void:
 		ring.visible = key == u
 
 
+## Hidden-in-plain-sight meshes with materials the board only uses later
+## (a Bagworm-stealthed body is a translucent lit material), so ShaderWarmup
+## compiles them now rather than mid-match. Tiny and inside a torso; the
+## caller frees them once warmed up.
+func add_warmup_extras() -> Array[Node3D]:
+	var out: Array[Node3D] = []
+	for u in _figures:
+		var mats: Array = _body_materials.get(u, [])
+		if mats.is_empty() or not (_figures[u] as Node3D).is_visible_in_tree():
+			continue
+		var stealth := (mats[0] as StandardMaterial3D).duplicate() as StandardMaterial3D
+		stealth.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var mi := _part(BoxMesh.new(), Vector3(0.02, 0.02, 0.02), Vector3(0, 0.9, 0), stealth)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		(_figures[u] as Node3D).add_child(mi)
+		out.append(mi)
+		break
+	return out
+
+
 ## World position of a unit's chest (where shots leave from and land).
 func chest_pos(u: UnitState) -> Vector3:
 	return _world_pos(u) + Vector3(0, 0.95, 0)
@@ -663,6 +683,7 @@ func _build_ghost() -> Node3D:
 	mat.emission_enabled = true
 	mat.emission = Color(1, 1, 1)
 	mat.emission_energy_multiplier = 1.1
+	GfxLite.glow(mat, Color(1, 1, 1), 1.1)
 	body.material_override = mat
 	body.position = Vector3(0, 0.7, 0)
 	root.add_child(body)
@@ -929,10 +950,12 @@ func _part_material(_u: UnitState, color: Color, xray: Material) -> StandardMate
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.roughness = 0.7
-	mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
-	mat.rim_enabled = true
-	mat.rim = 0.55
-	mat.rim_tint = 0.35
+	if not GfxLite.enabled():
+		mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+		mat.rim_enabled = true
+		mat.rim = 0.55
+		mat.rim_tint = 0.35
+	GfxLite.lit(mat)
 	mat.next_pass = xray
 	_base_colors[mat] = color
 	return mat
@@ -1049,6 +1072,7 @@ func _make_material(color: Color) -> StandardMaterial3D:
 	mat.albedo_color = color
 	mat.metallic = 0.0
 	mat.roughness = 0.5
+	GfxLite.lit(mat)
 	return mat
 
 
@@ -1074,4 +1098,5 @@ func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
 	mat.emission_enabled = true
 	mat.emission = color
 	mat.emission_energy_multiplier = energy
+	GfxLite.glow(mat, color, energy)
 	return mat
