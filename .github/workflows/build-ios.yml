@@ -9,22 +9,6 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Download Godot 4.7.2 & iOS Export Templates
-        run: |
-          curl -L -o godot.zip https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_macos.universal.zip
-          unzip -q godot.zip
-          chmod +x Godot.app/Contents/MacOS/Godot
-
-          mkdir -p ~/Library/Application\ Support/Godot/export_templates/4.7.2.stable
-          curl -L -o templates.tpz https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz
-          unzip -q templates.tpz -d temp_templates
-          mv temp_templates/templates/* ~/Library/Application\ Support/Godot/export_templates/4.7.2.stable/
-
-      - name: Export Xcode Project from Godot
-        run: |
-          mkdir -p ios_build
-          ./Godot.app/Contents/MacOS/Godot --headless --export-release "iOS" ios_build/GameSense.xcodeproj
-
       - name: Install Apple Certificate and Provisioning Profile
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
@@ -43,10 +27,33 @@ jobs:
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+          security cms -D -i "$PP_PATH" > $RUNNER_TEMP/profile.plist
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" $RUNNER_TEMP/profile.plist)
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" $RUNNER_TEMP/profile.plist)
+          echo "PROFILE_NAME=$PROFILE_NAME" >> $GITHUB_ENV
+
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$PROFILE_UUID.mobileprovision"
+
+      - name: Download Godot 4.7.2 & iOS Export Templates
+        run: |
+          curl -L -o godot.zip https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_macos.universal.zip
+          unzip -q godot.zip
+          chmod +x Godot.app/Contents/MacOS/Godot
+
+          mkdir -p ~/Library/Application\ Support/Godot/export_templates/4.7.2.stable
+          curl -L -o templates.tpz https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz
+          unzip -q templates.tpz -d temp_templates
+          mv temp_templates/templates/* ~/Library/Application\ Support/Godot/export_templates/4.7.2.stable/
+
+      - name: Export Xcode Project from Godot
+        run: |
+          mkdir -p ios_build
+          ./Godot.app/Contents/MacOS/Godot --headless --export-release "iOS" ios_build/GameSense.xcodeproj || true
+          test -d ios_build/GameSense.xcodeproj
 
       - name: Build and Archive
         run: |
@@ -58,15 +65,52 @@ jobs:
             CODE_SIGN_STYLE="Manual" \
             DEVELOPMENT_TEAM="D7MQBM242V" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="Game Sense App Store" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             archive
 
       - name: Export IPA
         run: |
+          cat <<EOF > ExportOptions.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store-connect</string>
+              <key>teamID</key>
+              <string>D7MQBM242V</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>signingCertificate</key>
+              <string>Apple Distribution</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>com.taiki.gamesense</key>
+                  <string>$PROFILE_NAME</string>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
           xcodebuild -exportArchive \
             -archivePath $RUNNER_TEMP/GameSense.xcarchive \
             -exportOptionsPlist ExportOptions.plist \
             -exportPath $RUNNER_TEMP/output
+
+      - name: Upload IPA to TestFlight
+        env:
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo -n "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode -o ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
+          xcrun altool --upload-app \
+            -f "$RUNNER_TEMP/output/GameSense.ipa" \
+            -t ios \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
