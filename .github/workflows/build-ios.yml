@@ -72,6 +72,7 @@ jobs:
             DEVELOPMENT_TEAM="D7MQBM242V" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             archive
 
       - name: Export IPA
