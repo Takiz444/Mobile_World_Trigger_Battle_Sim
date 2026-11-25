@@ -80,9 +80,68 @@ func ensure_account(player_name: String) -> Dictionary:
 			last_error = str(check.get("error", "?"))
 			return {}
 		AccountStore.clear_for(server_url)   # e.g. a wiped dev server
+		if AccountStore.is_signed_in(account):
+			# Don't quietly swap a signed-in player for a new guest.
+			account = {}
+			last_error = "Your account was not found on this server. Please sign in again."
+			return {}
 	var res := await backend.register_account(player_name if player_name != "" else "Player")
 	if not res.get("success", false):
 		last_error = "Could not create account: %s" % str(res.get("error", "?"))
+		return {}
+	AccountStore.save_for(server_url, res["body"])
+	account = AccountStore.load_for(server_url)
+	account.merge(res["body"], true)
+	return account
+
+
+## Creates an email account. A guest account saved on this device is
+## upgraded instead, so it keeps its trophies and history. The session is
+## saved; returns it, or {} (see last_error).
+func sign_up(email: String, password: String, player_name: String) -> Dictionary:
+	var saved := AccountStore.load_for(server_url)
+	var guest := saved if not saved.is_empty() and not AccountStore.is_signed_in(saved) else {}
+	var res := await backend.sign_up(email, password, player_name, guest)
+	if not guest.is_empty() and int(res.get("status", 0)) == 403:
+		# The saved guest is gone (e.g. a wiped dev server): make a fresh account.
+		res = await backend.sign_up(email, password, player_name)
+	return _keep_session(res)
+
+
+## Signs in with email + password and saves the session on this device
+## (replacing a guest account here). Returns it, or {} (see last_error).
+func sign_in(email: String, password: String) -> Dictionary:
+	return _keep_session(await backend.sign_in(email, password))
+
+
+## Ends this device's session on the server and forgets it locally.
+func sign_out() -> void:
+	var saved := AccountStore.load_for(server_url)
+	if not saved.is_empty() and AccountStore.is_signed_in(saved):
+		await backend.sign_out(str(saved["player_id"]), str(saved["secret"]))
+	AccountStore.clear_for(server_url)
+	account = {}
+
+
+## The saved account's profile (HttpBackend.profile), or {} (see last_error).
+func fetch_profile() -> Dictionary:
+	var saved := AccountStore.load_for(server_url)
+	if saved.is_empty():
+		last_error = "no account"
+		return {}
+	var res := await backend.profile(str(saved["player_id"]), str(saved["secret"]))
+	if not res.get("success", false):
+		last_error = str(res.get("error", "?"))
+		if int(res.get("status", 0)) == 403:
+			last_error = "Your session has ended. Please sign in again."
+		return {}
+	return res["body"]
+
+
+func _keep_session(res: Dictionary) -> Dictionary:
+	if not res.get("success", false):
+		last_error = str(res.get("error", "?")) if int(res.get("status", 0)) != 0 \
+			else "Can't reach the server: %s" % str(res.get("error", "?"))
 		return {}
 	AccountStore.save_for(server_url, res["body"])
 	account = AccountStore.load_for(server_url)

@@ -68,7 +68,15 @@ if [ ! -f "$ENV_FILE" ]; then
 TT_DOMAIN=$domain
 TT_ADMIN_KEY=$(openssl rand -hex 32)
 TT_TURN_TIMEOUT_SEC=43200
-TT_STORE=postgrest
+TT_STORE=mongo
+TT_MONGO_GATEWAY_TOKEN=$(openssl rand -hex 32)
+TT_MONGO_PASSWORD=$(openssl rand -hex 24)
+# Set to a hosted MongoDB (e.g. Atlas) connection string to use it instead.
+TT_MONGO_URI=
+# Auth0 sign-in (deploy/README.md, "Auth0"); empty = the server's own passwords.
+TT_AUTH0_DOMAIN=
+TT_AUTH0_CLIENT_ID=
+TT_AUTH0_CLIENT_SECRET=
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 PGRST_AUTHENTICATOR_PASSWORD=$(openssl rand -hex 24)
 TT_DB_TOKEN=
@@ -80,6 +88,12 @@ DOMAIN="$(grep -E '^TT_DOMAIN=' "$ENV_FILE" | cut -d= -f2-)"
 STORE="$(grep -E '^TT_STORE=' "$ENV_FILE" | cut -d= -f2-)"
 if [ "$STORE" = "postgrest" ]; then
 	DC+=(--profile postgres)
+elif [ "$STORE" = "mongo" ]; then
+	if [ -n "$(grep -E '^TT_MONGO_URI=' "$ENV_FILE" | cut -d= -f2-)" ]; then
+		DC+=(--profile atlas)
+	else
+		DC+=(--profile mongo)
+	fi
 fi
 
 # 4. Build and start -------------------------------------------------------

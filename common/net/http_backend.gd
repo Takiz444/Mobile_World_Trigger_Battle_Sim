@@ -14,6 +14,8 @@ extends Node
 ## In release builds only https:// servers are accepted (see ServerConfig).
 
 const TIMEOUT_SEC := 10.0
+## Sign-up / sign-in may wait on the server's identity provider (Auth0).
+const AUTH_TIMEOUT_SEC := 30.0
 const GET_RETRY_DELAYS := [0.5, 1.5]
 
 var server_url: String = "http://127.0.0.1:8080"
@@ -22,17 +24,18 @@ signal reachability_changed(reachable: bool)
 var _reachable := true
 
 
-func request(method: String, path: String, body: Dictionary = {}, auth: String = "") -> Dictionary:
+func request(method: String, path: String, body: Dictionary = {}, auth: String = "",
+		timeout_sec: float = TIMEOUT_SEC) -> Dictionary:
 	if not ServerConfig.url_allowed(server_url):
 		return { "success": false, "status": 0, "body": {}, "error": "insecure server address (https required)" }
-	var out := await _request_once(method, path, body, auth)
+	var out := await _request_once(method, path, body, auth, timeout_sec)
 	if method == "GET":
 		for delay in GET_RETRY_DELAYS:
 			var status := int(out.get("status", 0))
 			if status != 0 and status != 429 and status < 500:
 				break
 			await get_tree().create_timer(delay).timeout
-			out = await _request_once(method, path, body, auth)
+			out = await _request_once(method, path, body, auth, timeout_sec)
 	var reachable := int(out.get("status", 0)) != 0
 	if reachable != _reachable:
 		_reachable = reachable
@@ -40,12 +43,13 @@ func request(method: String, path: String, body: Dictionary = {}, auth: String =
 	return out
 
 
-func _request_once(method: String, path: String, body: Dictionary, auth: String = "") -> Dictionary:
+func _request_once(method: String, path: String, body: Dictionary, auth: String = "",
+		timeout_sec: float = TIMEOUT_SEC) -> Dictionary:
 	var url := server_url.rstrip("/") + path
 	var http_method := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
 	var data := JSON.stringify(body) if not body.is_empty() else ""
 	var http := HTTPRequest.new()
-	http.timeout = TIMEOUT_SEC
+	http.timeout = timeout_sec
 	add_child(http)
 	var headers := PackedStringArray(["Content-Type: application/json"])
 	if auth != "":
@@ -73,13 +77,21 @@ func health() -> Dictionary:
 	return await request("GET", "/health")
 
 
-## The server picks the match seed; `mode` is "async" or "live".
-func create_match(squad: Array, mode: String = "async") -> Dictionary:
-	return await request("POST", "/match/create", { "squad": squad, "mode": mode })
+## The server picks the match seed; `mode` is "async" or "live". With an
+## `account` ({player_id, secret}) the match goes into that player's profile.
+func create_match(squad: Array, mode: String = "async", account: Dictionary = {}) -> Dictionary:
+	return await request("POST", "/match/create", _with_account({ "squad": squad, "mode": mode }, account))
 
 
-func join_match(match_id: String, squad: Array) -> Dictionary:
-	return await request("POST", "/match/%s/join" % match_id, { "squad": squad })
+func join_match(match_id: String, squad: Array, account: Dictionary = {}) -> Dictionary:
+	return await request("POST", "/match/%s/join" % match_id, _with_account({ "squad": squad }, account))
+
+
+static func _with_account(body: Dictionary, account: Dictionary) -> Dictionary:
+	if str(account.get("player_id", "")) != "" and str(account.get("secret", "")) != "":
+		body["player_id"] = str(account["player_id"])
+		body["secret"] = str(account["secret"])
+	return body
 
 
 ## `token` is the secret returned by create/join; it identifies the team.
@@ -95,6 +107,32 @@ func register_account(player_name: String) -> Dictionary:
 
 func get_account(player_id: String) -> Dictionary:
 	return await request("GET", "/account/%s" % player_id)
+
+
+## Creates an email account. Passing the device's guest account (player_id +
+## secret) upgrades it instead, keeping its trophies and match history.
+func sign_up(email: String, password: String, player_name: String, guest: Dictionary = {}) -> Dictionary:
+	return await request("POST", "/account/signup",
+		_with_account({ "email": email, "password": password, "name": player_name }, guest), "", AUTH_TIMEOUT_SEC)
+
+
+## {player_id, secret, name, email, ...}: a new session for this device.
+func sign_in(email: String, password: String) -> Dictionary:
+	return await request("POST", "/account/login", { "email": email, "password": password }, "", AUTH_TIMEOUT_SEC)
+
+
+## Asks the server to email a password-reset link (servers using Auth0).
+func request_password_reset(email: String) -> Dictionary:
+	return await request("POST", "/account/password_reset", { "email": email }, "", AUTH_TIMEOUT_SEC)
+
+
+func sign_out(player_id: String, secret: String) -> Dictionary:
+	return await request("POST", "/account/logout", { "player_id": player_id, "secret": secret })
+
+
+## The private profile: ranks, stats, favorite move, recent matches.
+func profile(player_id: String, secret: String) -> Dictionary:
+	return await request("POST", "/account/profile", { "player_id": player_id, "secret": secret })
 
 
 ## Permanently deletes the account (required in-app by the App Store).

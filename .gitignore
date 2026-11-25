@@ -6,3 +6,6 @@ deploy/.env
 # Web export output (built in the Docker image by deploy/Dockerfile)
 build/
 ios_build/
+
+# Mongo gateway dependencies (npm ci)
+node_modules/

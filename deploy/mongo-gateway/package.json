@@ -1,0 +1,21 @@
+{
+  "name": "trion-mongo-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MongoDB access for the Trion Tactics game server (server/db/mongo_store.gd)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test.js",
+    "dev": "node dev.js"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "mongodb": "7.8.0"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "11.3.0"
+  }
+}

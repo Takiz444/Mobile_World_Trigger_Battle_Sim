@@ -18,6 +18,11 @@ extends RefCounted
 ##   - credentials are never read from the URL (URLs end up in proxy and
 ##     access logs): SECRET_KEYS in a query string are ignored. Clients send
 ##     them in the JSON body or as "Authorization: Bearer <token>".
+##
+## Slow work (password hashing on a worker thread) can answer later: the
+## handler returns {"status": 0, "deferred": Deferred} and calls
+## Deferred.resolve(response) when done. The connection waits up to
+## DEFERRED_TIMEOUT_MS, without blocking anyone else.
 
 const MAX_HEADER_BYTES := 16 * 1024
 const MAX_BODY_BYTES := 256 * 1024
@@ -33,7 +38,20 @@ const WRITE_TIMEOUT_MS := 15000
 ## is set: every player arrives through the proxy's address).
 const MAX_CONNECTIONS_PER_IP := 32
 ## Never accepted from a query string.
-const SECRET_KEYS: Array[String] = ["token", "secret", "admin_key"]
+const SECRET_KEYS: Array[String] = ["token", "secret", "admin_key", "password", "email"]
+## A deferred response must be ready this long after the request arrived.
+const DEFERRED_TIMEOUT_MS := 28000
+
+
+## A response the handler will produce later (see the header).
+class Deferred extends RefCounted:
+	var done := false
+	var response: Dictionary = {}
+
+	func resolve(p_response: Dictionary) -> void:
+		if not done:
+			response = p_response
+			done = true
 
 ## Requests per second per client, and the burst allowed above that.
 var rate_per_sec := 20.0
@@ -84,6 +102,15 @@ func poll() -> void:
 			dead.append(peer)
 			continue
 		var conn: Dictionary = _conns[peer]
+		if conn.has("wait"):
+			var wait: Deferred = conn["wait"]
+			if wait.done:
+				conn.erase("wait")
+				_respond(peer, conn, wait.response, now, dead)
+			elif now - int(conn["since"]) > DEFERRED_TIMEOUT_MS:
+				conn.erase("wait")
+				_respond(peer, conn, _json(503, { "error": "server busy; try again" }), now, dead)
+			continue
 		if conn.has("out"):
 			# Response in progress: push what the socket accepts.
 			if _pump(peer, conn) or now - int(conn["out_since"]) > WRITE_TIMEOUT_MS:
@@ -124,6 +151,9 @@ func poll() -> void:
 			else:
 				response = _route(request, ip)
 		conn["buf"] = PackedByteArray()
+		if response.get("deferred") is Deferred:
+			conn["wait"] = response["deferred"]
+			continue
 		_respond(peer, conn, response, now, dead)
 
 	for peer in dead:

@@ -14,6 +14,7 @@ extends Node
 ##   JsonFileStore   one JSON file, rewritten on flush (dev; the old format)
 ##   DirStore        one file per record (single-server production)
 ##   PostgrestStore  Postgres via a PostgREST HTTP API (multi-server path)
+##   MongoStore      MongoDB via the Mongo gateway (deploy/mongo-gateway)
 ##
 ## Stores are Nodes so network-backed ones can run HTTP requests; the server
 ## adds its store as a child. open() and load_all() may be coroutines:
@@ -23,9 +24,13 @@ const KINDS: Array[String] = ["accounts", "tickets", "matches", "meta"]
 
 
 ## Builds the store selected by the environment (TT_STORE = json | dir |
-## postgrest; default json for local dev).
+## postgrest | mongo; default json for local dev).
 static func from_env(default_file: String) -> GameStore:
 	match OS.get_environment("TT_STORE"):
+		"mongo":
+			var url := OS.get_environment("TT_MONGO_GATEWAY_URL")
+			return MongoStore.new(url if url != "" else "http://127.0.0.1:8095",
+				OS.get_environment("TT_MONGO_GATEWAY_TOKEN"))
 		"dir":
 			var dir := OS.get_environment("TT_DATA_DIR")
 			return DirStore.new(dir if dir != "" else "user://store")

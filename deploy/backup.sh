@@ -5,6 +5,9 @@
 #
 # Restore (Postgres):
 #   docker compose ... exec -T db pg_restore -U trion_admin -d trion --clean < trion-<stamp>.dump
+# Restore (MongoDB in the stack):
+#   docker compose ... --profile mongo exec -T mongo sh -c #     'mongorestore --archive --gzip --drop -u trion -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' < trion-<stamp>.mongo.gz
+# Atlas (TT_MONGO_URI set) keeps its own backups; nothing is dumped here.
 #
 # These copies live on the same VM: also copy them off the machine now and
 # then (e.g. scp, or Oracle Object Storage, which has a free tier).
@@ -19,9 +22,16 @@ DC=(docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile
 
 mkdir -p "$DEST"
 chmod 700 "$DEST"
+MONGO_URI_SET="$(grep -E '^TT_MONGO_URI=' deploy/.env | cut -d= -f2- || true)"
 if [ "$STORE" = "postgrest" ]; then
 	out="$DEST/trion-$STAMP.dump"
 	"${DC[@]}" exec -T db pg_dump -U trion_admin -d trion --format=custom > "$out"
+elif [ "$STORE" = "mongo" ] && [ -n "$MONGO_URI_SET" ]; then
+	echo "$(date -u +%FT%TZ) hosted MongoDB (TT_MONGO_URI): use the provider's backups"
+	exit 0
+elif [ "$STORE" = "mongo" ]; then
+	out="$DEST/trion-$STAMP.mongo.gz"
+	docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile mongo exec -T mongo sh -c 		'mongodump --archive --gzip --db "${TT_MONGO_DB:-trion}" -u trion -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' > "$out"
 else
 	out="$DEST/trion-$STAMP.tgz"
 	"${DC[@]}" exec -T server tar -C /data -czf - . > "$out"

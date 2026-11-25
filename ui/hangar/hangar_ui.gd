@@ -6,7 +6,8 @@ extends Control
 ##   PRACTICE VS AI   offline, against the built-in AI,
 ##   RANKED ONLINE    matchmaking against players of your skill (live or slow),
 ##   PLAY A FRIEND    an unranked room shared by code.
-## A banner offers to rejoin an online match that is still running.
+## A banner offers to rejoin an online match that is still running. The
+## title row shows the account (guest or signed in) and opens the Profile.
 
 var _units: Array[UnitData] = []
 var _current_unit := 0
@@ -36,6 +37,9 @@ var _delete_armed_at := -1
 var _resume_banner: PanelContainer
 var _resume_label: Label
 var _ranked_info: Label
+var _account_label: Label
+var _profile_btn: Button
+var _sign_in_btn: Button
 const DELETE_CONFIRM_MS := 4000
 
 
@@ -82,9 +86,25 @@ func _build_layout() -> void:
 	var title_row := HBoxContainer.new()
 	title_row.add_theme_constant_override("separation", 8)
 	vbox.add_child(title_row)
-	var title_pad := Control.new()
-	title_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	title_row.add_child(title_pad)
+	# Left: who is playing (guest / signed in), their profile, and sign-in.
+	var account_box := HBoxContainer.new()
+	account_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	account_box.add_theme_constant_override("separation", 8)
+	title_row.add_child(account_box)
+	_profile_btn = Button.new()
+	_profile_btn.text = "Profile"
+	_profile_btn.tooltip_text = "Your rank, win rate, favorite move, and match history"
+	_profile_btn.pressed.connect(func() -> void: UiTheme.change_scene(get_tree(), "res://ui/profile/profile.tscn"))
+	account_box.add_child(_profile_btn)
+	_account_label = UiTheme.label("", 14, UiTheme.TEXT_DIM)
+	account_box.add_child(_account_label)
+	_sign_in_btn = Button.new()
+	_sign_in_btn.text = "Sign In"
+	_sign_in_btn.tooltip_text = "Sign in or create an account to keep your progress on every device"
+	_sign_in_btn.flat = true
+	_sign_in_btn.add_theme_color_override("font_color", UiTheme.ACCENT)
+	_sign_in_btn.pressed.connect(func() -> void: UiTheme.change_scene(get_tree(), "res://ui/welcome/welcome.tscn"))
+	account_box.add_child(_sign_in_btn)
 	var title := Label.new()
 	title.text = "YOUR SQUAD"
 	title.add_theme_font_size_override("font_size", 24)
@@ -296,6 +316,23 @@ func _build_layout() -> void:
 	for b in find_children("*", "BaseButton", true, false):
 		UiTheme.add_press_feedback(b)
 	_refresh_ranked_info(saved)
+	_refresh_account_bar()
+
+
+## The title row's account area: signed in (email account) or guest.
+func _refresh_account_bar() -> void:
+	var saved := AccountStore.load_for(MatchSession.server_url)
+	var signed_in := AccountStore.is_signed_in(saved)
+	if signed_in:
+		_account_label.text = "Signed in as %s" % str(saved.get("name", ""))
+		_account_label.tooltip_text = str(saved.get("email", ""))
+	else:
+		_account_label.text = "Playing as a guest"
+		_account_label.tooltip_text = "Your online progress is kept on this device only"
+	_account_label.mouse_filter = Control.MOUSE_FILTER_PASS
+	_sign_in_btn.visible = not signed_in
+	# A signed-in player's name is their account's; guests pick one per server.
+	_name_input.editable = not signed_in and not _searching
 
 
 ## A titled card in the play row; returns the box to put its controls in.
@@ -321,23 +358,7 @@ func _play_card(parent: HBoxContainer, heading: String, blurb: String) -> VBoxCo
 
 ## The main call to action: a filled accent button.
 func _style_primary(b: Button, color: Color = UiTheme.ACCENT) -> void:
-	var dark := Color(0.03, 0.06, 0.1)
-	for state in ["normal", "hover", "pressed", "focus"]:
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = color.lightened(0.12) if state == "hover" else (color.darkened(0.15) if state == "pressed" else color)
-		sb.set_corner_radius_all(8)
-		sb.content_margin_left = 16
-		sb.content_margin_right = 16
-		sb.content_margin_top = 10
-		sb.content_margin_bottom = 10
-		if state == "focus":
-			sb.draw_center = false
-			sb.border_color = Color.WHITE
-			sb.set_border_width_all(2)
-		b.add_theme_stylebox_override(state, sb)
-	for c in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
-		b.add_theme_color_override(c, dark)
-	b.add_theme_font_size_override("font_size", 17)
+	UiTheme.style_primary(b, color)
 
 
 ## Who you'll play as on this server, under the Find Match button.
@@ -358,8 +379,10 @@ func _set_play_locked(locked: bool, searching_button: Button) -> void:
 	for b in [_start_button, _host_btn, _host_live, _join_btn, _live_btn, _ranked_btn, _resume_btn]:
 		if b != searching_button:
 			(b as BaseButton).disabled = locked
-	_name_input.editable = not locked
+	_name_input.editable = not locked and not AccountStore.is_signed_in(AccountStore.load_for(MatchSession.server_url))
 	_join_input.editable = not locked
+	_profile_btn.disabled = locked
+	_sign_in_btn.disabled = locked
 
 
 ## Shows the "match in progress" banner when this account has one running
@@ -691,7 +714,8 @@ func _on_host_online() -> void:
 	_prepare_online_squad()
 	# Friendly battles: the host picks the live clock or async turns.
 	var mode := "live" if _host_live.button_pressed else "async"
-	var res := await _conn.backend.create_match(PlanCodec.encode_squad(MatchSession.squad), mode)
+	var res := await _conn.backend.create_match(PlanCodec.encode_squad(MatchSession.squad), mode,
+		AccountStore.load_for(MatchSession.server_url))
 	if not res.get("success", false):
 		_net_status.text = "Couldn't create a room: %s" % str(res.get("error", "?"))
 		return
@@ -713,7 +737,8 @@ func _on_join_online() -> void:
 	if not await _connect_server():
 		return
 	_prepare_online_squad()
-	var res := await _conn.backend.join_match(id, PlanCodec.encode_squad(MatchSession.squad))
+	var res := await _conn.backend.join_match(id, PlanCodec.encode_squad(MatchSession.squad),
+		AccountStore.load_for(MatchSession.server_url))
 	if not res.get("success", false):
 		_net_status.text = "Couldn't join room %s: %s" % [id, str(res.get("error", "?"))]
 		return
@@ -752,6 +777,7 @@ func _on_find_ranked(mode: String) -> void:
 	button.text = idle_text
 	_set_play_locked(false, null)
 	_refresh_ranked_info(_conn.account)
+	_refresh_account_bar()
 	if ticket.is_empty():
 		_net_status.text = _conn.last_error
 		return
@@ -865,5 +891,6 @@ func _on_delete_account_pressed() -> void:
 		_name_input.text = ""
 		_resume_banner.visible = false
 		_refresh_ranked_info({})
+		_refresh_account_bar()
 	else:
 		_net_status.text = "Could not delete the account: %s" % _conn.last_error

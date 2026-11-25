@@ -5,3 +5,4 @@ Project Docs
 docs
 test
 deploy/.env
+node_modules

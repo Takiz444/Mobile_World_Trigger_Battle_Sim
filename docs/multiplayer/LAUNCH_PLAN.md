@@ -148,6 +148,8 @@ All existing tests still pass. Older match stores still load: missing fields get
 
 **Accounts & privacy**
 - [x] **In-app account deletion** (Guideline 5.1.1(v)): `POST /account/delete` plus a two-tap **Delete Account** button in the Hangar.
+- [x] **Email sign-in** (2026-11): email + password accounts with profiles and match history; guests still play without one, and a guest's progress moves to the account it creates. Our own email login doesn't trigger 4.8.
+- [x] **Password reset + email verification**: through Auth0 (`TT_AUTH0_*`, deploy/README.md "Auth0"). Still to do: create the production Auth0 tenant and set its keys on the VM.
 - [ ] **Sign in with Apple** (4.8): required if we add Google/Facebook login. Plan: a guest account first (as today), then optional linking to Apple ID / Game Center so progress survives a reinstall. Verify Apple identity tokens on the server.
 - [ ] **Keychain storage:** the client keeps its account secret in `user://account.json` as plain text. Move it to the iOS Keychain (needs a small native plugin) and switch to short-lived session tokens.
 - [ ] Privacy policy URL, App Privacy "nutrition labels", data retention policy.

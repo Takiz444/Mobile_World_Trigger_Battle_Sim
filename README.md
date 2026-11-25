@@ -169,6 +169,32 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   waiting; live and async queues are separate.
 - Reconnects resync automatically; `POST /account/delete` deletes an account
   (App Store requirement).
+
+### Sign-in & Profiles — `ui/welcome/`, `ui/profile/`
+- **First screen** (`ui/welcome/welcome.tscn`, the main scene): sign in with
+  email + password, create an account, or **Continue as Guest**. Signed-in
+  players go straight to the Hangar. Guests can play everything: offline
+  needs no account, and online play makes a guest account kept on that
+  device only. Creating an account while a guest account is saved moves its
+  trophies and history to the new account.
+- Server: `POST /account/signup`, `/account/login`, `/account/logout`,
+  `/account/profile`, `/account/password_reset`. **Auth0** (`TT_AUTH0_*`,
+  `server/auth0_client.gd`) holds the passwords and sends verification and
+  password-reset emails; the server checks credentials with Auth0 and links
+  each account to its Auth0 user. Without Auth0 (development), passwords are
+  stored as PBKDF2-HMAC-SHA256 hashes (`server/password_hash.gd`), computed
+  on a worker thread so a login never stalls the match clocks. Setup:
+  `deploy/README.md` ("Auth0"). Each signed-in device gets its own session
+  secret; emails are never shown to other players. Wrong passwords count
+  toward the failed-login lockout.
+- **Profile** (Hangar → Profile): current rank (trophies + arena), max rank
+  (best trophies + arena), ladder position, skill rating (now / peak), win
+  rate with W/L/D, current and best win streak, **favorite move** (most used
+  trigger or action, with the top 5), and the last 50 matches (result,
+  opponent, mode, how it ended, turns, units standing, trophy change). Every
+  finished match with an account in a seat counts: ranked, and friendly rooms
+  created or joined while you have an account. Auto-filled turns don't count
+  toward move stats.
 - Launch plan, App Store checklist, and scaling path:
   `docs/multiplayer/LAUNCH_PLAN.md`.
 - **Surrender** button in battle (two taps to confirm) in every mode.
@@ -176,10 +202,18 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 ### Persistence — `server/db/`
 - `GameStore` interface; the server keeps live state in memory and writes
   only changed records behind itself. Pick a backend with `TT_STORE`:
-  `json` (one file, default for dev), `dir` (one file per record, the
-  single-server production default), `postgrest` (Postgres through PostgREST;
-  schema in `deploy/db/`). Postgres writes are batched, coalesced, and
-  retried through outages.
+  `json` (one file, default for dev), `dir` (one file per record),
+  `mongo` (**MongoDB**, the default for new deployments), `postgrest`
+  (Postgres through PostgREST; schema in `deploy/db/`). Network stores batch,
+  coalesce, and retry writes through outages.
+- **MongoDB** (`server/db/mongo_store.gd` + `deploy/mongo-gateway/`): Godot has
+  no MongoDB driver, so a small Node service with the official driver (the
+  "gateway", internal only, token-protected) does the database work. Each
+  record kind is a collection (`accounts`, `matches`, `tickets`, `meta`) and
+  each record a plain document keyed by its id, so you can query it directly,
+  e.g. `db.accounts.find({ email: "…" })`. Accounts have a unique email index.
+  `import-dir.js` / `export-dir.js` move data between the file store and
+  MongoDB (migration and backups).
 - Old tickets and unjoined matches are pruned; finished matches leave memory
   after `TT_MATCH_RETENTION_SEC` (default 24 h) but stay in the store.
 
@@ -259,7 +293,14 @@ godot --headless --path . res://server/server.tscn
 #   TT_PUBLIC_LIVE_URL=wss://play.example.com/live   advertised to clients
 #   TT_ADMIN_KEY=<secret>      enables /admin endpoints (season reset)
 #   TT_STORE=dir TT_DATA_DIR=store   one file per record (or postgrest + TT_DB_URL)
+#   TT_STORE=mongo TT_MONGO_GATEWAY_URL=http://127.0.0.1:8095 TT_MONGO_GATEWAY_TOKEN=dev-token
 ```
+
+Settings and secrets go in **`deploy/.env`** (copy `deploy/.env.example`):
+the server reads it at startup when run as `server.tscn`, and so does the
+Mongo gateway. See `deploy/README.md` ("Where settings go") for MongoDB and
+Auth0. MongoDB locally without installing it: `cd deploy/mongo-gateway &&
+npm ci && npm run dev` (a throwaway in-memory MongoDB plus the gateway on `:8095`).
 
 **Production:** `deploy/` has a Docker image and a Compose stack with Caddy
 for automatic HTTPS/WSS (required on iOS):
@@ -284,12 +325,16 @@ godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow
 godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies, surrender
-godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres (fake), outage
+godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres/Mongo (fakes), outage
+godot --headless --path . res://test/account_test.tscn # sign-in, sessions, guest upgrade, profiles, history
+godot --headless --path . res://test/auth0_test.tscn   # Auth0 sign-in (fake Auth0), deploy/.env loading
+cd deploy/mongo-gateway && npm test                    # the Mongo gateway against a real mongod
 godot --headless --path . res://test/security_test.tscn  # abuse / cheating regressions (rules + server)
 godot --headless --path . res://test/stress_test.tscn    # random plans over many turns: client and server agree
 ```
 
-CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.
+CI (`.github/workflows/tests.yml`) runs all suites, the gateway tests, the store
+test against a real gateway + MongoDB, and builds both images.
 
 Each prints `PASS`/`FAIL` and exits non-zero on failure.
 

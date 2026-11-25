@@ -80,6 +80,45 @@ static func panel_style(fill: Color = PANEL, edge: Color = PANEL_EDGE, radius: i
 	return sb
 
 
+## The main call to action on a screen: a filled accent button.
+static func style_primary(b: Button, color: Color = ACCENT) -> void:
+	var dark := Color(0.03, 0.06, 0.1)
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		var sb := StyleBoxFlat.new()
+		match state:
+			"hover":
+				sb.bg_color = color.lightened(0.12)
+			"pressed":
+				sb.bg_color = color.darkened(0.15)
+			"disabled":
+				sb.bg_color = Color(color.r, color.g, color.b, 0.22)
+			_:
+				sb.bg_color = color
+		sb.set_corner_radius_all(8)
+		sb.content_margin_left = 16
+		sb.content_margin_right = 16
+		sb.content_margin_top = 10
+		sb.content_margin_bottom = 10
+		if state == "focus":
+			sb.draw_center = false
+			sb.border_color = Color.WHITE
+			sb.set_border_width_all(2)
+		b.add_theme_stylebox_override(state, sb)
+	for c in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
+		b.add_theme_color_override(c, dark)
+	b.add_theme_color_override("font_disabled_color", TEXT_DIM)
+	b.add_theme_font_size_override("font_size", 17)
+
+
+## A label in one call (the screens build their UI in code).
+static func label(text: String, size: int = 16, color: Color = TEXT) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	return l
+
+
 static func _button_style(fill: Color, edge: Color, edge_width: int = 1) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = fill
