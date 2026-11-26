@@ -558,6 +558,10 @@ def build_zones(W, H, separator, walkable, noplay, margin, target_area, chunks, 
             fallback = (bar, boxy)
     if bar < 0.79 and fallback is not None:
         bar, boxy = fallback
+    elif bar < 0.79:
+        # Winding streets everywhere: keep only the squarest dozen.
+        boxy = sorted(zones, key=lambda z: -z["rect"])[:12]
+        bar = round(boxy[-1]["rect"], 2) if boxy else 0.0
     zones = _spread(boxy, max_zones)
     if log:
         q = sorted(shares)

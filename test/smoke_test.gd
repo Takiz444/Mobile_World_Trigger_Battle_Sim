@@ -298,8 +298,9 @@ func _check_physics_matches_rules() -> void:
 	var mismatch := ""
 	for _i in 16000:   # most random points of the zone's bounds aren't open street
 		var a := Vector2(rng.randf_range(b.position.x, b.end.x), rng.randf_range(b.position.y, b.end.y))
-		var c := Vector2(rng.randf_range(b.position.x, b.end.x), rng.randf_range(b.position.y, b.end.y))
-		if not geo.ground_ok(a) or not geo.ground_ok(c) or a.distance_to(c) > 20.0:
+		# A second point within 20 m (sight lines of fighting range).
+		var c := a + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(1.0, 20.0)
+		if not geo.ground_ok(a) or not geo.ground_ok(c):
 			continue
 		var pa := Vector3(a.x, HexCoord.GROUND_Y + Visibility.EYE_HEIGHT * HexCoord.FLOOR_HEIGHT, a.y)
 		var pb := Vector3(c.x, HexCoord.GROUND_Y + Visibility.BODY_HEIGHT * HexCoord.FLOOR_HEIGHT, c.y)
