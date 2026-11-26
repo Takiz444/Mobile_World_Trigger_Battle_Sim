@@ -104,9 +104,12 @@ func _draw() -> void:
 		var j := (i + 1) % n
 		# Neighbouring rays at the same angle (the cone's straight sides)
 		# give zero-width quads: skip those.
+		# draw_primitive draws the quad as two triangles as given; the
+		# polygon calls triangulate first and fail (log errors) on the
+		# twisted quads that near-parallel rays make.
 		var band := PackedVector2Array([inner[i], inner[j], outer[j], outer[i]])
 		if _area(band) > 0.25:
-			draw_polygon(band, PackedColorArray([clear_col, clear_col, dim, dim]))
+			draw_primitive(band, PackedColorArray([clear_col, clear_col, dim, dim]), PackedVector2Array())
 		var out := PackedVector2Array([outer[i], outer[j], beyond[j], beyond[i]])
 		if _area(out) > 0.25:
-			draw_colored_polygon(out, dim)
+			draw_primitive(out, PackedColorArray([dim, dim, dim, dim]), PackedVector2Array())

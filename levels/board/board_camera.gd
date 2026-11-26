@@ -23,6 +23,10 @@ extends Camera3D
 @export var screen_offset_px := Vector2.ZERO
 
 const ZOOM_STEP := 0.1
+## Directional lights in this group get their shadow range fitted to the
+## view: an orthographic view zoomed out past the range lost every shadow
+## (the whole city went dark).
+const SUN_GROUP := &"board_sun"
 ## Finger travel (px) before a one-finger touch counts as a pan, not a tap.
 const TOUCH_PAN_THRESHOLD := 12.0
 
@@ -217,6 +221,9 @@ func _update_transform() -> void:
 	)
 	global_position = target + dir * orbit_distance
 	look_at(target, Vector3.UP)
+	if is_inside_tree():
+		for l in get_tree().get_nodes_in_group(SUN_GROUP):
+			(l as DirectionalLight3D).directional_shadow_max_distance = orbit_distance + size * 1.7
 
 
 ## Re-centers the orbit target onto a world position (used when the player

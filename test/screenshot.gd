@@ -4,7 +4,7 @@ extends Node
 ##
 ## Run:
 ##   godot --path . res://test/screenshot.tscn -- <out.png> [ortho_size] [pitch_deg] [turns] [center|unit]
-##   godot --path . res://test/screenshot.tscn -- <out.png> hangar
+##   godot --path . res://test/screenshot.tscn -- <out.png> hangar|welcome
 ## `turns` plays that many empty local turns first (the enemy AI advances).
 
 const FRAMES := 45
@@ -14,11 +14,15 @@ func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	var out := args[0] if args.size() > 0 else "user://screenshot.png"
 	get_window().size = Vector2i(1280, 720)
-	if args.size() > 1 and args[1] == "hangar":
+	if args.size() > 1 and (args[1] == "hangar" or args[1] == "welcome"):
 		# Under the window itself, as in the real game (full-rect anchors).
-		get_tree().root.add_child.call_deferred(load("res://ui/hangar/hangar.tscn").instantiate())
+		get_tree().root.add_child.call_deferred(load("res://ui/%s/%s.tscn" % [args[1], args[1]]).instantiate())
 		await _save_after_frames(out)
 		return
+	# TT_DISTRICT=ikebukuro picks the district of the local match;
+	# TT_TEST_STAGE=1 plays the development test stage (the original sheet).
+	TokyoMap.only_district = OS.get_environment("TT_DISTRICT")
+	MatchSession.test_stage = OS.get_environment("TT_TEST_STAGE") == "1"
 	var main: Node = load("res://levels/board/main.tscn").instantiate()
 	add_child(main)
 	await get_tree().process_frame
@@ -30,6 +34,9 @@ func _ready() -> void:
 		controller._build_enemy_plan()
 		await controller._on_plan_submitted()
 	var cam := get_viewport().get_camera_3d() as BoardCamera
+	# Let the controller's focus glide finish, or it overrides the zoom.
+	for _i in 40:
+		await get_tree().process_frame
 	if cam != null and args.size() > 1:
 		cam.size = float(args[1])
 		if args.size() > 2:

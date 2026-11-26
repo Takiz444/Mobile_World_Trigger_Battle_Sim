@@ -2,7 +2,7 @@ class_name CityGeometry
 extends RefCounted
 ## Continuous play space: where a character can stand and how it gets from
 ## one place to another. Positions are 2D points on the ground plane (world
-## X, Z in metres; one old hex spacing = sqrt(3) m) plus a level:
+## X, Z in metres) plus a level:
 ##   level 0           the street (outside every building)
 ##   1                 inside a building, on its ground floor (sees out of
 ##                     windows); a one-floor building has no inside, 1 is
@@ -11,10 +11,16 @@ extends RefCounted
 ## Buildings have no middle floors: inside is the ground floor only, and
 ## stairs go straight between it and the roof.
 ##
-## Buildings are the same world-space boxes the renderer draws and line of
-## sight traces against (BuildingRects), so what blocks you is what you see.
+## The city is made of CityBox boxes (oriented rectangles, so real streets at
+## any angle work), the same boxes the renderer draws and line of sight
+## traces against, so what blocks you is what you see:
+##   buildings  enterable (inside + roof), block the street
+##   solids     sealed (pillars, towers, temples): block the street
+##   decks      elevated (viaducts, expressway): block sight only
+## Water and fenced railway tracks (BlockedMask) can't be walked on but are
+## seen across; bridges and level crossings cross them.
 ##
-## Ground routes go around buildings: an A* search on a fine grid
+## Ground routes go around obstacles: an A* search on a fine grid
 ## (AStarGrid2D, native and deterministic) followed by string-pulling, so
 ## paths are short and straight. Getting into a building costs time at the
 ## wall (ENTER_TIME), and stairs cost time per floor (STAIR_TIME).
@@ -38,28 +44,80 @@ const INSIDE_DEPTH := 0.35
 ## Grasshopper jump reach (metres; two old hexes) and duration.
 const JUMP_RANGE := 3.5
 const JUMP_TIME := 0.6
+## Spatial index cell size (metres).
+const INDEX_CELL := 4.0
 
 var bounds := Rect2()
-var rects: Array = []        # [{rect: Rect2, floors: int}]
-var _expanded: Array[Rect2] = []
+var rects: Array = []        # enterable buildings (CityBox, kind BUILDING)
+var walls: Array = []        # everything that blocks the street (buildings + solids)
+var sight: Array = []        # everything that blocks sight (walls + decks)
+var blocked: BlockedMask
 var _nav: AStarGrid2D
 var _nav_size := Vector2i.ZERO
+var _rect_cells := {}        # Vector2i -> PackedInt32Array (rects)
+var _wall_cells := {}        # Vector2i -> PackedInt32Array (walls, grown by UNIT_RADIUS)
+var _sight_cells := {}       # Vector2i -> PackedInt32Array (sight boxes)
 
 
-func _init(p_bounds: Rect2, building_rects: Array) -> void:
+## `building_boxes`: CityBox buildings; `solids` / `decks`: CityBox lists;
+## `p_blocked`: unwalkable ground (or null).
+func _init(p_bounds: Rect2, building_boxes: Array, solids: Array = [], decks: Array = [], p_blocked: BlockedMask = null) -> void:
 	bounds = p_bounds
-	for r in building_rects:
-		var box := BuildingRects.bounds(r)
-		rects.append({ "rect": box, "floors": int(r["floors"]) })
-		_expanded.append(box.grow(UNIT_RADIUS))
+	blocked = p_blocked
+	rects = building_boxes
+	walls = building_boxes + solids
+	sight = walls + decks
+	_index(rects, _rect_cells, 0.0)
+	_index(walls, _wall_cells, UNIT_RADIUS)
+	_index(sight, _sight_cells, 0.01)
+
+
+func _index(boxes: Array, cells: Dictionary, grow: float) -> void:
+	var tmp := {}
+	for i in boxes.size():
+		var r: Rect2 = (boxes[i]["aabb"] as Rect2).grow(grow)
+		for cx in range(int(floor(r.position.x / INDEX_CELL)), int(floor(r.end.x / INDEX_CELL)) + 1):
+			for cz in range(int(floor(r.position.y / INDEX_CELL)), int(floor(r.end.y / INDEX_CELL)) + 1):
+				var k := Vector2i(cx, cz)
+				if not tmp.has(k):
+					tmp[k] = []
+				tmp[k].append(i)
+	for k in tmp:
+		cells[k] = PackedInt32Array(tmp[k])
+
+
+static func _cell(p: Vector2) -> Vector2i:
+	return Vector2i(int(floor(p.x / INDEX_CELL)), int(floor(p.y / INDEX_CELL)))
+
+
+## Indices (ascending, unique) of boxes in `cells` whose index cells overlap
+## the rectangle spanned by a and b.
+static func _candidates(cells: Dictionary, a: Vector2, b: Vector2) -> PackedInt32Array:
+	var c0 := _cell(Vector2(minf(a.x, b.x), minf(a.y, b.y)))
+	var c1 := _cell(Vector2(maxf(a.x, b.x), maxf(a.y, b.y)))
+	if c0 == c1:
+		return cells.get(c0, PackedInt32Array())
+	var seen := {}
+	for cx in range(c0.x, c1.x + 1):
+		for cz in range(c0.y, c1.y + 1):
+			for i in cells.get(Vector2i(cx, cz), PackedInt32Array()):
+				seen[i] = true
+	var out := PackedInt32Array(seen.keys())
+	out.sort()
+	return out
+
+
+## Sight boxes (indices into `sight`) that a 2D segment a -> b may cross.
+func sight_candidates(a: Vector2, b: Vector2) -> PackedInt32Array:
+	return _candidates(_sight_cells, a, b)
 
 
 # --- Queries ------------------------------------------------------------------
 
 ## Index of the building whose footprint contains `p`, or -1.
 func rect_at(p: Vector2) -> int:
-	for i in rects.size():
-		if (rects[i]["rect"] as Rect2).has_point(p):
+	for i in _rect_cells.get(_cell(p), PackedInt32Array()):
+		if CityBox.has_point(rects[i], p):
 			return i
 	return -1
 
@@ -67,9 +125,10 @@ func rect_at(p: Vector2) -> int:
 ## Floors of the tallest building footprint containing `p` (0 = street).
 func floors_at(p: Vector2) -> int:
 	var best := 0
-	for r in rects:
-		if (r["rect"] as Rect2).has_point(p):
-			best = maxi(best, int(r["floors"]))
+	for i in _rect_cells.get(_cell(p), PackedInt32Array()):
+		var r: Dictionary = rects[i]
+		if int(r["floors"]) > best and CityBox.has_point(r, p):
+			best = int(r["floors"])
 	return best
 
 
@@ -79,6 +138,8 @@ func level_ok(p: Vector2, level: int) -> bool:
 		return false
 	if level == 0:
 		return ground_ok(p)
+	if not bounds.has_point(p) or (blocked != null and not blocked.in_zone(p)):
+		return false
 	# Only the ground floor (1) and the roof exist; no middle floors.
 	if level != 1 and level != floors_at(p):
 		return false
@@ -92,20 +153,51 @@ func level_ok(p: Vector2, level: int) -> bool:
 
 
 func _in_floors(p: Vector2, level: int) -> bool:
-	for r in rects:
-		if int(r["floors"]) >= level and (r["rect"] as Rect2).has_point(p):
+	for i in _rect_cells.get(_cell(p), PackedInt32Array()):
+		var r: Dictionary = rects[i]
+		if int(r["floors"]) >= level and CityBox.has_point(r, p):
 			return true
 	return false
 
 
-## Open street at `p` (inside the play area, clear of every wall).
+## Open street at `p` (inside the play area, clear of every wall, not water
+## or railway).
 func ground_ok(p: Vector2) -> bool:
 	if not _finite(p) or not bounds.grow(-UNIT_RADIUS).has_point(p):
 		return false
-	for e in _expanded:
-		if e.has_point(p):
+	for i in _wall_cells.get(_cell(p), PackedInt32Array()):
+		if CityBox.has_point(walls[i], p, UNIT_RADIUS):
 			return false
-	return true
+	return blocked == null or not blocked.is_blocked(p)
+
+
+## Why nobody can stand at (p, level), as a short reason id ("" if they can):
+##   "outside"  beyond the battle zone      "water"   river / canal / pond
+##   "rail"     fenced railway tracks       "sealed"  a tower, temple or pillar
+##   "wall"     the inside of a building's wall at street level
+##   "floor"    no such floor there         "edge"    too close to the zone edge
+func why_not(p: Vector2, level: int) -> String:
+	if level_ok(p, level):
+		return ""
+	if not _finite(p) or not bounds.has_point(p) or (blocked != null and not blocked.in_zone(p)):
+		return "outside"
+	for i in _wall_cells.get(_cell(p), PackedInt32Array()):
+		var w: Dictionary = walls[i]
+		if int(w["kind"]) == CityBox.Kind.SOLID and CityBox.has_point(w, p):
+			return "sealed"
+	if level > 0:
+		return "floor"
+	if floors_at(p) > 0:
+		return "wall"
+	if blocked != null:
+		match blocked.reason(p):
+			BlockedMask.Reason.WATER:
+				return "water"
+			BlockedMask.Reason.RAIL:
+				return "rail"
+			BlockedMask.Reason.ZONE_EDGE, BlockedMask.Reason.OUTSIDE:
+				return "edge"
+	return "wall"
 
 
 ## The nearest legal spot to (p, level), as {pos, level}: (p, level) itself
@@ -121,12 +213,8 @@ func settle(p: Vector2, level: int) -> Dictionary:
 	var roof := floors_at(p)
 	if roof > 0:
 		var order := [1, roof] if level > 0 and level < roof else [roof, 1]
-		var idx := rect_at(p)
-		var box: Rect2 = rects[idx]["rect"]
-		var inner := box.grow(-2.0 * WALL_MARGIN)
-		var spots := [p]
-		if inner.size.x > 0.0 and inner.size.y > 0.0:
-			spots.append(Vector2(clampf(p.x, inner.position.x, inner.end.x), clampf(p.y, inner.position.y, inner.end.y)))
+		var box: Dictionary = rects[rect_at(p)]
+		var spots := [p, CityBox.clamp_inside(box, p, 2.0 * WALL_MARGIN)]
 		for q in spots:
 			for l in order:
 				if level_ok(q, l):
@@ -153,14 +241,16 @@ func is_inside(p: Vector2, level: int) -> bool:
 	return level > 0 and level < floors_at(p)
 
 
-## A straight walk on the street from `a` to `b` touches no wall.
+## A straight walk on the street from `a` to `b` touches no wall, water or
+## railway.
 func ground_clear(a: Vector2, b: Vector2) -> bool:
-	if not bounds.grow(-UNIT_RADIUS + 0.001).has_point(a) or not bounds.grow(-UNIT_RADIUS + 0.001).has_point(b):
+	var inner := bounds.grow(-UNIT_RADIUS + 0.001)
+	if not inner.has_point(a) or not inner.has_point(b):
 		return false
-	for e in _expanded:
-		if _segment_hits_rect(a, b, e):
+	for i in _candidates(_wall_cells, a, b):
+		if CityBox.segment_hits(walls[i], a, b, UNIT_RADIUS):
 			return false
-	return true
+	return blocked == null or blocked.segment_clear(a, b)
 
 
 ## A straight walk from `a` to `b` stays inside buildings tall enough for
@@ -215,18 +305,22 @@ func _ensure_nav() -> void:
 	_nav.default_compute_heuristic = AStarGrid2D.HEURISTIC_EUCLIDEAN
 	_nav.default_estimate_heuristic = AStarGrid2D.HEURISTIC_EUCLIDEAN
 	_nav.update()
-	# Walls (grown by the character's radius) and the play-area edge.
+	# Walls (grown by the character's radius), water / railway, and the
+	# play-area edge.
+	var inner := bounds.grow(-UNIT_RADIUS)
+	var check_mask := blocked != null and blocked.any_blocked()
 	for x in _nav_size.x:
 		for y in _nav_size.y:
 			var p := _cell_center(Vector2i(x, y))
-			if not bounds.grow(-UNIT_RADIUS).has_point(p):
+			if not inner.has_point(p) or (check_mask and blocked.is_blocked(p)):
 				_nav.set_point_solid(Vector2i(x, y), true)
-	for e in _expanded:
+	for w in walls:
+		var e: Rect2 = (w["aabb"] as Rect2).grow(UNIT_RADIUS)
 		var c0 := _cell_of(e.position)
 		var c1 := _cell_of(e.end)
 		for x in range(maxi(0, c0.x), mini(_nav_size.x, c1.x + 1)):
 			for y in range(maxi(0, c0.y), mini(_nav_size.y, c1.y + 1)):
-				if e.has_point(_cell_center(Vector2i(x, y))):
+				if CityBox.has_point(w, _cell_center(Vector2i(x, y)), UNIT_RADIUS):
 					_nav.set_point_solid(Vector2i(x, y), true)
 
 
@@ -374,67 +468,22 @@ func _door(inside_p: Vector2, toward: Vector2) -> Dictionary:
 	var idx := rect_at(inside_p)
 	if idx == -1:
 		return {}
-	var box: Rect2 = rects[idx]["rect"]
-	var outer := box.grow(UNIT_RADIUS + 0.05)
-	var inner := box.grow(-INSIDE_DEPTH)
-	if inner.size.x <= 0.0 or inner.size.y <= 0.0:
-		inner = Rect2(box.get_center(), Vector2.ZERO)
+	var box: Dictionary = rects[idx]
+	var grow := UNIT_RADIUS + 0.05
 	var best := {}
 	var best_d := INF
 	# Candidate doors every 0.25 m around the wall.
-	var per := 2.0 * (outer.size.x + outer.size.y)
+	var per := CityBox.perimeter(box, grow)
 	var n := maxi(8, int(per / 0.25))
 	for i in n:
-		var p := _perimeter_point(outer, per * i / n)
+		var p := CityBox.perimeter_point(box, grow, per * i / n)
 		if not ground_ok(p):
 			continue
 		var d := p.distance_to(toward)
 		if d < best_d:
 			best_d = d
-			best = { "outside": p, "inside": Vector2(clampf(p.x, inner.position.x, inner.end.x), clampf(p.y, inner.position.y, inner.end.y)) }
+			best = { "outside": p, "inside": CityBox.clamp_inside(box, p, INSIDE_DEPTH) }
 	return best
-
-
-static func _perimeter_point(r: Rect2, s: float) -> Vector2:
-	var w := r.size.x
-	var h := r.size.y
-	if s < w:
-		return r.position + Vector2(s, 0)
-	s -= w
-	if s < h:
-		return r.position + Vector2(w, s)
-	s -= h
-	if s < w:
-		return r.position + Vector2(w - s, h)
-	s -= w
-	return r.position + Vector2(0, h - s)
-
-
-## Segment vs. axis-aligned rectangle (slab test, 2D). Touching counts.
-static func _segment_hits_rect(a: Vector2, b: Vector2, r: Rect2) -> bool:
-	var d := b - a
-	var t0 := 0.0
-	var t1 := 1.0
-	for axis in 2:
-		var o := a[axis]
-		var v := d[axis]
-		var lo := r.position[axis]
-		var hi := r.end[axis]
-		if absf(v) < 1e-9:
-			if o < lo or o > hi:
-				return false
-			continue
-		var ta := (lo - o) / v
-		var tb := (hi - o) / v
-		if ta > tb:
-			var tmp := ta
-			ta = tb
-			tb = tmp
-		t0 = maxf(t0, ta)
-		t1 = minf(t1, tb)
-		if t0 > t1:
-			return false
-	return true
 
 
 static func _finite(p: Vector2) -> bool:

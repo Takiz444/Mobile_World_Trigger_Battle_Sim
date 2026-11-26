@@ -21,6 +21,7 @@ const PICK_LAYER := 1
 var _tiles: Dictionary = {}        # map hexes of the play area (street dressing)
 var _bounds := Rect2()
 var _city: CityBuildings
+var _tokyo: TokyoCity
 var _ground: MeshInstance3D
 var _decor: Node3D
 var _roofs: Node3D
@@ -34,6 +35,22 @@ var last_tap_screen := Vector2.INF
 ## The point point_selected reports for a tap that misses the board.
 const OFF_BOARD := Vector2(100000, 100000)
 var _hover := Vector2.INF
+
+
+## Keeps the Tokyo cutaway on the selected character (BoardUnits child).
+func _process(_delta: float) -> void:
+	if _tokyo == null:
+		return
+	var cam := get_viewport().get_camera_3d()
+	var at := Vector3.INF
+	for c in get_children():
+		if c is BoardUnits:
+			at = (c as BoardUnits).selected_focus()
+			break
+	if cam == null or at == Vector3.INF:
+		_tokyo.set_focus(Vector3.ZERO, 0.0)
+	else:
+		_tokyo.set_focus(at, TokyoCity.CUTAWAY_RADIUS, cam.global_position)
 
 
 func _ready() -> void:
@@ -102,6 +119,36 @@ func pick(screen: Vector2) -> Dictionary:
 
 
 # --- Map ------------------------------------------------------------------------
+
+## Builds the board for a match: its Tokyo section (TokyoCity), or on the
+## old hex map sheet, the hex city (set_map + set_buildings).
+func set_city(ms: MatchState) -> void:
+	if ms.layout != null:
+		for n in [_city, _ground, _decor, _roofs]:
+			if n != null:
+				n.queue_free()
+		_city = null
+		_ground = null
+		_decor = null
+		_roofs = null
+		_tiles = {}
+		_bounds = ms.bounds()
+		if _tokyo == null:
+			_tokyo = TokyoCity.new()
+			add_child(_tokyo)
+		_tokyo.build(ms.layout)
+		return
+	if _tokyo != null:
+		_tokyo.queue_free()
+		_tokyo = null
+	set_map(ms.tiles, ms.bounds())
+	set_buildings(ms.buildings)
+
+
+## The Tokyo district on the board (null on the hex sheet).
+func tokyo_district() -> TokyoDistrict:
+	return _tokyo.district if _tokyo != null else null
+
 
 ## The play area: its map hexes (for the street dressing) and world bounds.
 func set_map(tiles: Dictionary, bounds: Rect2) -> void:

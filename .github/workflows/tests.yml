@@ -25,6 +25,8 @@ jobs:
 
       - name: Rules
         run: godot --headless --path . res://test/rules_test.tscn
+      - name: Tokyo map tests
+        run: godot --headless --path . res://test/tokyo_test.tscn
       - name: Security
         run: godot --headless --path . res://test/security_test.tscn
       - name: Backend

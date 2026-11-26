@@ -480,25 +480,27 @@ func _test_city_rects() -> void:
 
 
 func _test_spawns() -> void:
-	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, MapData.random_section(4242))
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, TokyoMap.random_section(4242))
 	var geo := ms.geometry()
 	var ok := true
 	for u in ms.all_units():
 		ok = ok and geo.ground_ok(u.pos) and u.level == 0
 		ok = ok and geo.ground_clear(u.pos, u.pos + u.forward() * 1.0)
 	_check(ok, "spawns are on open street, each facing open street")
-	var again := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, MapData.random_section(4242))
+	var again := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, TokyoMap.random_section(4242))
 	_check(again.teams[1][2].pos == ms.teams[1][2].pos, "the same seed gives the same spawns")
 	var closest := INF
 	var differs := false
 	for seed in 60:
-		var m := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), seed, MapData.random_section(seed))
+		# Mostly Tokyo sections, a few on the old map sheet.
+		var sec: Variant = TokyoMap.random_section(seed) if seed % 6 != 0 else MapData.random_section(seed)
+		var m := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), seed, sec)
 		var units := m.all_units()
 		for i in units.size():
 			for j in range(i + 1, units.size()):
 				closest = minf(closest, units[i].pos.distance_to(units[j].pos))
 		differs = differs or (seed > 0 and m.teams[0][0].pos != ms.teams[0][0].pos)
-	_check(closest >= MatchRunner.SPAWN_MIN_DISTANCE - 0.001, "nobody spawns within 3 hexes of anyone else (closest pair over 60 maps: %.2f m)" % closest)
+	_check(closest >= MatchRunner.SPAWN_MIN_DISTANCE - 0.001, "nobody spawns within 4 old hexes of anyone else (closest pair over 60 maps: %.2f m)" % closest)
 	_check(differs, "different seeds give different spawns")
 
 
@@ -529,12 +531,19 @@ func _test_map_sections() -> void:
 	var id := str(server._create_match({ "squad": squad })["body"]["match_id"])
 	server._join_match(id, { "squad": squad })
 	var m: Dictionary = server._matches[id]
-	var area: Rect2i = m["map"]
-	_check(MapData.valid_section(area) and (m["ms"] as MatchState).tiles.size() == area.size.x * area.size.y,
-		"server matches are played on a random section")
-	_check(MapData.section_from(server._get_match(id, "")["body"].get("map")) == area, "clients are told the section")
+	var area: Dictionary = m["map"]
+	_check(TokyoMap.valid_section(area) and not TokyoMap.is_sheet(area) and (m["ms"] as MatchState).layout.zone == TokyoMap.section_polygon(area),
+		"server matches are played on a random section of Tokyo (%s)" % TokyoMap.place_name(area))
+	_check(TokyoMap.section_from(server._get_match(id, "")["body"].get("map")) == area, "clients are told the section")
 	var restored := server._deserialize(JSON.parse_string(JSON.stringify(server._serialize(m))))
-	_check(restored["map"] == area, "the section survives a server restart")
+	_check(restored["map"] == area and (restored["ms"] as MatchState).layout == (m["ms"] as MatchState).layout,
+		"the section survives a server restart")
+	# A match saved before Tokyo (a hex-sheet section) still loads on the sheet.
+	var old := server._serialize(m)
+	old["map"] = [3, 4, 20, 22]
+	var back := server._deserialize(JSON.parse_string(JSON.stringify(old)))
+	_check(TokyoMap.is_sheet(back["map"]) and (back["ms"] as MatchState).tiles.size() == 20 * 22,
+		"matches saved on the old map sheet still load")
 	server.free()
 
 

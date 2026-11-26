@@ -1,16 +1,23 @@
 class_name MatchState
 extends RefCounted
-## The whole runtime match: two squads, the city (building heights per map
-## hex, from which the continuous geometry is built), Spider wires, and a
-## seeded RNG so resolution is deterministic (replayable).
+## The whole runtime match: two squads, the city, Spider wires, and a seeded
+## RNG so resolution is deterministic (replayable).
+##
+## The city is either a section of Tokyo (`layout`, see TokyoMap) or, for
+## test arenas and the old map sheet, building heights per map hex
+## (`tiles` / `buildings`), turned into the same boxes (BuildingRects).
 
 const WIRE_RADIUS := 1.5
 
 var teams: Array = []            # teams[team] -> Array[UnitState]
 ## Spider wires: [{pos: Vector2, team: int}], each a circle of WIRE_RADIUS.
 var wires: Array = []
-var buildings: Dictionary = {}   # map hex (Vector2i) -> floors (1..4); rendering + geometry source
-var tiles: Dictionary = {}       # map hexes of the play area (rendering + bounds)
+var buildings: Dictionary = {}   # hex maps: map hex (Vector2i) -> floors (1..4)
+var tiles: Dictionary = {}       # hex maps: map hexes of the play area (bounds)
+## Tokyo: the section's city (null on hex maps), and the section itself
+## ({district, rect}; see TokyoMap).
+var layout: CityLayout
+var section: Dictionary = {}
 var rng: RandomNumberGenerator
 
 var _geometry: CityGeometry
@@ -37,13 +44,26 @@ func all_units() -> Array[UnitState]:
 	return result
 
 
-## Building geometry (BuildingRects), cached; rebuilt when the set of
-## building hexes changes (or after invalidate_buildings()).
+## The enterable buildings (CityBox boxes). On hex maps they are rebuilt
+## when the set of building hexes changes (or after invalidate_buildings()).
 func building_rects() -> Array:
+	if layout != null:
+		return layout.buildings
 	if _rects_for_size != buildings.size():
-		_rects = BuildingRects.compute(buildings)
+		_rects = []
+		for r in BuildingRects.compute(buildings):
+			_rects.append(CityBox.from_rect(BuildingRects.bounds(r), int(r["floors"])))
 		_rects_for_size = buildings.size()
 	return _rects
+
+
+## Sealed solids and elevated decks (Tokyo only).
+func solid_boxes() -> Array:
+	return layout.solids if layout != null else []
+
+
+func deck_boxes() -> Array:
+	return layout.decks if layout != null else []
 
 
 ## Call after changing building heights in place (same set of hexes).
@@ -52,8 +72,10 @@ func invalidate_buildings() -> void:
 	_geometry = null
 
 
-## The play area in world units (X, Z): the map hexes' cells.
+## The play area in world units (X, Z): the section, or the map hexes' cells.
 func bounds() -> Rect2:
+	if layout != null:
+		return layout.bounds
 	if tiles.is_empty():
 		return Rect2(-500, -500, 1000, 1000)
 	var first := true
@@ -68,9 +90,10 @@ func bounds() -> Rect2:
 
 ## Continuous geometry of this match's city (walkability, routes).
 func geometry() -> CityGeometry:
-	var key := "%d|%d" % [buildings.size(), tiles.size()]
+	var key := "%d|%d|%d" % [buildings.size(), tiles.size(), layout.get_instance_id() if layout != null else 0]
 	if _geometry == null or _geometry_key != key:
-		_geometry = CityGeometry.new(bounds(), building_rects())
+		_geometry = CityGeometry.new(bounds(), building_rects(), solid_boxes(), deck_boxes(),
+			layout.blocked if layout != null else null)
 		_geometry_key = key
 	return _geometry
 

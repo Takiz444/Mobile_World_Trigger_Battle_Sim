@@ -490,8 +490,8 @@ func _new_match(squad: Array, seed: int, ranked := false, mode := "async") -> Di
 		"mode": mode,
 		"max_turns": Ladder.LIVE_MAX_TURNS if mode == "live" else ASYNC_MAX_TURNS,
 		"radar_key": _new_secret_int(),
-		# The play area: a random part of the city (public, unlike the seed).
-		"map": MapData.random_section(_new_seed()),
+		# The play area: a random part of Tokyo (public, unlike the seed).
+		"map": TokyoMap.random_section(_new_seed()),
 		"turn": 1,
 		"teams": [PlanCodec.decode_squad(squad), null],
 		"tokens": [_new_token(), ""],
@@ -521,7 +521,7 @@ func _seat_second(m: Dictionary, squad: Array) -> String:
 	var token := _new_token()
 	m["teams"][1] = PlanCodec.decode_squad(squad)
 	m["tokens"][1] = token
-	m["ms"] = MatchRunner.build_match(m["teams"][0], m["teams"][1], m["seed"], m.get("map", Rect2i()))
+	m["ms"] = MatchRunner.build_match(m["teams"][0], m["teams"][1], m["seed"], m["map"])
 	_start_turn_clock(m, Ladder.LIVE_LOAD_GRACE_SEC)
 	return token
 
@@ -1016,8 +1016,12 @@ func _deserialize(d: Dictionary) -> Dictionary:
 	]
 	var seed := int(d["seed"])
 	var ms: MatchState = null
+	# Older records without a section were played on the whole map sheet.
+	var section := TokyoMap.section_from(d.get("map"))
+	if section.is_empty():
+		section = { "district": TokyoMap.SHEET, "rect": Rect2i() }
 	if teams[1] != null:
-		ms = MatchRunner.build_match(teams[0], teams[1], seed, MapData.section_from(d.get("map")))
+		ms = MatchRunner.build_match(teams[0], teams[1], seed, section)
 		if d.get("state") is Dictionary:
 			PlanCodec.apply_state(ms, d["state"])
 	var plans: Array = [null, null]
@@ -1034,8 +1038,7 @@ func _deserialize(d: Dictionary) -> Dictionary:
 		"mode": str(d.get("mode", "async")),
 		"max_turns": int(d.get("max_turns", 0)),
 		"radar_key": str(d["radar_key"]).to_int() if d.has("radar_key") else _new_secret_int(),
-		# Older records were played on the whole city.
-		"map": MapData.section_from(d.get("map")),
+		"map": section,
 		"turn": int(d["turn"]),
 		"teams": teams,
 		"tokens": [str(d["tokens"][0]), str(d["tokens"][1])],
@@ -1994,10 +1997,9 @@ func _new_token() -> String:
 	return _crypto.generate_random_bytes(16).hex_encode()
 
 
-## [col, row, w, h] of the match's play area, or null for the whole city.
+## The match's play area in JSON form (TokyoMap.section_to_json).
 func _map_array(m: Dictionary) -> Variant:
-	var r: Rect2i = m.get("map", Rect2i())
-	return MapData.section_to_array(r) if r.has_area() else null
+	return TokyoMap.section_to_json(m.get("map", {}))
 
 
 func _new_seed() -> int:

@@ -37,19 +37,26 @@ func _setup_environment() -> void:
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.75
+	env.ambient_light_energy = 0.7
+	# Part of the ambient is a neutral blue-grey, not the pink sky: the city
+	# keeps its colors.
+	env.ambient_light_sky_contribution = 0.6
+	env.ambient_light_color = Color(0.46, 0.5, 0.6)
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.tonemap_exposure = 1.05
+	env.tonemap_exposure = 1.12
 	env.glow_enabled = true
 	env.glow_intensity = 0.55
-	env.glow_bloom = 0.06
-	env.glow_hdr_threshold = 0.9
+	# Only lights bloom (windows, lamps, neon): no veil over the whole frame.
+	env.glow_bloom = 0.0
+	env.glow_hdr_threshold = 1.0
 	env.ssao_enabled = true
 	env.ssao_radius = 1.2
 	env.ssao_intensity = 1.6
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.36, 0.42, 0.58)
-	env.fog_density = 0.004
+	# Light: an orthographic camera sees everything at about the same
+	# distance, so fog is a uniform veil rather than depth.
+	env.fog_density = 0.0016
 	env.fog_sky_affect = 0.3
 
 	var world_env := WorldEnvironment.new()
@@ -63,11 +70,13 @@ func _setup_lights() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.name = "Sun"
 	sun.rotation_degrees = Vector3(-32.0, -58.0, 0.0)
-	sun.light_color = Color(1.0, 0.78, 0.58)
-	sun.light_energy = 1.35
+	sun.light_color = Color(1.0, 0.8, 0.62)
+	sun.light_energy = 1.5
 	sun.shadow_enabled = true
 	sun.shadow_blur = 1.5
-	sun.directional_shadow_max_distance = 90.0
+	sun.directional_shadow_max_distance = 100.0
+	# The camera stretches the shadow range as it zooms out (BoardCamera).
+	sun.add_to_group(BoardCamera.SUN_GROUP)
 	if GfxLite.enabled():
 		# One shadow map instead of four splits: much less shader code to
 		# compile on WebGL (see GfxLite).

@@ -46,6 +46,7 @@ const DELETE_CONFIRM_MS := 4000
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	UiTheme.install(get_tree())
+	MatchSession.test_stage = false
 	if MatchSession.server_url == ServerConfig.DEV_URL or not ServerConfig.allow_custom_server():
 		MatchSession.server_url = ServerConfig.default_url()
 	_conn = GameConnection.new()

@@ -14,22 +14,35 @@ const SPAWN_MIN_DISTANCE := 4.0 * 1.7320508075688772
 const SPAWN_ATTEMPTS := 64
 
 
-## Builds a fresh MatchState on the city map (MapData) — the whole sheet, or
-## only `section` (MapData.random_section) — and places both squads at random
-## open street spots (random_spawns), facing open street. The placement
-## follows from `seed`, so the server can rebuild a match; the server never
-## reveals the seed, so nobody can predict where enemies start. The section
-## is public (clients need it to draw the map).
+## Builds a fresh MatchState on a section of Tokyo (TokyoMap: a
+## {district, rect} Dictionary; a random one from `seed` when none is given)
+## and places both squads at random open street spots (random_spawns),
+## facing open street. A Rect2i, or a "sheet" section, plays on the old hex
+## map sheet (MapData; Rect2i() is the whole sheet). The placement follows
+## from `seed`, so the server can rebuild a match; the server never reveals
+## the seed, so nobody can predict where enemies start. The section is
+## public (clients need it to draw the map).
 static func build_match(
 	player_data: Array[UnitData],
 	enemy_data: Array[UnitData],
 	seed: int = DEFAULT_SEED,
-	section: Rect2i = Rect2i()
+	section: Variant = null
 ) -> MatchState:
 	var ms := MatchState.new(seed)
-	var map := MapData.city(section)
-	ms.tiles = map.tiles
-	ms.buildings = map.buildings
+	var sec: Dictionary = {}
+	if section is Rect2i:
+		sec = { "district": TokyoMap.SHEET, "rect": section }
+	elif section is Dictionary and not (section as Dictionary).is_empty():
+		sec = section
+	else:
+		sec = TokyoMap.random_section(seed)
+	ms.section = sec
+	if TokyoMap.is_sheet(sec):
+		var map := MapData.city(sec["rect"])
+		ms.tiles = map.tiles
+		ms.buildings = map.buildings
+	else:
+		ms.layout = TokyoMap.layout(sec)
 	var squads := [player_data, enemy_data]
 	var spots := random_spawns(ms, player_data.size() + enemy_data.size(), seed)
 	var center := ms.bounds().get_center()

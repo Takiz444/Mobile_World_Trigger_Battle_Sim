@@ -205,6 +205,17 @@ func head_pos(u: UnitState) -> Vector3:
 	return _world_pos(u) + Vector3(0, 1.75, 0)
 
 
+## Where the selected character is drawn right now (mid-step included), at
+## chest height, or Vector3.INF when nobody is selected.
+func selected_focus() -> Vector3:
+	if _selected == null or _selected.is_bailed or not _markers.has(_selected):
+		return Vector3.INF
+	var root := _markers[_selected] as Node3D
+	if not root.is_inside_tree() or not root.visible:
+		return Vector3.INF
+	return root.global_position + Vector3(0, 0.8, 0)
+
+
 func has_marker(u: UnitState) -> bool:
 	return _markers.has(u)
 
@@ -622,8 +633,7 @@ func _ray_reach(space: PhysicsDirectSpaceState3D, eye: Vector3, dir: Vector3, ra
 	if _map_bounds.has_area():
 		limit = minf(limit, _box_exit_2d(Vector2(eye.x, eye.z), Vector2(dir.x, dir.z), _map_bounds))
 	if not own_rect.is_empty():
-		var b := BuildingRects.bounds(own_rect, _hex_size)
-		var exit := _box_exit_2d(Vector2(eye.x, eye.z), Vector2(dir.x, dir.z), b)
+		var exit := CityBox.exit_distance(own_rect, Vector2(eye.x, eye.z), Vector2(dir.x, dir.z))
 		if exit > Visibility.WINDOW_REACH * _hex_size:
 			return exit  # vision stops at the inside of the wall
 		start = eye + dir * exit  # leave through the window

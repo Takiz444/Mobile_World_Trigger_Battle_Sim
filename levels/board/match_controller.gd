@@ -85,9 +85,10 @@ var _prediction_label: Label
 
 # Focus on the character being commanded.
 ## Camera zoom (ortho size) when a character is selected.
-const FOCUS_SIZE := 13.0
+const FOCUS_SIZE := 17.0
 var _spotlight: Spotlight
 var _markers: SquadMarkers
+var _place: PlaceBanner
 
 
 func setup(board: CityBoard, timeline: TimelineUI, event_log: EventLogUI, ui_layer: CanvasLayer, camera: BoardCamera = null) -> void:
@@ -118,6 +119,9 @@ func setup(board: CityBoard, timeline: TimelineUI, event_log: EventLogUI, ui_lay
 			_focus_camera_only(i))
 
 	_build_prediction_label(ui_layer)
+	_place = PlaceBanner.new()
+	ui_layer.add_child(_place)
+	ui_layer.move_child(_place, 2)       # over the board, under the HUD panels
 	_build_overlay(ui_layer)
 	_build_surrender_button(ui_layer)
 
@@ -146,7 +150,11 @@ func _start_match() -> void:
 	# A new seed every match: the play area, start positions, and hit rolls
 	# all differ each time.
 	var seed := randi() & 0x7FFFFFFF
-	var section := MapData.random_section(seed)
+	var section := TokyoMap.random_section(seed)
+	if MatchSession.test_stage:
+		# Development test stage: a random half of the original map sheet
+		# (a new one every match, from the seed).
+		section = { "district": TokyoMap.SHEET, "rect": MapData.random_section(seed) }
 	_truth = MatchRunner.build_match(player_data, _enemy_data, seed, section)
 	_truth_turn_salt = randi()
 	_build_view(player_data, _enemy_data, seed, section)
@@ -165,6 +173,7 @@ func _start_match() -> void:
 	_event_log.set_turn(_turn)
 	_event_log.clear()
 	_event_log.add_message("Match started — plan your turn (%.0f seconds per character)." % TurnPlan.TURN_SECONDS, Color(0.6, 0.9, 0.6))
+	_event_log.add_message(_battlefield_text(), Color(0.6, 0.85, 1.0))
 	_timeline.setup(_data_teams[_team])
 	_timeline.bind(_ms, _player_states)
 	_timeline.set_locked(false)
@@ -175,7 +184,7 @@ func _start_match() -> void:
 
 ## Our view of a match built from the same squads, map and seed (positions
 ## are then overwritten by the views we receive).
-func _build_view(squad0: Array, squad1: Array, seed: int, section: Rect2i) -> void:
+func _build_view(squad0: Array, squad1: Array, seed: int, section: Dictionary) -> void:
 	var a: Array[UnitData] = []
 	a.assign(squad0)
 	var b: Array[UnitData] = []
@@ -190,10 +199,17 @@ func _salt(n: int) -> int:
 	return hash([_truth_turn_salt, _turn, n])
 
 
+func _battlefield_text() -> String:
+	if TokyoMap.is_sheet(_ms.section):
+		return "Battlefield: test stage (original map)." if MatchSession.test_stage else "Battlefield: training sheet."
+	return "Battlefield: %s, Tokyo." % TokyoMap.place_name(_ms.section)
+
+
 ## Builds the map, props, and unit markers for _ms and frames the camera.
 func _build_board_view() -> void:
-	_board.set_map(_ms.tiles, _ms.bounds())
-	_board.set_buildings(_ms.buildings)
+	_board.set_city(_ms)
+	if _place != null:
+		_place.show_place(_ms.section)
 	_board.set_wires(_ms.wires)
 	_units_view.setup(_ms.all_units(), _board.hex_size)
 	_units_view.set_map_bounds(_ms.bounds())
@@ -249,7 +265,7 @@ func _setup_online() -> void:
 	var squad1 := PlanCodec.decode_squad(teams[1]) if teams.size() > 1 and teams[1] != null else []
 	_data_teams = [squad0, squad1]
 	# The server sends the play area; positions come from the fogged view.
-	_build_view(squad0, squad1, MATCH_SEED, MapData.section_from(body.get("map")))
+	_build_view(squad0, squad1, MATCH_SEED, TokyoMap.section_from(body.get("map")))
 	var view: Variant = body.get("view")
 	if view is Dictionary:
 		_apply_view(view)
@@ -264,6 +280,7 @@ func _setup_online() -> void:
 	_event_log.set_turn(_turn)
 	_event_log.clear()
 	_event_log.add_message("Online match %s — you are team %d." % [_match_id, _team], Color(0.6, 0.9, 0.6))
+	_event_log.add_message(_battlefield_text(), Color(0.6, 0.85, 1.0))
 	var winner := int(body.get("winner", -1))
 	if winner != -1:
 		_show_match_over(winner)
@@ -324,7 +341,7 @@ func _place_point(a: PlanAction, p: Vector2, level: int, building: int) -> void:
 				and geo.rect_at(a.point) == geo.rect_at(p) and geo.rect_at(p) != -1:
 			target_level = 1
 		if not geo.level_ok(p, target_level):
-			_timeline.flash("Nobody can stand there.")
+			_timeline.flash(_cant_stand_text(p, target_level, a.card.jump))
 			return
 	else:
 		target_level = 0
@@ -346,6 +363,32 @@ func _place_point(a: PlanAction, p: Vector2, level: int, building: int) -> void:
 			_timeline.flash("Too far for this turn (needs %.1f s of %.0f)." % [need, TurnPlan.TURN_SECONDS])
 			return
 	_timeline.plan_edited()
+
+
+## Why a spot can't be a move target, in words.
+func _cant_stand_text(p: Vector2, level: int, jump: bool) -> String:
+	match _ms.geometry().why_not(p, level):
+		"outside":
+			return "That's outside the battle zone (the red line)."
+		"edge":
+			return "Too close to the edge of the battle zone."
+		"water":
+			var nm := ""
+			if _ms.layout != null and _ms.layout.district != null:
+				nm = str(_ms.layout.district.water_at(p).get("name", ""))
+			var what := ("the %s" % nm) if nm != "" else "water"
+			if jump:
+				return "That's %s: nobody can land in the water. Jump to the other bank instead." % what
+			return "That's %s: nobody can stand in the water. Cross at a bridge, or jump a narrow stretch with Grasshopper." % what
+		"rail":
+			return "Railway tracks are fenced off: cross at a level crossing or a bridge."
+		"sealed":
+			return "That building is sealed: nobody can get in or up onto it."
+		"wall":
+			return "That's inside a building: tap its roof, or tap it twice for the ground floor."
+		"floor":
+			return "There's no floor to stand on there."
+	return "Nobody can stand there."
 
 
 func _restore(a: PlanAction, old: PlanAction) -> void:

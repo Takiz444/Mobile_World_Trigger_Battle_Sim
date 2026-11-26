@@ -26,8 +26,14 @@ extends RefCounted
 ##     mid-jump lands the character (nobody is left stuck inside a wall).
 ##     Version 9 clients can still play: the server resolves turns and
 ##     resyncs their state.
-const VERSION := 10
-const MIN_SUPPORTED := 9
+## 11: the battlefield is Tokyo: "map" is a district section
+##     ["shibuya", x, z, w, h] with oriented buildings, sealed towers,
+##     elevated decks, water and railways. Older clients can't draw it or
+##     plan routes on it, so they must update.
+## 12: battle zones follow the streets: "map" is ["asakusa", zone index];
+##     district data rebuilt (grid-aligned, lower buildings, zones).
+const VERSION := 12
+const MIN_SUPPORTED := 12
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

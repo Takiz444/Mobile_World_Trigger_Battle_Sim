@@ -7,6 +7,7 @@ extends Control
 ## guest account is saved here moves its trophies and history to the new one.
 
 const HANGAR := "res://ui/hangar/hangar.tscn"
+const BATTLE := "res://levels/board/main.tscn"
 ## The server's minimum (PasswordHash.MIN_LENGTH), checked here first.
 const PASSWORD_MIN_LENGTH := 8
 
@@ -72,7 +73,7 @@ func _build() -> void:
 	var title := UiTheme.label("TRION TACTICS", 34, UiTheme.ACCENT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	column.add_child(title)
-	var tagline := UiTheme.label("3v3 simultaneous tactics in a living city", 16, UiTheme.TEXT_DIM)
+	var tagline := UiTheme.label("3v3 simultaneous tactics in the streets of Tokyo", 16, UiTheme.TEXT_DIM)
 	tagline.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	column.add_child(tagline)
 
@@ -157,6 +158,19 @@ func _build() -> void:
 	_server_input.tooltip_text = "Development builds only: which server to sign in to"
 	_server_input.visible = ServerConfig.allow_custom_server()
 	column.add_child(_server_input)
+
+	# Bottom left, outside the scroll: the development test stage.
+	var test_btn := Button.new()
+	test_btn.text = "Test"
+	test_btn.tooltip_text = "Development: a local match vs AI on the original battle map"
+	test_btn.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	test_btn.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	test_btn.offset_left = 16
+	test_btn.offset_top = -16
+	test_btn.offset_bottom = -16
+	test_btn.custom_minimum_size = Vector2(88, 40)
+	test_btn.pressed.connect(_go_to_test_stage)
+	add_child(test_btn)
 
 	for b in find_children("*", "BaseButton", true, false):
 		UiTheme.add_press_feedback(b)
@@ -312,6 +326,17 @@ func _server_url() -> String:
 
 func _go_to_hangar() -> void:
 	UiTheme.change_scene(get_tree(), HANGAR)
+
+
+## The test stage: an offline match against the AI on a random half of the
+## original hex map sheet (MatchSession.test_stage), with the saved squad.
+func _go_to_test_stage() -> void:
+	MatchSession.mode = MatchSession.Mode.LOCAL
+	MatchSession.live = false
+	MatchSession.test_stage = true
+	for u in SquadStore.get_squad():
+		u.ensure_slot_arrays()
+	UiTheme.change_scene(get_tree(), BATTLE)
 
 
 # --- Building blocks ------------------------------------------------------------

@@ -1,9 +1,9 @@
 # Trion Tactics (World Trigger Battle Sim)
 
 Cross-platform online turn-based strategy game built in **Godot 4.6**.
-Simultaneous-execution 3v3 skirmishes in a 3D city, with free movement and
-time-based turns, based on the *World Trigger* Away Mission Test Battle
-Simulation Exercise.
+Simultaneous-execution 3v3 skirmishes in a low-poly **Tokyo** (real districts
+built from OpenStreetMap), with free movement and time-based turns, based on
+the *World Trigger* Away Mission Test Battle Simulation Exercise.
 
 See `Project Docs/GDDV1.pdf` for the full design document.
 
@@ -34,7 +34,7 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ### How a turn works
 - **Free movement.** Characters stand anywhere on the street, inside a
-  building on a floor, or on a roof (`common/map/city_geometry.gd`). A tapped
+  building on its ground floor, or on a roof (`common/map/city_geometry.gd`). A tapped
   destination is routed around buildings (A* on a fine grid + string
   pulling); entering a building, stairs, and Grasshopper jumps take time.
 - **Time, not tokens.** Each turn every character gets **6 seconds** and two
@@ -60,27 +60,87 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - `SquadStore` — static player squad (survives Hangar → Battle).
 - `MatchSession` — static online config (mode, server URL, match id, team).
 
-### City Map — `common/map/map_data.gd`
-- **Every match uses a random part of the city:** a rectangle covering about
-  half the sheet (`MapData.SECTION_SHARE`), with a random position and shape
-  (at least 18 hexes a side). Faster games, and no two maps alike. The server
-  picks it separately from the hidden match seed and sends it to clients
-  (`map` in the match state); it is saved with the match.
-- The 32×32 flat-top hex map from `Project Docs/Map refrence with building.png`,
-  traced hex by hex: the scan's hex lattice was fitted and every hex classified
-  as street or building, so streets and building footprints match the sheet
-  (472 building hexes in 40 blocks; the sheet is point-symmetric, so it's fair).
-- The sheet is top-down and shows no heights: each block is split into
-  rectangular segments (towers with lower wings), each with its own height
-  (1–4 floors), mirrored across the map so both sides stay fair. Edit the
-  digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
-- The map sheet is drawn on a hex lattice, which only shapes the buildings;
-  play itself is continuous (positions in metres, no tiles).
-- Spawns: random open street spots (one connected street area); nobody,
-  friend or foe, starts within about 5 m of anyone else (at least
-  `MatchRunner.SPAWN_MIN_DISTANCE` ≈ 6.9 m apart, never relaxed on a
-  playable map), each facing its most open street. Derived from the hidden match seed, so the server can
-  rebuild a match but players can't predict enemy positions.
+### The Battlefield: Tokyo — `common/map/tokyo_map.gd`
+- **The city is Tokyo**, built from official and open map data in a
+  low-poly style: every building footprint and its **measured height** from
+  **Project PLATEAU** (MLIT's 3D city model of the 23 wards), checked against
+  the **GSI** national base map; streets, railways, water, parks and street
+  furniture from **OpenStreetMap**. Twelve real districts ship with the game (`common/map/tokyo/`):
+  Shibuya (Scramble Crossing), Shinjuku (Kabukicho), Akihabara, Ginza,
+  Asakusa (Kaminarimon & the Sumida), Ikebukuro, Ueno (Ameyoko), Roppongi,
+  Harajuku, Nihonbashi, Shimokitazawa, and Shiba (Tokyo Tower & Kamiyacho).
+  Each is a square of real city 800–960 m a side at **1 game unit = 2.5 m**,
+  turned so its main street grid runs along the screen axes.
+- **Every match is fought in a battle zone** in the built-up city (at least
+  half of the zone's blocks covered by buildings: no empty grounds): a set
+  of whole city blocks
+  the **size and shape of the original battle map** (the 32×32 hex sheet:
+  about 2,730 square units, 48.5 × 56.3, roughly 130 m across; zones are
+  never longer than 1.6 to 1) with a border you can read on the ground:
+  - small streets and footpaths around and between its blocks are in the
+    zone at full width (the border runs along the far curb),
+  - avenues, highways and railways are a hard edge (the border runs along
+    the near curb) unless the zone takes the blocks on both sides,
+  - big parks are their own blocks; a park too big for a zone is divided
+    along footpaths (drawn on the ground),
+  - medians and traffic islands count as road, so no zone grabs a strip of
+    an avenue; by a river the zone takes a strip of water along the bank.
+  - zones are **as rectangular as the blocks allow**: the build
+    (`tools/tokyo/zones.py`) tries rectangles turned to the local street
+    grid, keeps the blocks mostly inside, and prefers the zones that fill
+    most of their rectangle; the outline is then straightened (sides along
+    the streets snapped to them, small steps folded in), so the red line is
+    a few clean straight sides,
+  - zones keep **80 m (32 units) clear of the edge of the map data**.
+  A well-spread set is kept per district (`common/map/tokyo/*.json` "zones").
+  The server picks one from the match seed (`TokyoMap.random_section`) and
+  sends it as `"map": ["asakusa", 12]`; it is saved with the match. Outside
+  the zone nothing can be reached (street, roof or interior). Around it the
+  rest of the district is drawn as **plain grey boxes** on ground that
+  **darkens in a gradient** away from the zone (per pixel, from the zone
+  polygon), and a **red line and low red curtain** follow its edge. Where
+  the map data ends the city fades into **fog** along a wavy front: no
+  made-up blocks, no hard edge.
+- **City geometry** (`common/map/city_box.gd`, `city_geometry.gd`): every
+  solid thing is an oriented box (real streets run at every angle):
+  *buildings* (enterable: ground floor + roof, 1–7 floors), *sealed solids*
+  (skyscrapers over ~20 storeys, temples, viaduct and expressway piers, gate
+  posts: block walking and sight, nobody stands on them), and *elevated
+  decks* (JR / metro viaducts, the Shuto Expressway, gate roofs: block sight
+  between their heights only, you walk underneath). Rivers, canals and
+  fenced at-grade railways (`blocked_mask.gd`) can't be walked on but are
+  seen across; bridges and level crossings cross them, and Grasshopper can
+  jump a narrow canal. Tapping a spot nobody can reach says why ("That's
+  the Sumida River…", "Railway tracks are fenced off…", "That's outside the
+  battle zone…", `CityGeometry.why_not`). The same boxes are drawn, traced for sight, and used
+  for physics, and tests check they agree.
+- **Heights** are PLATEAU's measured heights, compressed so streets stay
+  visible from the camera: under 7.5 m → 1 floor, 12 → 2, 18 → 3, 25 → 4,
+  34 → 5, 45 → 6, 60 m → 7 floors (all enterable); taller buildings are
+  sealed towers drawn up to 22 units high. Footprints that overhang a
+  carriageway are trimmed, so roads stay open.
+- **Checked against the real map**: each district's build records how well
+  it matches (`"quality"` in its JSON): PLATEAU covers 89–99% of the GSI base
+  map's buildings, and the game's boxes reproduce 90%+ of the PLATEAU
+  footprints at 98%+ precision; `tokyo_test` enforces these.
+- **Map data pipeline** (`tools/tokyo/`, see its README): `fetch_osm.py`
+  downloads each district from the Overpass API, `build_districts.py`
+  simplifies it (oriented boxes, triangulated water / parks / land,
+  roads and rail as polylines, decks + piers, street furniture placement)
+  into the JSON the game loads. Add a district by adding it to
+  `districts.py` and re-running both. **Map data © OpenStreetMap
+  contributors (ODbL)**: the credit is shown in every battle.
+- The old 32×32 hex map sheet (`map_data.gd`, from
+  `Project Docs/Map refrence with building.png`) is kept for test arenas and
+  so matches saved before Tokyo can finish. The Welcome screen's **Test**
+  button (bottom left) starts an offline match vs AI on a random half of
+  the sheet (`MapData.random_section`, new each match)
+  (`MatchSession.test_stage`, cleared by the Hangar) for development.
+- Spawns: random open street spots in the section's largest connected
+  street area; nobody, friend or foe, starts within about 7 m of anyone else
+  (`MatchRunner.SPAWN_MIN_DISTANCE`), each facing its most open street.
+  Derived from the hidden match seed, so the server can rebuild a match but
+  players can't predict enemy positions.
 
 ### Squad & Talents — `common/data/talents.gd`
 - Three playable characters: **Assassin** (blades, stealth, jump),
@@ -173,7 +233,8 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 ### Sign-in & Profiles — `ui/welcome/`, `ui/profile/`
 - **First screen** (`ui/welcome/welcome.tscn`, the main scene): sign in with
   email + password, create an account, or **Continue as Guest**. Signed-in
-  players go straight to the Hangar. Guests can play everything: offline
+  players go straight to the Hangar. **Test** (bottom left) opens the
+  development test stage on the original map. Guests can play everything: offline
   needs no account, and online play makes a guest account kept on that
   device only. Creating an account while a guest account is saved moves its
   trophies and history to the new account.
@@ -227,11 +288,32 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   WebSocket keepalive with dead-link detection, 4 MB resync buffers.
 
 ### Board — `levels/board/`
-- `city_board.gd` — the dressed street (asphalt, sidewalks, avenue markings,
-  lamps), the buildings, free picking (street or roof), and planning overlays
-  (routes, range circles, target markers, Spider wires).
-- `city_buildings.gd` + `building.gdshader` — rectangular building segments
-  with window-grid facades, floor lines, parapets, and rooftop equipment.
+- `city_board.gd` — free picking (street or roof; sealed towers refuse a
+  move), planning overlays (routes, range circles, target markers, Spider
+  wires), and the city: Tokyo (`tokyo_city.gd`) or the old hex sheet
+  (`city_buildings.gd`).
+- `tokyo_city.gd` + `tokyo_building.gdshader` — the low-poly city: every
+  box of the district in one MultiMesh, with facades per building type
+  (houses, balcony-banded apartments, office ribbon glass, lit shopfronts,
+  glass towers), varied roofs and rooftop clutter; physics solids and roof
+  pick bodies for the play area; the district beyond as scenery.
+- **Cutaway**: walls and roofs between the camera and the selected
+  character are cut away in a small dithered circle, so it and the street
+  around it stay visible among tall buildings.
+- `tokyo_ground.gd` + `tokyo_water.gdshader` — land (block interiors darker
+  than the sidewalks that line every street), parks, roads with curbs, lane
+  markings and zebra crossings (Shibuya's diagonal scramble too), rivers sunk
+  between railed embankment walls with moving faceted water, bridges, fenced
+  railway tracks. Yakatabune and water buses bob on the bigger rivers.
+- `tokyo_props.gd` + `low_poly.gd` — street furniture (trees, with autumn
+  ginkgo, lamps, utility poles and wires, vending machines, neon blade signs
+  and screens, traffic signals, torii) and landmarks (Tokyo Tower,
+  Kaminarimon with its lantern, the Kabukicho gate, pagodas and temple
+  roofs, Skytree on Asakusa's skyline, Tokyo Tower as a full lattice over
+  its Foot Town). Open-air parking lots are asphalt with parked cars. Flat-shaded vertex-colored meshes
+  sharing two materials.
+- `place_banner.gd` — the "SHIBUYA · Scramble Crossing" title card at the
+  start of a match and the map-data credit.
 - `board_units.gd` — low-poly agents with a role weapon; they glide between
   replay frames, turn to their facing, flash on hits, and bail out. Hidden or
   indoor characters show as x-ray silhouettes; radar pings show unseen enemies.
@@ -321,6 +403,7 @@ expires), the server resolves deterministically and both clients replay it.
 
 ```bash
 godot --headless --path . res://test/rules_test.tscn   # combat rules + server validation
+godot --headless --path . res://test/tokyo_test.tscn   # Tokyo map: data, sections, boxes, water, render = rules
 godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow
@@ -342,6 +425,13 @@ Each prints `PASS`/`FAIL` and exits non-zero on failure.
 
 ```bash
 godot --path . res://test/screenshot.tscn -- out.png [ortho_size] [pitch_deg] [turns]
+```
+
+**Tokyo map views** (any district or section, the game's lighting):
+
+```bash
+godot --path . res://test/tokyo_shot.tscn -- out.png shibuya [ortho] [pitch] [yaw] [dx] [dz]
+godot --path . res://test/tokyo_shot.tscn -- out.png 1234      # random section of seed 1234
 ```
 
 After adding new `class_name` scripts, run `godot --headless --editor --quit --path .`

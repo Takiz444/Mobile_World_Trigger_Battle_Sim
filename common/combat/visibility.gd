@@ -93,12 +93,13 @@ static func in_view(viewer: UnitState, p: Vector2, prof: Dictionary = {}) -> boo
 # --- Line of Sight ----------------------------------------------------------
 
 ## 3D line of sight from (a, a_level) to (b, b_level), traced against the
-## building boxes from eye height to body height. Nobody sees through
-## buildings. A character inside a building sees out only through its outer
-## wall: the line may run at most WINDOW_REACH inside before leaving. Two
-## characters inside the same building see each other only within
-## SAME_ROOM_RANGE. Lines that only graze a corner are clear; a line through
-## the point where two buildings touch corner to corner is blocked.
+## city's boxes (buildings, sealed solids, elevated decks) from eye height to
+## body height. Nobody sees through buildings. A character inside a building
+## sees out only through its outer wall: the line may run at most
+## WINDOW_REACH inside before leaving. Two characters inside the same
+## building see each other only within SAME_ROOM_RANGE. Lines that only
+## graze a corner are clear; a line through the point where two buildings
+## touch corner to corner is blocked.
 static func has_los(ms: MatchState, a: Vector2, a_level: int, b: Vector2, b_level: int) -> bool:
 	if a.distance_to(b) < 0.0001 and a_level == b_level:
 		return true
@@ -106,8 +107,10 @@ static func has_los(ms: MatchState, a: Vector2, a_level: int, b: Vector2, b_leve
 	var pb := Vector3(b.x, b_level + BODY_HEIGHT, b.y)
 	var length := pa.distance_to(pb)
 	var grazes: Array[float] = []
-	for r in ms.building_rects():
-		var hit := _segment_box(pa, pb, r, TOUCH_PAD)
+	var geo := ms.geometry()
+	for i in geo.sight_candidates(a, b):
+		var r: Dictionary = geo.sight[i]
+		var hit := CityBox.segment_overlap(r, pa, pb, TOUCH_PAD)
 		if hit.is_empty():
 			continue
 		if (float(hit["t1"]) - float(hit["t0"])) * length < GRAZE_EPSILON + 2.0 * TOUCH_PAD:
@@ -131,36 +134,6 @@ static func has_los(ms: MatchState, a: Vector2, a_level: int, b: Vector2, b_leve
 		else:
 			return false
 	return true
-
-
-## Parametric overlap [t0, t1] (clamped to [0, 1]) of segment pa->pb with a
-## building box (grown by `pad` on the ground plane), or {} if they don't
-## meet. Slab method.
-static func _segment_box(pa: Vector3, pb: Vector3, r: Dictionary, pad: float = 0.0) -> Dictionary:
-	var b := BuildingRects.bounds(r).grow(pad)
-	var lo := Vector3(b.position.x, 0.0, b.position.y)
-	var hi := Vector3(b.end.x, float(r["floors"]), b.end.y)
-	var d := pb - pa
-	var t0 := 0.0
-	var t1 := 1.0
-	for axis in 3:
-		var o := pa[axis]
-		var v := d[axis]
-		if absf(v) < 1e-9:
-			if o <= lo[axis] or o >= hi[axis]:
-				return {}
-			continue
-		var ta := (lo[axis] - o) / v
-		var tb := (hi[axis] - o) / v
-		if ta > tb:
-			var tmp := ta
-			ta = tb
-			tb = tmp
-		t0 = maxf(t0, ta)
-		t1 = minf(t1, tb)
-		if t0 >= t1:
-			return {}
-	return { "t0": t0, "t1": t1 }
 
 
 ## Whether `viewer` can see position (p, level) right now: inside its vision

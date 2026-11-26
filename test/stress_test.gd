@@ -38,7 +38,7 @@ func _run() -> void:
 
 func _play(seed: int, turns: int) -> void:
 	var squads := [TriggerLibrary.sample_units(), TriggerLibrary.sample_units()]
-	var section := MapData.random_section(seed)
+	var section := TokyoMap.random_section(seed)
 	var truth := MatchRunner.build_match(squads[0], squads[1], seed, section)
 	var views := [MatchRunner.build_match(squads[0], squads[1], seed, section),
 		MatchRunner.build_match(squads[0], squads[1], seed, section)]

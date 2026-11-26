@@ -40,7 +40,7 @@ func _run() -> void:
 
 	_check(_controller._ms.all_units().size() == 2 * PlanCodec.SQUAD_SIZE, "both squads placed on the board")
 	_check(not _controller._overlay.visible, "overlay hidden at match start")
-	_check(_controller._ms.buildings.size() > 0, "city map buildings placed on board")
+	_check(_controller._ms.building_rects().size() > 0 and _controller._ms.layout != null, "a Tokyo section with buildings is on the board (%s)" % TokyoMap.place_name(_controller._ms.section))
 	var hidden_ok := true
 	for e in _controller._enemy_states:
 		if e.fog != Visibility.State.SIGHT:
@@ -296,7 +296,7 @@ func _check_physics_matches_rules() -> void:
 	var tested := 0
 	var agree := 0
 	var mismatch := ""
-	for _i in 4000:
+	for _i in 16000:   # most random points of the zone's bounds aren't open street
 		var a := Vector2(rng.randf_range(b.position.x, b.end.x), rng.randf_range(b.position.y, b.end.y))
 		var c := Vector2(rng.randf_range(b.position.x, b.end.x), rng.randf_range(b.position.y, b.end.y))
 		if not geo.ground_ok(a) or not geo.ground_ok(c) or a.distance_to(c) > 20.0:
