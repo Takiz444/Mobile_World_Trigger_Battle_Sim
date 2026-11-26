@@ -1,26 +1,49 @@
-# Single-host production stack: the game server behind Caddy (automatic
-# HTTPS certificates, WebSocket proxying).
+# Production stack: the game server behind Caddy (automatic HTTPS
+# certificates, WebSocket proxying), with one of these stores:
 #
-#   cp deploy/.env.example deploy/.env    # then edit it
-#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#   MongoDB in the stack (TT_STORE=mongo; bootstrap.sh's default for new installs):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile mongo up -d --build
 #
-# Clients then use:  Server URL  https://$TT_DOMAIN
+#   MongoDB Atlas or another hosted MongoDB (TT_STORE=mongo plus TT_MONGO_URI):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile atlas up -d --build
+#
+#   File store (one file per record on the trion-data volume):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#
+#   Postgres (TT_STORE=postgrest in deploy/.env, plus the postgres profile):
+#     docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile postgres up -d --build
+#
+# deploy/bootstrap.sh does all of this on a fresh Ubuntu VM (see deploy/README.md).
+#
+# Browsers play at:  https://$TT_DOMAIN/          (Web client, served by Caddy)
+# Native clients use: Server URL  https://$TT_DOMAIN
 #                    live URL    wss://$TT_DOMAIN/live  (advertised by the server)
 #
-# One server process holds all live state in memory, so run exactly one
-# replica. See docs/multiplayer/LAUNCH_PLAN.md ("Scaling path") for the
-# multi-instance design.
+# The server holds live match state in memory, so run exactly one replica,
+# even with Postgres. See docs/multiplayer/LAUNCH_PLAN.md ("Scaling path").
 
 services:
   server:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      target: server
+    # Exits if its store is unreachable (e.g. Postgres still starting); retried.
     restart: unless-stopped
     environment:
       TT_PORT: "8080"
       TT_LIVE_PORT: "8081"
-      TT_DATA_FILE: /data/matches.json
+      TT_STORE: ${TT_STORE:-dir}
+      TT_DATA_DIR: /data/store
+      TT_DB_URL: http://postgrest:3000
+      TT_DB_TOKEN: ${TT_DB_TOKEN:-}
+      TT_MONGO_GATEWAY_URL: http://mongo-gateway:8095
+      TT_MONGO_GATEWAY_TOKEN: ${TT_MONGO_GATEWAY_TOKEN:-}
+      TT_AUTH0_DOMAIN: ${TT_AUTH0_DOMAIN:-}
+      TT_AUTH0_CLIENT_ID: ${TT_AUTH0_CLIENT_ID:-}
+      TT_AUTH0_CLIENT_SECRET: ${TT_AUTH0_CLIENT_SECRET:-}
+      TT_AUTH0_CONNECTION: ${TT_AUTH0_CONNECTION:-}
+      TT_TRUST_PROXY: "1"
       TT_TURN_TIMEOUT_SEC: ${TT_TURN_TIMEOUT_SEC:-43200}
       TT_PUBLIC_LIVE_URL: wss://${TT_DOMAIN}/live
       TT_ADMIN_KEY: ${TT_ADMIN_KEY:-}
@@ -29,12 +52,33 @@ services:
     expose:
       - "8080"
       - "8081"
+    # Least privilege: no extra capabilities, no privilege escalation, and a
+    # memory ceiling so a runaway process can't take the host down.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
 
+  # Caddy with the exported Web client baked in (Dockerfile target "web").
   caddy:
-    image: caddy:2.8
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
     restart: unless-stopped
     depends_on:
       - server
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
     environment:
       TT_DOMAIN: ${TT_DOMAIN}
     ports:
@@ -45,7 +89,90 @@ services:
       - caddy-data:/data
       - caddy-config:/config
 
+  db:
+    profiles: [postgres]
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trion
+      POSTGRES_USER: trion_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      PGRST_AUTHENTICATOR_PASSWORD: ${PGRST_AUTHENTICATOR_PASSWORD:-}
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trion_admin -d trion"]
+      interval: 5s
+      retries: 20
+
+  # Internal only: no ports are published, so only the game server reaches it.
+  postgrest:
+    profiles: [postgres]
+    image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${PGRST_AUTHENTICATOR_PASSWORD}@db:5432/trion
+      PGRST_DB_SCHEMAS: api
+      PGRST_DB_ANON_ROLE: game_server
+      # Never serve the OpenAPI description of the store.
+      PGRST_OPENAPI_MODE: disabled
+    expose:
+      - "3000"
+
+  # MongoDB (profile "mongo"). Internal only, with its own admin user; the
+  # game reaches it through mongo-gateway.
+  mongo:
+    profiles: [mongo]
+    image: mongo:7
+    restart: unless-stopped
+    # Small VMs: cap WiredTiger's cache (default is half the RAM).
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: trion
+      MONGO_INITDB_ROOT_PASSWORD: ${TT_MONGO_PASSWORD:-}
+      TT_MONGO_DB: ${TT_MONGO_DB:-trion}   # for backup.sh's mongodump
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      retries: 20
+
+  # The game server's MongoDB access (deploy/mongo-gateway). Internal only.
+  # Profile "atlas": the same gateway pointed at TT_MONGO_URI instead.
+  mongo-gateway:
+    profiles: [mongo, atlas]
+    build:
+      context: mongo-gateway
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+        required: false
+    environment:
+      MONGO_URI: ${TT_MONGO_URI:-mongodb://trion:${TT_MONGO_PASSWORD:-}@mongo:27017/?authSource=admin}
+      MONGO_DB: ${TT_MONGO_DB:-trion}
+      GATEWAY_TOKEN: ${TT_MONGO_GATEWAY_TOKEN:-}
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    expose:
+      - "8095"
+
 volumes:
   trion-data:
   caddy-data:
   caddy-config:
+  pg-data:
+  mongo-data:

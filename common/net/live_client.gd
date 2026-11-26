@@ -15,16 +15,34 @@ signal presence_changed(connected: Array)
 signal connection_changed(connected: bool)
 
 const RECONNECT_DELAYS := [0.5, 1.0, 2.0, 4.0, 8.0]
+## Keepalive: ping this often; reconnect if the server is silent for
+## SILENCE_TIMEOUT (mobile links die without a TCP close).
+const PING_INTERVAL := 15.0
+const SILENCE_TIMEOUT := 40.0
+
+signal outdated()
+## The server refused this connection for good (bad token, or the same seat
+## connected from somewhere else): the client stops reconnecting.
+signal rejected(reason: String)
+
+## Close codes after which reconnecting is pointless (LiveHub).
+const FINAL_CLOSE_CODES: Array[int] = [4002, 4003]
 
 var url := ""
 var match_id := ""
 var token := ""
+## Protocol version announced in the hello (tests lower it to act as an old build).
+var protocol := NetProtocol.VERSION
+## Oldest turn the client still needs replay frames for (0 = everything).
+var since_turn := 0
 
 var _ws: WebSocketPeer
 var _open := false
 var _attempt := 0
 var _retry_at := -1.0
 var _closed_by_us := false
+var _last_heard := 0.0
+var _last_ping := 0.0
 
 
 ## Derives the live URL from the REST server URL when the server doesn't
@@ -74,6 +92,11 @@ func _connect() -> void:
 	_ws = WebSocketPeer.new()
 	# Replay frames for a full turn can be large.
 	_ws.inbound_buffer_size = 4 * 1024 * 1024
+	if not ServerConfig.url_allowed(url):
+		push_warning("Refusing insecure live URL %s" % url)
+		_closed_by_us = true
+		_ws = null
+		return
 	if _ws.connect_to_url(url) != OK:
 		_schedule_retry()
 
@@ -99,22 +122,44 @@ func _process(_delta: float) -> void:
 		return
 	_ws.poll()
 	var state := _ws.get_ready_state()
+	var now := Time.get_ticks_msec() / 1000.0
+	# Read first: the server's last message (e.g. why it is closing the
+	# connection) can arrive together with the close.
+	if _ws.get_available_packet_count() > 0:
+		_last_heard = now
+	while _ws.get_available_packet_count() > 0:
+		var parsed: Variant = JSON.parse_string(_ws.get_packet().get_string_from_utf8())
+		if parsed is Dictionary:
+			_dispatch(parsed)
 	if state == WebSocketPeer.STATE_OPEN and not _open:
 		_open = true
 		_attempt = 0
-		_send({ "type": "hello", "match_id": match_id, "token": token })
+		_last_heard = now
+		_last_ping = now
+		_send({ "type": "hello", "match_id": match_id, "token": token, "protocol": protocol, "since": since_turn })
 		connection_changed.emit(true)
+	elif state == WebSocketPeer.STATE_OPEN:
+		if now - _last_heard > SILENCE_TIMEOUT:
+			# Dead link: a polite close could hang waiting for a reply, so
+			# drop the socket and reconnect right away.
+			_ws.close()
+			_ws = null
+			_open = false
+			connection_changed.emit(false)
+			_schedule_retry()
+			return
+		elif now - _last_ping > PING_INTERVAL:
+			_last_ping = now
+			_send({ "type": "ping" })
 	elif state == WebSocketPeer.STATE_CLOSED:
+		if _ws.get_close_code() in FINAL_CLOSE_CODES and not _closed_by_us:
+			_closed_by_us = true
+			rejected.emit(_ws.get_close_reason())
 		_ws = null
 		if _open:
 			_open = false
 			connection_changed.emit(false)
 		_schedule_retry()
-		return
-	while _ws.get_available_packet_count() > 0:
-		var parsed: Variant = JSON.parse_string(_ws.get_packet().get_string_from_utf8())
-		if parsed is Dictionary:
-			_dispatch(parsed)
 
 
 func _dispatch(msg: Dictionary) -> void:
@@ -132,4 +177,10 @@ func _dispatch(msg: Dictionary) -> void:
 		"presence":
 			presence_changed.emit(msg.get("connected", [false, false]))
 		"error":
+			if str(msg.get("code", "")) == "outdated":
+				_closed_by_us = true   # reconnecting won't help
+				outdated.emit()
+			elif str(msg.get("code", "")) == "rejected":
+				_closed_by_us = true
+				rejected.emit(str(msg.get("error", "")))
 			push_warning("Live server error: %s" % str(msg.get("error", "?")))

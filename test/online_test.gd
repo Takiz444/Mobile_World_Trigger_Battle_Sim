@@ -30,7 +30,7 @@ func _run() -> void:
 	b1.server_url = "http://127.0.0.1:18080"
 	add_child(b1)
 
-	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
+	var created := await b0.create_match(PlanCodec.encode_squad(squad0))
 	_check(created.get("success", false), "create match")
 	var match_id := str(created["body"].get("match_id", ""))
 
@@ -43,8 +43,7 @@ func _run() -> void:
 
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var board := HexBoard.new()
-	board.board_radius = 6
+	var board := CityBoard.new()
 	board.hex_size = 1.0
 	add_child(board)
 	var timeline := TimelineUI.new()
@@ -75,13 +74,13 @@ func _run() -> void:
 	# Client's own units must match the server's authoritative view.
 	var info := await b0.get_match(match_id, str(created["body"].get("token", "")))
 	var units: Array = info["body"].get("view", {}).get("units", [])
-	var synced := units.size() == 8
-	for i in 4:
+	var synced := units.size() == 2 * PlanCodec.SQUAD_SIZE
+	for i in PlanCodec.SQUAD_SIZE:
 		if not synced:
 			break
 		var u: UnitState = controller._ms.teams[0][i]
-		var hex: Array = units[i].get("hex", [])
-		synced = hex.size() == 2 and Vector2i(int(hex[0]), int(hex[1])) == u.hex
+		var pos: Array = units[i].get("pos", [])
+		synced = pos.size() == 2 and Vector2(float(pos[0]), float(pos[1])).distance_to(u.pos) < 0.01
 	_check(synced, "client units match server view after replay")
 
 	print("ONLINE TEST %s" % ("PASS" if not _failed else "FAIL"))
@@ -92,7 +91,7 @@ func _shield_plan(units: Array[UnitData]) -> TurnPlan:
 	var plan := TurnPlan.new(units)
 	var shield := TriggerLibrary.get_card("Shield")
 	for i in units.size():
-		plan.assign(i, 0, TurnPlan.MAIN_SLOT, shield)
+		plan.add(i, PlanAction.new(shield))
 	return plan
 
 

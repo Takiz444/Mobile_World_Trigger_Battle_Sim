@@ -34,10 +34,10 @@ func _run() -> void:
 	# Cheated squad (inflated HP) is rejected at create time.
 	var cheat_squad := PlanCodec.encode_squad(squad0)
 	cheat_squad[0]["trion_hp"] = 9999
-	var cheat := await b0.create_match(12345, cheat_squad)
+	var cheat := await b0.create_match(cheat_squad)
 	_check(int(cheat.get("status", 0)) == 400, "create rejects invalid squad")
 
-	var created := await b0.create_match(12345, PlanCodec.encode_squad(squad0))
+	var created := await b0.create_match(PlanCodec.encode_squad(squad0))
 	_check(created.get("success", false), "create match")
 	var match_id := str(created["body"].get("match_id", ""))
 	var token0 := str(created["body"].get("token", ""))
@@ -56,7 +56,7 @@ func _run() -> void:
 	_check(int(forged.get("status", 0)) == 403, "submit rejects unknown token")
 
 	var bad_plan := PlanCodec.encode_plan(plan0)
-	bad_plan["units"][0][0]["main"] = "Ibis"  # not equipped
+	bad_plan["units"][0]["act"] = [{ "card": "Ibis", "unit": 0 }]  # not equipped
 	var illegal := await b0.submit_plan(match_id, token0, 1, bad_plan)
 	_check(int(illegal.get("status", 0)) == 400, "submit rejects unequipped card")
 
@@ -80,21 +80,24 @@ func _run() -> void:
 	if result is Dictionary:
 		_check(result.get("plan") is Dictionary, "result contains our own plan")
 		_check(not result.has("plans"), "opponent plan not leaked")
-		_check((result.get("frames", []) as Array).size() == TurnPlan.TICKS_PER_TURN, "one fog-filtered frame per tick")
+		var frames: Array = result.get("frames", [])
+		_check(frames.size() >= 2 and absf(float(frames.back().get("t", 0)) - TurnPlan.TURN_SECONDS) < 0.01,
+			"fog-filtered replay frames cover the whole turn")
 		_check(int(result.get("winner", -2)) in [-1, 0, 1], "winner field valid")
 	_check(body.get("view") is Dictionary, "player receives a fogged board view")
 	_check(not body.has("state"), "full match state not exposed")
 	_check((body.get("history", []) as Array).size() == 1, "history has one turn")
 	_check(int(body.get("turn", 0)) == 2, "server advanced to turn 2")
 
-	# At spawn the squads are far apart: enemies must not appear in sight.
+	# Spawns are random, so enemies may or may not be in sight; any that
+	# aren't must arrive without their position.
 	var view: Dictionary = body.get("view", {})
-	var enemy_exact := 0
+	var leaked := 0
 	var units: Array = view.get("units", [])
-	for i in range(4, units.size()):
-		if int(units[i].get("vis", -1)) == Visibility.State.SIGHT:
-			enemy_exact += 1
-	_check(units.size() == 8 and enemy_exact == 0, "distant enemies hidden by fog of war")
+	for i in range(PlanCodec.SQUAD_SIZE, units.size()):
+		if int(units[i].get("vis", -1)) != Visibility.State.SIGHT and units[i].has("hex"):
+			leaked += 1
+	_check(units.size() == 2 * PlanCodec.SQUAD_SIZE and leaked == 0, "unseen enemies arrive without a position")
 
 	# --- Accounts + ranked matchmaking ---
 	var acc_a := await b0.register_account("Mikumo")
@@ -109,6 +112,9 @@ func _run() -> void:
 	var qa := await b0.queue_ranked(str(a["player_id"]), str(a["secret"]), PlanCodec.encode_squad(squad0))
 	_check(qa.get("success", false) and str(qa["body"].get("status")) == "queued", "first player waits in queue")
 	var qb := await b1.queue_ranked(str(b["player_id"]), str(b["secret"]), PlanCodec.encode_squad(squad1))
+	_check(str(qb["body"].get("status")) == "found", "second player finds the first (ready check)")
+	await b0.accept_queue(str(qa["body"]["ticket"]), str(a["secret"]))
+	qb = await b1.accept_queue(str(qb["body"]["ticket"]), str(b["secret"]))
 	_check(str(qb["body"].get("status")) == "matched" and int(qb["body"].get("team", -1)) == 1, "second player is matched as team 1")
 	var pa := await b0.poll_queue(str(qa["body"]["ticket"]), str(a["secret"]))
 	_check(str(pa["body"].get("status")) == "matched" and str(pa["body"].get("match_id")) == str(qb["body"].get("match_id")),
@@ -119,15 +125,82 @@ func _run() -> void:
 	var board := await b0.leaderboard()
 	_check((board["body"].get("players", []) as Array).size() == 2, "leaderboard lists registered players")
 
+	await _test_connection_layer(b0)
+
 	print("NET TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
+
+
+## Version handshake, offline/outdated status, request limits, overlapping
+## requests, account recovery, and the live channel's version check.
+func _test_connection_layer(b: HttpBackend) -> void:
+	var health := await b.health()
+	_check(int(health["body"].get("protocol", 0)) == NetProtocol.VERSION
+		and health["body"].has("server_time"), "health reports the protocol version")
+
+	var conn := GameConnection.new()
+	add_child(conn)
+	_check(await conn.connect_to("http://127.0.0.1:18080") == GameConnection.Status.ONLINE, "connection goes online")
+	var old := GameConnection.new()
+	old.client_protocol = NetProtocol.MIN_SUPPORTED - 1
+	add_child(old)
+	_check(await old.connect_to("http://127.0.0.1:18080") == GameConnection.Status.OUTDATED, "an old build is told to update")
+	var nowhere := GameConnection.new()
+	add_child(nowhere)
+	_check(await nowhere.connect_to("http://127.0.0.1:1") == GameConnection.Status.OFFLINE, "unreachable server reads as offline")
+
+	# Account recovery: a server that forgot the account gets a fresh one.
+	AccountStore.clear_for(conn.server_url)
+	var acc := await conn.ensure_account("Hyuse")
+	_check(not acc.is_empty() and str(acc.get("name")) == "Hyuse", "connection registers an account (%s)" % conn.last_error)
+	_server._accounts.erase(acc["player_id"])
+	var again := await conn.ensure_account("Hyuse")
+	_check(not again.is_empty() and again["player_id"] != acc["player_id"], "forgotten account is re-registered")
+	AccountStore.clear_for(conn.server_url)
+
+	# Overlapping calls on one backend (used to fail with ERR_BUSY).
+	var results: Array = []
+	var fire := func() -> void: results.append(await b.leaderboard())
+	fire.call()
+	fire.call()
+	var end := Time.get_ticks_msec() + 3000
+	while results.size() < 2 and Time.get_ticks_msec() < end:
+		await get_tree().process_frame
+	_check(results.size() == 2 and results.all(func(r: Dictionary) -> bool: return r.get("success", false)),
+		"overlapping requests both succeed")
+
+	var huge := "x".repeat(HttpServer.MAX_BODY_BYTES + 10)
+	var big := await b.request("POST", "/account/register", { "name": huge })
+	_check(int(big.get("status", 0)) == 413, "oversized request bodies are refused")
+
+	var limiter := HttpServer.new()
+	limiter.rate_burst = 3.0
+	limiter.rate_per_sec = 0.001
+	var allowed := [limiter._allow("203.0.113.5"), limiter._allow("203.0.113.5"),
+		limiter._allow("203.0.113.5"), limiter._allow("203.0.113.5")]
+	_check(allowed == [true, true, true, false] and limiter._allow("203.0.113.9"),
+		"per-client rate limit (other clients unaffected)")
+	_check(limiter._allow("127.0.0.1") and limiter._allow("127.0.0.1"), "loopback is exempt (local dev)")
+
+	# Live hello from an old build gets "outdated", not a session.
+	var ws := LiveClient.new()
+	add_child(ws)
+	var got := [false]
+	ws.outdated.connect(func() -> void: got[0] = true)
+	ws.protocol = 1
+	ws.open("ws://127.0.0.1:18081", "nope", "nope")
+	end = Time.get_ticks_msec() + 3000
+	while not got[0] and Time.get_ticks_msec() < end:
+		await get_tree().process_frame
+	_check(got[0], "live channel rejects an outdated client")
+	ws.close()
 
 
 func _shield_plan(units: Array[UnitData]) -> TurnPlan:
 	var plan := TurnPlan.new(units)
 	var shield := TriggerLibrary.get_card("Shield")
 	for i in units.size():
-		plan.assign(i, 0, TurnPlan.MAIN_SLOT, shield)
+		plan.add(i, PlanAction.new(shield))
 	return plan
 
 

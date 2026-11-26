@@ -1,0 +1,139 @@
+{
+ "format": 1,
+ "meters_per_unit": 2.5,
+ "attribution": "Map data (c) OpenStreetMap contributors, ODbL; buildings: Project PLATEAU (MLIT), CC BY 4.0",
+ "districts": [
+  {
+   "id": "shibuya",
+   "name": "Shibuya",
+   "area": "Scramble Crossing",
+   "lat": 35.6596,
+   "lon": 139.7004,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "shinjuku",
+   "name": "Shinjuku",
+   "area": "Kabukicho",
+   "lat": 35.6938,
+   "lon": 139.7022,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "akihabara",
+   "name": "Akihabara",
+   "area": "Electric Town",
+   "lat": 35.7,
+   "lon": 139.771,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "ginza",
+   "name": "Ginza",
+   "area": "Yurakucho & 4-chome",
+   "lat": 35.6725,
+   "lon": 139.763,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "asakusa",
+   "name": "Asakusa",
+   "area": "Kaminarimon & Sumida River",
+   "lat": 35.712,
+   "lon": 139.7972,
+   "size": [
+    344.0,
+    344.0
+   ]
+  },
+  {
+   "id": "ikebukuro",
+   "name": "Ikebukuro",
+   "area": "Sunshine Street",
+   "lat": 35.7302,
+   "lon": 139.7148,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "ueno",
+   "name": "Ueno",
+   "area": "Ameyoko",
+   "lat": 35.7098,
+   "lon": 139.7738,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "roppongi",
+   "name": "Roppongi",
+   "area": "Roppongi Crossing",
+   "lat": 35.6629,
+   "lon": 139.7314,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "harajuku",
+   "name": "Harajuku",
+   "area": "Takeshita Street",
+   "lat": 35.6708,
+   "lon": 139.7048,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "nihonbashi",
+   "name": "Nihonbashi",
+   "area": "Nihonbashi Bridge",
+   "lat": 35.6842,
+   "lon": 139.7742,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "shimokitazawa",
+   "name": "Shimokitazawa",
+   "area": "Backstreets",
+   "lat": 35.6615,
+   "lon": 139.668,
+   "size": [
+    320.0,
+    320.0
+   ]
+  },
+  {
+   "id": "shiba",
+   "name": "Shiba",
+   "area": "Tokyo Tower & Kamiyacho",
+   "lat": 35.6605,
+   "lon": 139.749,
+   "size": [
+    384.0,
+    384.0
+   ]
+  }
+ ]
+}

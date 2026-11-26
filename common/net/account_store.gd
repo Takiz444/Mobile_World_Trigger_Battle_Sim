@@ -1,12 +1,18 @@
 class_name AccountStore
 extends RefCounted
-## Remembers the local player's ranked account per server URL in
-## user://account.json, so the Hangar can queue without re-registering.
+## Remembers the local player's account per server URL in user://account.json,
+## so the Hangar can queue without re-registering. A guest account has no
+## email (it exists only on this device); a signed-in one has its email.
 
 const PATH := "user://account.json"
 
 
-## Returns {player_id, secret, name} for `server_url`, or {} if none saved.
+## Whether `account` (as saved here) is signed in with an email.
+static func is_signed_in(account: Dictionary) -> bool:
+	return str(account.get("email", "")) != ""
+
+
+## Returns {player_id, secret, name, email} for `server_url`, or {} if none saved.
 static func load_for(server_url: String) -> Dictionary:
 	var all := _read()
 	var entry: Variant = all.get(server_url.rstrip("/"))
@@ -19,6 +25,7 @@ static func save_for(server_url: String, account: Dictionary) -> void:
 		"player_id": str(account.get("player_id", "")),
 		"secret": str(account.get("secret", "")),
 		"name": str(account.get("name", "")),
+		"email": str(account.get("email", "")),
 	}
 	var f := FileAccess.open(PATH, FileAccess.WRITE)
 	if f != null:

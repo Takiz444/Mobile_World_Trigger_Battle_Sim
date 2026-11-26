@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Mobile_WorldTrigger_turnbased_game"
-run/main_scene="res://ui/hangar/hangar.tscn"
+run/main_scene="res://ui/welcome/welcome.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -23,9 +23,9 @@ window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=4
 
-[input_devices]
+[gui]
 
-pointing/emulate_mouse_from_touch=true
+theme/custom="res://ui/theme.tres"
 
 [physics]
 
@@ -34,3 +34,4 @@ pointing/emulate_mouse_from_touch=true
 [rendering]
 
 rendering_device/driver.windows="d3d12"
+textures/vram_compression/import_etc2_astc=true

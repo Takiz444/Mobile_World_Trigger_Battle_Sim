@@ -12,7 +12,7 @@ Clash Royale works because a match is **short (≈3 min), synchronous, ranked, a
 always one tap away**. Players progress on a visible **trophy ladder** through
 **arenas**, with **seasons** that soft-reset the top.
 
-Our core loop is different: simultaneous 6-tick turns, not real-time card drops.
+Our core loop is different: simultaneous 6-second turns (free movement, time-based plans), not real-time card drops.
 So we keep the turn structure and make it *fast*: both players are online, a
 short planning clock runs, and the board replays between turns. One match takes
 about **6–8 minutes**.
@@ -21,7 +21,7 @@ about **6–8 minutes**.
 |---|---|---|---|---|
 | **Live Battle** (main mode) | matchmade | 60 s turn 1, 40 s after, 8-turn cap | trophies + hidden MMR | ✅ |
 | **Async Ranked** | matchmade | 12 h per turn | hidden MMR only | ✅ (existing) |
-| **Friendly Battle** | match code | live or async (host picks) | never | ✅ server, **TODO** host toggle in UI |
+| **Friendly Battle** | match code | live or async (host picks) | never | ✅ |
 | **Practice** | vs AI | none | never | ✅ (existing local mode) |
 
 ### Live match timeline
@@ -35,7 +35,7 @@ matched ─► load (15 s grace) ─► Turn 1 plan (60 s) ─► replay (~4–6
 * **Early lock-in:** the turn resolves as soon as both plans are in. Fast players get fast games.
 * **Buzzer:** 1.5 s before the deadline, the client submits whatever is planned. A client that is gone gets the GDD 3.1 "Stand Ground + Shield" fallback from the server.
 * **Ending:** a squad is fully bailed out, **or** the turn cap is reached. At the cap, the side with more units standing wins, then the side with more remaining Trion (as a share of the squad total), else it's a **draw**.
-* **Surrender:** a player can forfeit at any time.
+* **Surrender:** a player can forfeit at any time (battle-screen button, two taps to confirm).
 * **AFK:** a player auto-filled for **2 turns in a row** forfeits. If both players are AFK, the match is a draw.
 * **Disconnects:** the client reconnects with backoff, and the server resends full state on every `hello`. While a player is away, the clock keeps running, so the AFK rule covers players who never come back. The opponent sees "opponent reconnecting…".
 
@@ -89,11 +89,11 @@ gap. The matchmaker runs every second. Live and async queues are separate.
           ├─ Visibility               fog of war enforced server-side
           ├─ LiveHub                  WebSocket push (common/net/live_hub.gd)
           ├─ Ladder                   trophies, arenas, clock, search window
-          └─ JSON store (/data)       atomic write-then-rename
+          └─ GameStore (server/db)    json file | dir (file per record) | Postgres via PostgREST
 ```
 
 **Why it's cheat-resistant by design:**
-* The server is authoritative: clients only send *plans*, and the server validates every squad (stats, slots, Trion budget) and plan (equipped cards, AT budget).
+* The server is authoritative: clients only send *plans*, and the server validates every squad (stats, slots, Trion budget) and plan (equipped cards, reachable routes, each lane inside the 6-second turn).
 * Fog of war is applied on the server. A modified client can't reveal hidden enemies, because the server never sends them. The opponent's plan is never sent, only "opponent locked in".
 * Resolution is deterministic and seeded, so any match can be replayed exactly from its history for disputes and reports.
 
@@ -112,10 +112,10 @@ The server sends `seconds_left` rather than an absolute time, so device clock sk
 
 ### Scaling path
 
-Today, one process holds everything in memory and rewrites one JSON file on each change. That is fine for
-a closed beta (hundreds of concurrent players), but not for launch. Steps:
+One process holds live state in memory and writes only changed records to its store (`TT_STORE`: a directory of files, or Postgres via PostgREST).
+That is fine for a closed beta and a soft launch on one machine. Steps beyond that:
 
-1. **Database.** Move accounts, the match index, and history into Postgres. Keep live match state in memory on the owning server, with a snapshot to the DB after each turn (`PlanCodec.encode_state` already exists).
+1. **Database** ✅ drafted: `PostgrestStore` + `deploy/db/00-schema.sql`. Records are JSONB documents with indexed columns for leaderboards and match history. Every match is written after each turn, so a restart resumes it. Backups: `deploy/backup.sh` runs `pg_dump` daily (installed by `deploy/bootstrap.sh`). **TODO:** run it against real Postgres in staging (the first VM deploy does this).
 2. **Split services.**
    * A stateless **account/queue API** (any language).
    * N **match workers**, each running the Godot headless resolver.
@@ -123,7 +123,7 @@ a closed beta (hundreds of concurrent players), but not for launch. Steps:
 3. **Sticky routing.** Route each match's live socket to its worker. Hand the client `live_url` per match: the ticket already carries `live_url`.
 4. **Regions.** Run workers in 2–3 regions. Turn-based play tolerates 200 ms, so this is about availability, not latency.
 
-Rough beta cost: one 2 vCPU VPS (~$20–40/mo) plus a domain. Apple Developer Program: $99/yr.
+Beta cost: $0. One Oracle Cloud Always Free ARM VM runs the whole stack, with a free `sslip.io` hostname (see `deploy/README.md`). Apple Developer Program: $99/yr. Steamworks: $100 per app.
 
 ---
 
@@ -147,19 +147,22 @@ All existing tests still pass. Older match stores still load: missing fields get
 ## 5. App Store launch checklist
 
 **Accounts & privacy**
-- [ ] **In-app account deletion** (Guideline 5.1.1(v)): the API exists (`POST /account/delete`). **TODO:** a Settings → Delete Account screen.
+- [x] **In-app account deletion** (Guideline 5.1.1(v)): `POST /account/delete` plus a two-tap **Delete Account** button in the Hangar.
+- [x] **Email sign-in** (2026-11): email + password accounts with profiles and match history; guests still play without one, and a guest's progress moves to the account it creates. Our own email login doesn't trigger 4.8.
+- [x] **Password reset + email verification**: through Auth0 (`TT_AUTH0_*`, deploy/README.md "Auth0"). Still to do: create the production Auth0 tenant and set its keys on the VM.
 - [ ] **Sign in with Apple** (4.8): required if we add Google/Facebook login. Plan: a guest account first (as today), then optional linking to Apple ID / Game Center so progress survives a reinstall. Verify Apple identity tokens on the server.
 - [ ] **Keychain storage:** the client keeps its account secret in `user://account.json` as plain text. Move it to the iOS Keychain (needs a small native plugin) and switch to short-lived session tokens.
 - [ ] Privacy policy URL, App Privacy "nutrition labels", data retention policy.
 - [ ] App Tracking Transparency prompt **only** if we add ad attribution. Avoid it at launch.
 
 **Networking**
-- [ ] **HTTPS/WSS only.** App Transport Security blocks `http://` and `ws://`. Ship the production URL as the default; the Hangar default is currently `http://127.0.0.1:8080`, and the URL field should be hidden in release builds.
+- [x] Protocol versioning: old builds are told to update (`NetProtocol`, bump on breaking changes).
+- [x] **HTTPS/WSS only.** Release builds refuse `http://` / `ws://` and hide the Server URL field (`ServerConfig`). The Web client uses the origin it was served from. **TODO (human):** set `ServerConfig.PRODUCTION_URL` to the deployed address for native builds.
 - [ ] Export compliance: HTTPS only → set `ITSAppUsesNonExemptEncryption = NO`.
 - [ ] Handle app backgrounding mid-match. iOS suspends the socket; LiveClient reconnects and resyncs on resume. Test this on real devices.
 
 **Content & community**
-- [ ] **Player names are user-generated content** (1.2): add a profanity filter, report/block, and a way to rename offenders.
+- [ ] **Player names are user-generated content** (1.2): names are cleaned of markup and checked against `common/net/blocked_names.txt` (`NameRules`). The blocklist has a starter list of slurs, sexual terms and staff impersonation, and catches simple disguises (`n1gg3r`, `f.u.c.k`). **TODO:** add report/block and a way to rename offenders.
 - [ ] Age rating questionnaire (cartoon/fantasy violence → likely 9+ or 12+).
 - [ ] **IP licensing (blocker, see §7).**
 
@@ -179,7 +182,7 @@ All existing tests still pass. Older match stores still load: missing fields get
 
 ## 6. Rollout
 
-1. **Internal (now → +2 weeks).** Deploy the compose stack to a VPS. The team plays live matches daily, and we tune the clock, turn cap, and trophy numbers.
+1. **Internal (now → +2 weeks).** Deploy the compose stack to a VM with `deploy/bootstrap.sh`; testers play in the browser at `https://<domain>/`. The team plays live matches daily, and we tune the clock, turn cap, and trophy numbers.
 2. **Closed beta (TestFlight, ~100–500 players).** Add analytics: match length, turns played, buzzer-lock rate, AFK rate, draw rate, queue wait. Add crash reporting.
 3. **Soft launch (one or two small English-speaking markets).** This is the usual mobile pattern. Watch D1/D7 retention and queue health. Scale to the Postgres/worker design before global launch.
 4. **Global launch + Season 1.**
@@ -195,7 +198,7 @@ Metrics that tell us the live format works:
 ## 7. Open decisions for the team
 
 1. **IP / licensing (launch blocker).** *World Trigger* (Daisuke Ashihara / Shueisha) names are throughout the game: trigger names (Kogetsu, Scorpion, Bagworm…), "Border", the arena placeholders I used (C/B/A-Rank, Mikado City, Away Mission). Apple rejects apps that use third-party IP without rights (5.2.1). We either secure a license or rebrand to original names before submitting. This decision drives naming, art, and marketing, so it should come first.
-2. **Live turn length and cap.** 40 s × 8 turns is a starting guess. Planning 4 units × 6 ticks is a lot on a phone. Consider fewer ticks or a "quick plan" preset in live mode.
+2. **Live turn length and cap.** 40 s × 8 turns is a starting guess. Planning 3 characters × two 6-second lanes is a lot on a phone. Consider a "quick plan" preset in live mode.
 3. **Android at the same time?** The Godot export is cheap. Google Play has its own account-deletion and data-safety requirements.
 4. **Backend language for the scaled version.** Keep the Godot headless resolver for match workers (shared deterministic code). The account/queue API can be anything the team is comfortable operating.
 5. **Bots in low-trophy queues.** Labelled or not at all? I recommend labelled.

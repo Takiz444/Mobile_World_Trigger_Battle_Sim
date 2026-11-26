@@ -23,6 +23,10 @@ extends Camera3D
 @export var screen_offset_px := Vector2.ZERO
 
 const ZOOM_STEP := 0.1
+## Directional lights in this group get their shadow range fitted to the
+## view: an orthographic view zoomed out past the range lost every shadow
+## (the whole city went dark).
+const SUN_GROUP := &"board_sun"
 ## Finger travel (px) before a one-finger touch counts as a pan, not a tap.
 const TOUCH_PAN_THRESHOLD := 12.0
 
@@ -30,6 +34,9 @@ var _panning := false
 var _orbiting := false
 var _bounds := AABB()
 var _has_bounds := false
+var _shake := 0.0
+var _focus_tween: Tween
+var _shake_phase := 0.0
 var _touches: Dictionary = {}     # finger index -> current position
 var _touch_travel := 0.0          # accumulated one-finger drag distance
 var _pinch_dist := 0.0
@@ -111,14 +118,42 @@ func _begin_pinch() -> void:
 	_pinch_angle = ((pts[1] as Vector2) - (pts[0] as Vector2)).angle()
 
 
+## Glides to look at `pos` and (when `zoom_size` > 0) zooms to that ortho
+## size. Any manual pan / zoom / rotate cancels the glide.
+func focus_on(pos: Vector3, zoom_size: float = -1.0, duration: float = 0.4) -> void:
+	_stop_focus()
+	var from_target := target
+	var from_size := size
+	var to_target := Vector3(pos.x, 0.0, pos.z)
+	var to_size := clampf(zoom_size, min_size, max_size) if zoom_size > 0.0 else size
+	if not is_inside_tree() or duration <= 0.0:
+		target = to_target
+		size = to_size
+		_update_transform()
+		return
+	_focus_tween = create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_focus_tween.tween_method(func(k: float) -> void:
+		target = from_target.lerp(to_target, k)
+		size = lerpf(from_size, to_size, k)
+		_update_transform(), 0.0, 1.0, duration)
+
+
+func _stop_focus() -> void:
+	if _focus_tween != null and _focus_tween.is_valid():
+		_focus_tween.kill()
+	_focus_tween = null
+
+
 ## Multiplies the ortho size (factor > 1 zooms out).
 func _zoom_by(factor: float) -> void:
+	_stop_focus()
 	size = clampf(size * factor, min_size, max_size)
 	_update_transform()
 
 
 ## direction +1 = zoom in (smaller ortho size), -1 = zoom out.
 func _zoom(direction: int) -> void:
+	_stop_focus()
 	size = clampf(size * pow(1.0 + ZOOM_STEP, -direction), min_size, max_size)
 	_update_transform()
 
@@ -136,6 +171,7 @@ func _pan_pixels(rel: Vector2) -> void:
 
 
 func _pan_world(move: Vector2) -> void:
+	_stop_focus()
 	var right := global_transform.basis.x
 	var up := global_transform.basis.y
 	target -= right * move.x
@@ -144,8 +180,25 @@ func _pan_world(move: Vector2) -> void:
 
 
 func _orbit(rel: Vector2) -> void:
+	_stop_focus()
 	yaw -= rel.x * rotate_sensitivity
 	pitch = clampf(pitch + rel.y * rotate_sensitivity, deg_to_rad(5.0), deg_to_rad(85.0))
+	_update_transform()
+
+
+## Brief screen jolt for heavy hits; `strength` 0..1. Screen-space only (it
+## never moves the camera target, so input and framing are unaffected).
+func shake(strength: float) -> void:
+	_shake = maxf(_shake, clampf(strength, 0.0, 1.0))
+	set_process(true)
+
+
+func _process(delta: float) -> void:
+	if _shake <= 0.0:
+		set_process(false)
+		return
+	_shake = maxf(0.0, _shake - delta * 3.2)
+	_shake_phase += delta * 55.0
 	_update_transform()
 
 
@@ -157,6 +210,10 @@ func _update_transform() -> void:
 		var world_per_px := size / maxf(1.0, get_viewport().get_visible_rect().size.y)
 		h_offset = -screen_offset_px.x * world_per_px
 		v_offset = screen_offset_px.y * world_per_px
+		if _shake > 0.0:
+			var amp := size * 0.006 * _shake * _shake
+			h_offset += sin(_shake_phase * 1.3) * amp
+			v_offset += cos(_shake_phase) * amp
 	var dir := Vector3(
 		sin(yaw) * cos(pitch),
 		sin(pitch),
@@ -164,6 +221,9 @@ func _update_transform() -> void:
 	)
 	global_position = target + dir * orbit_distance
 	look_at(target, Vector3.UP)
+	if is_inside_tree():
+		for l in get_tree().get_nodes_in_group(SUN_GROUP):
+			(l as DirectionalLight3D).directional_shadow_max_distance = orbit_distance + size * 1.7
 
 
 ## Re-centers the orbit target onto a world position (used when the player

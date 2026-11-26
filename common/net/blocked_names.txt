@@ -1,0 +1,61 @@
+# Blocked words for player and unit names (NameRules.is_allowed).
+# One lowercase word or phrase per line; a name containing it is refused.
+# Names are also checked with separators removed and look-alike digits
+# undone ("n1gg3r", "f.u.c.k"), so spaces inside a phrase are optional.
+#
+# Matching is by substring, so avoid short words that hide inside ordinary
+# names ("ass" in Cassandra, "cock" in Hancock, "rape" in Grape, "nazi" in
+# Ashkenazi, "coon" in Raccoon, "spic" in Spice, "shit" in Ashita, "wank"
+# in Swanky). Prefer longer, unambiguous
+# forms. The server can use a different list via TT_BLOCKLIST_FILE.
+
+# Staff impersonation
+admin
+moderator
+sysop
+gamemaster
+
+# Profanity and sexual content
+fuck
+shithead
+bullshit
+bitch
+cunt
+whore
+slut
+penis
+vagina
+porn
+hentai
+dildo
+blowjob
+handjob
+cumshot
+jizz
+wanker
+twat
+anal sex
+motherf
+
+# Slurs
+nigger
+nigga
+kike
+chink
+gook
+wetback
+raghead
+towelhead
+beaner
+tranny
+faggot
+retard
+
+# Hate and violence
+hitler
+sieg heil
+white power
+kkk
+kill yourself
+pedophile
+molest

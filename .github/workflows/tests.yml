@@ -25,12 +25,44 @@ jobs:
 
       - name: Rules
         run: godot --headless --path . res://test/rules_test.tscn
+      - name: Tokyo map tests
+        run: godot --headless --path . res://test/tokyo_test.tscn
+      - name: Security
+        run: godot --headless --path . res://test/security_test.tscn
       - name: Backend
         run: godot --headless --path . res://test/net_test.tscn
       - name: Online client
         run: godot --headless --path . res://test/online_test.tscn
       - name: Live play
         run: godot --headless --path . res://test/live_test.tscn
+      - name: Accounts and profiles
+        run: godot --headless --path . res://test/account_test.tscn
+      - name: Auth0 sign-in (fake Auth0)
+        run: godot --headless --path . res://test/auth0_test.tscn
+
+      # Persistence, including MongoStore against the real gateway + MongoDB
+      # (deploy/mongo-gateway/dev.js runs an in-memory mongod).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Mongo gateway tests
+        working-directory: deploy/mongo-gateway
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+      - name: Start a Mongo gateway for the store test
+        working-directory: deploy/mongo-gateway
+        run: |
+          nohup node dev.js > gateway.log 2>&1 &
+          for i in $(seq 1 90); do grep -q ready gateway.log && exit 0; sleep 1; done
+          cat gateway.log; exit 1
+      - name: Persistence
+        env:
+          TT_TEST_MONGO_GATEWAY_URL: http://127.0.0.1:8095
+          TT_TEST_MONGO_GATEWAY_TOKEN: dev-token
+        run: godot --headless --path . res://test/store_test.tscn
+      - name: Stress (random plans, client vs server)
+        run: godot --headless --path . res://test/stress_test.tscn
       - name: Local smoke
         run: godot --headless --path . res://test/smoke_test.tscn
 
@@ -40,3 +72,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build server image
         run: docker build -f deploy/Dockerfile -t trion-server .
+      - name: Build Mongo gateway image
+        run: docker build -t trion-mongo-gateway deploy/mongo-gateway

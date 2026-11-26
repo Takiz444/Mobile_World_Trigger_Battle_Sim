@@ -17,3 +17,8 @@ static var live: bool = false
 static var live_url: String = ""
 static var seed: int = 12345
 static var squad: Array[UnitData] = []
+## Development test stage (the Welcome screen's Test button): a local match
+## on a random half of the original hex map sheet (MapData.random_section)
+## instead of a Tokyo zone. Cleared by
+## the Hangar.
+static var test_stage: bool = false

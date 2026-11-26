@@ -177,13 +177,15 @@ func _make_materials() -> void:
 	if _facade != null:
 		return
 	_facade = ShaderMaterial.new()
-	_facade.shader = load("res://levels/board/building.gdshader")
+	_facade.shader = GfxLite.shader("res://levels/board/building.gdshader")
 	_facade.set_shader_parameter("floor_height", HexCoord.FLOOR_HEIGHT)
 	_facade.set_shader_parameter("ground_y", HexCoord.GROUND_Y)
 	_trim = StandardMaterial3D.new()
 	_trim.albedo_color = Color(0.58, 0.6, 0.64)
 	_trim.roughness = 0.8
+	GfxLite.lit(_trim)
 	_equipment = StandardMaterial3D.new()
 	_equipment.albedo_color = Color(0.5, 0.52, 0.55)
 	_equipment.roughness = 0.6
 	_equipment.metallic = 0.3
+	GfxLite.lit(_equipment)

@@ -1,267 +1,455 @@
 extends Node
-## Headless unit tests for combat rules and server-side validation: ranged
-## shield arcs, simultaneous movement, Grasshopper sub-slot movement, squad /
-## plan validation, and state snapshots.
+## Headless tests for the game rules: continuous geometry and routes, plan
+## timing (the 6-second turn, Stamina), the turn engine (movement, collisions,
+## attacks, shields, triggers, simultaneity), vision and fog, spawns, map
+## sections, plan / squad validation, and the server's rating and saves.
 ##
 ## Run:
 ##   godot --headless --path . res://test/rules_test.tscn
+
+const HEX := 1.7320508075688772
 
 var _failed := false
 
 
 func _ready() -> void:
-	_test_ranged_shield()
-	_test_contested_move()
-	_test_swap_move()
-	_test_chain_move()
-	_test_grasshopper_sub()
-	_test_elevation_chain()
-	_test_elevation_contest()
-	_test_elevation_rules()
-	_test_ranged_at_elevated_target()
-	_test_split_targets()
-	_test_bagworm_cost()
-	_test_bagworm_toggle()
-	_test_building_blocks_shot()
-	_test_line_of_sight()
-	_test_fog_states()
+	_test_geometry()
+	_test_timing()
+	_test_movement()
+	_test_building_levels()
+	_test_collisions()
+	_test_attacks()
+	_test_shields()
+	_test_triggers()
+	_test_simultaneity()
+	_test_visibility()
 	_test_city_map()
-	_test_server_persistence()
-	_test_trigger_traits()
-	_test_lead_bullet()
-	_test_grasshopper_jump()
-	_test_wire_penchant()
-	_test_melee_assist()
-	_test_crossfire_assist()
-	_test_elo()
-	_test_vision_profiles()
-	_test_los_3d()
-	_test_interior_vision()
-	_test_look_and_attack_facing()
 	_test_city_rects()
-	_test_no_seeing_through_buildings()
+	_test_spawns()
+	_test_map_sections()
+	_test_plan_codec()
 	_test_squad_validation()
-	_test_plan_validation()
+	_test_elo()
+	_test_server_persistence()
 	_test_state_snapshot()
 	print("RULES TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
 
 
-# --- Combat -----------------------------------------------------------------
+# --- Geometry & routes -----------------------------------------------------------
 
-func _test_ranged_shield() -> void:
-	var shooter_hex := Vector2i(0, 0)
-	var target_hex := Vector2i(0, 3)
-	var front := TickEngine.attack_direction(target_hex, shooter_hex)
-	_check(front != -1, "attack direction resolves at range 3")
+func _test_geometry() -> void:
+	var ms := _arena(_block(6, 7, 6, 9, 2))
+	var geo := ms.geometry()
+	var box := _box(ms)
+	var mid := box.get_center()
+	var left := Vector2(box.position.x - 2.0, mid.y)
+	var right := Vector2(box.end.x + 2.0, mid.y)
+	_check(geo.ground_ok(left) and geo.ground_ok(right) and not geo.ground_ok(mid), "street is walkable, buildings are not")
+	_check(geo.level_ok(mid, 1) and geo.level_ok(mid, 2) and not geo.level_ok(mid, 3) and not geo.level_ok(left, 1),
+		"floors exist only inside buildings, up to the roof")
+	_check(geo.is_inside(mid, 1) and not geo.is_inside(mid, 2), "floor 1 of a 2-floor building is inside, floor 2 is the roof")
+	var path := geo.nav_path(left, right)
+	var clear := path.size() >= 3
+	for i in range(1, path.size()):
+		clear = clear and geo.ground_clear(path[i - 1], path[i])
+	_check(clear and geo.path_length(path) > left.distance_to(right) + 0.5, "street routes go around buildings")
+	_check(geo.nav_path(left, left + Vector2(0, 3)).size() == 2, "an open straight line is walked directly")
+	var into := geo.route(left, 0, mid, 2)
+	var enters := false
+	var climbs := false
+	for s in into["segments"]:
+		enters = enters or (int(s["l0"]) == 0 and int(s["l1"]) == 1)
+		climbs = climbs or (int(s["l0"]) == 1 and int(s["l1"]) == 2)
+	_check(bool(into["ok"]) and enters and climbs, "a route onto a roof enters the building and takes the stairs")
+	var out := geo.route(mid, 2, right, 0)
+	_check(bool(out["ok"]) and int(out["segments"].back()["l1"]) == 0, "a route from a roof back to the street")
+	_check(not bool(geo.route(left, 0, mid, 0)["ok"]), "nobody stands on the street inside a wall")
+	_check(not bool(geo.route(left, 0, Vector2(500, 500), 0)["ok"]), "routes off the map are rejected")
+	var near := Vector2(box.position.x - 0.5, mid.y)
+	var on_roof := Vector2(box.position.x + 1.0, mid.y)
+	_check(bool(geo.jump_route(near, 0, on_roof, 2)["ok"]), "Grasshopper jumps from the street onto a roof")
+	_check(not bool(geo.jump_route(left + Vector2(-3, 0), 0, on_roof, 2)["ok"]), "jumps have a limited reach")
+	_check(not bool(geo.jump_route(near, 0, on_roof, 1)["ok"]), "no jumping into a building's interior")
 
-	# Shield facing the shooter mitigates (5 atk + 5 power - 5 def = 5).
-	var hp_front := _shoot(shooter_hex, target_hex, front, true)
-	_check(hp_front == 95, "ranged hit on front shield mitigated (hp %d)" % hp_front)
 
-	# Same shot into the unshielded rear bypasses defense (10 damage).
-	var hp_rear := _shoot(shooter_hex, target_hex, posmod(front + 3, 6), true)
-	_check(hp_rear == 90, "ranged hit on rear flank unmitigated (hp %d)" % hp_rear)
+# --- Plan timing ----------------------------------------------------------------
 
-	# No shield at all: full damage.
-	var hp_none := _shoot(shooter_hex, target_hex, front, false)
-	_check(hp_none == 90, "ranged hit without shield unmitigated (hp %d)" % hp_none)
+func _test_timing() -> void:
+	var data := TestUnits.legacy()[0]
+	var fast := TestUnits.legacy()[0]
+	fast.talent_stamina = 2
+	Talents.apply(fast)
+	var kogetsu := PlanAction.new(TriggerLibrary.get_card("Kogetsu"))
+	_check(is_equal_approx(TurnPlan.action_time(data, kogetsu), 1.8), "Kogetsu takes 1.8 s")
+	_check(TurnPlan.action_time(fast, kogetsu) < TurnPlan.action_time(data, kogetsu), "Stamina makes every action take less time")
+	_check(TurnPlan.speed(fast) > TurnPlan.speed(data), "Stamina makes characters faster on foot")
+
+	var ms := _arena()
+	var plain := TestUnits.legacy()[1]   # no blade: no Melee Penchant bonus
+	var us := UnitState.new(plain, 0, Vector2(4, 10))
+	var plan := TurnPlan.new([plain])
+	plan.add(0, _point("Move", Vector2(9, 10)))
+	var t := plan.move_used(ms, us, 0)
+	_check(absf(t - 5.0 / TurnPlan.BASE_SPEED) < 0.01, "a move takes distance / speed (%.2f s)" % t)
+	plan.add(0, _hold("Wait", 1.0), TurnPlan.MOVE_LANE)
+	_check(absf(plan.move_used(ms, us, 0) - t - 1.0) < 0.01, "Wait adds its hold time")
+	var at := TurnPlan.position_at(plan.move_schedule(ms, us, 0), us, t * 0.5, plain)
+	_check((at["pos"] as Vector2).distance_to(Vector2(6.5, 10)) < 0.05, "the plan knows where a character is mid-move")
+
+	var busy := TurnPlan.new([data])
+	for _i in 4:
+		busy.add(0, PlanAction.new(TriggerLibrary.get_card("Kogetsu")))
+	(busy.lane(0, TurnPlan.ACT_LANE)[0] as PlanAction).target_unit = 0
+	for a in busy.lane(0, TurnPlan.ACT_LANE):
+		(a as PlanAction).target_unit = 0
+	_check(busy.unit_error(ms, UnitState.new(data, 0, Vector2(4, 10)), 0).contains("longer"), "a lane can't run past the 6-second turn")
+	var lost := TurnPlan.new([plain])
+	lost.add(0, _point("Move", Vector2(500, 10)))
+	_check(lost.unit_error(ms, us, 0) != "", "an unreachable move makes the plan invalid")
+	var untargeted := TurnPlan.new([plain])
+	untargeted.add(0, PlanAction.new(TriggerLibrary.get_card("Asteroid")))
+	_check(untargeted.unit_error(ms, us, 0).contains("no target"), "an attack needs a target")
+	_check(TurnPlan.fits_lane(TriggerLibrary.get_wait_card(), TurnPlan.MOVE_LANE)
+		and TurnPlan.fits_lane(TriggerLibrary.get_wait_card(), TurnPlan.ACT_LANE)
+		and not TurnPlan.fits_lane(TriggerLibrary.get_card("Asteroid"), TurnPlan.MOVE_LANE), "lanes accept only their actions (Wait fits both)")
 
 
-## One Asteroid shot from team 0 at a team-1 target; returns the target's HP.
-func _shoot(from: Vector2i, to: Vector2i, target_facing: int, shield: bool) -> int:
-	var ms := _match([[0, from, 0], [1, to, target_facing]])
-	var p0 := _plan(ms, 0)
-	var p1 := _plan(ms, 1)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
-	p0.set_target(0, 0, to)
-	if shield:
-		p1.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
-	var engine := TickEngine.new()
+# --- Movement -------------------------------------------------------------------
+
+func _test_movement() -> void:
+	var ms := _arena()
+	_duel(ms, Vector2(4, 10), Vector2(18, 20), 1, 1)
+	var a: UnitState = ms.teams[0][0]
+	var p0 := _plan_for(ms, 0)
+	p0.add(0, _point("Move", Vector2(9, 10)))
+	var engine := TurnEngine.new()
+	engine.begin(ms, p0, _plan_for(ms, 1))
+	var arrived := -1.0
+	while not engine.done():
+		engine.step()
+		if arrived < 0.0 and a.pos.distance_to(Vector2(9, 10)) < 0.01:
+			arrived = engine.time
+	_check(absf(arrived - 2.0) <= TurnEngine.STEP + 0.001, "a 5 m walk arrives after 2.0 s (%.2f)" % arrived)
+	_check(absf(a.facing - 0.0) < 0.01, "walking faces the way you go")
+
+	# Look: keep watching a point while walking.
+	ms = _arena()
+	_duel(ms, Vector2(4, 10), Vector2(18, 20), 1, 1)
+	a = ms.teams[0][0]
+	p0 = _plan_for(ms, 0)
+	p0.add(0, _point("Look", Vector2(4, 20)))
+	p0.add(0, _point("Move", Vector2(9, 10)))
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	var want := (Vector2(4, 20) - a.pos).angle()
+	_check(absf(angle_difference(a.facing, want)) < 0.05, "Look keeps the character watching a point while it moves")
+
+	# Lead Bullet weight: no moving.
+	ms = _arena()
+	_duel(ms, Vector2(4, 10), Vector2(18, 20), 1, 1)
+	a = ms.teams[0][0]
+	a.weight_time = TurnEngine.WEIGHT_SECONDS
+	p0 = _plan_for(ms, 0)
+	p0.add(0, _point("Move", Vector2(14, 10)))
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	var walked := a.pos.distance_to(Vector2(4, 10))
+	_check(walked > 0.0 and walked < (TurnEngine.TURN_SECONDS - TurnEngine.WEIGHT_SECONDS) * TurnPlan.BASE_SPEED + 0.1,
+		"a weighed-down character starts moving only when the weight wears off")
+
+	# Into a building and up to the roof.
+	ms = _arena(_block(6, 7, 6, 9, 2))
+	var box := _box(ms)
+	_duel(ms, Vector2(box.position.x - 2.0, box.get_center().y), Vector2(1, 1), 1, 1)
+	a = ms.teams[0][0]
+	p0 = _plan_for(ms, 0)
+	p0.add(0, _point("Move", box.get_center(), 2))
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(a.level == 2 and a.pos.distance_to(box.get_center()) < 0.01, "a character can walk in and climb to the roof")
+
+
+## Buildings have a ground floor and a roof only, and a Grasshopper jump the
+## turn cuts off never leaves anyone inside a wall or in mid-air.
+func _test_building_levels() -> void:
+	var ms := _arena(_block(6, 7, 6, 9, 3))
+	var geo := ms.geometry()
+	var box := _box(ms)
+	var mid := box.get_center()
+	_check(geo.level_ok(mid, 1) and geo.level_ok(mid, 3) and not geo.level_ok(mid, 2),
+		"a 3-floor building has a ground floor and a roof, no middle floor")
+	_check(bool(geo.route(Vector2(box.position.x - 2.0, mid.y), 0, mid, 3)["ok"]), "the roof is still reachable on foot")
+	var stuck := geo.settle(mid, 0)
+	_check(geo.level_ok(stuck["pos"], stuck["level"]) and int(stuck["level"]) == 3, "someone at street level inside a building is put on its roof")
+	var floating := geo.settle(Vector2(box.position.x - 1.0, mid.y), 3)
+	_check(geo.level_ok(floating["pos"], floating["level"]) and int(floating["level"]) == 0, "someone in mid-air beside a building is put on the street")
+	var wall := geo.settle(Vector2(box.position.x - 0.1, mid.y), 0)
+	_check(geo.level_ok(wall["pos"], wall["level"]), "someone inside a wall is put somewhere legal")
+
+	var near := Vector2(box.position.x - 0.8, mid.y)
+	var on_roof := Vector2(box.position.x + 1.5, mid.y)
+	# The turn ends at 1/2, 1/3 and 1/6 of the way through a jump onto the
+	# roof, and of a jump off it.
+	for hold in [5.7, 5.8, 5.9]:
+		for up in [true, false]:
+			ms = _arena(_block(6, 7, 6, 9, 3))
+			geo = ms.geometry()
+			var start: Vector2 = near if up else on_roof
+			_duel(ms, start, Vector2(1, 1), 1, 1)
+			var a: UnitState = ms.teams[0][0]
+			a.level = 0 if up else 3
+			var p0 := _plan_for(ms, 0)
+			p0.add(0, _hold("Wait", hold), TurnPlan.MOVE_LANE)
+			p0.add(0, _point("Grasshopper", on_roof if up else near, 3 if up else 0))
+			TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+			var where := "%s, turn ends %.1f s into the jump" % ["up" if up else "down", TurnEngine.TURN_SECONDS - hold]
+			_check(geo.level_ok(a.pos, a.level), "a cut-off jump lands somewhere legal (%s: %s level %d)" % [where, a.pos, a.level])
+			_check(a.pos.distance_to(near) < 0.01 or a.pos.distance_to(on_roof) < 0.01, "a cut-off jump ends at its start or its landing (%s)" % where)
+			var step := geo.route(a.pos, a.level, Vector2(box.position.x - 3.0, mid.y), 0)
+			_check(bool(step["ok"]), "after a cut-off jump the character can move again (%s)" % where)
+
+	# A character already stranded (an older turn) is put back at turn start.
+	ms = _arena(_block(6, 7, 6, 9, 3))
+	geo = ms.geometry()
+	_duel(ms, mid, Vector2(1, 1), 1, 1)
+	var lost: UnitState = ms.teams[0][0]
+	lost.level = 0
+	var p1 := _plan_for(ms, 0)
+	TurnEngine.new().resolve(ms, p1, _plan_for(ms, 1))
+	_check(geo.level_ok(lost.pos, lost.level), "a character stuck inside a building is freed at the next turn")
+
+
+func _test_collisions() -> void:
+	# Head-on: two characters walking into each other never overlap, and the
+	# outcome is mirror-symmetric whichever team is processed first.
+	var results := []
+	for swap in [false, true]:
+		var ms := _arena()
+		var west := Vector2(5, 10)
+		var east := Vector2(15, 10)
+		_duel(ms, east if swap else west, west if swap else east, 1, 1)
+		var p0 := _plan_for(ms, 0)
+		p0.add(0, _point("Move", west if swap else east))
+		var p1 := _plan_for(ms, 1)
+		p1.add(0, _point("Move", east if swap else west))
+		var engine := TurnEngine.new()
+		engine.begin(ms, p0, p1)
+		var closest := INF
+		while not engine.done():
+			engine.step()
+			closest = minf(closest, ms.teams[0][0].pos.distance_to(ms.teams[1][0].pos))
+		_check(closest >= CityGeometry.UNIT_RADIUS * 2.0 - 0.001, "walkers never overlap (closest %.2f m)" % closest)
+		var w: UnitState = ms.teams[1][0] if swap else ms.teams[0][0]
+		var e: UnitState = ms.teams[0][0] if swap else ms.teams[1][0]
+		results.append([snappedf(w.pos.x, 0.001), snappedf(e.pos.x, 0.001)])
+	_check(results[0] == results[1], "collisions don't favour either team (%s vs %s)" % [results[0], results[1]])
+	_check(absf((float(results[0][0]) - 5.0) - (15.0 - float(results[0][1]))) < 0.01, "both walkers stop the same distance short")
+
+
+# --- Attacks --------------------------------------------------------------------
+
+func _test_attacks() -> void:
+	# Asteroid (5 + 5 power) into an unshielded target: 10 damage.
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10)) == 90, "a ranged hit in range deals attack + power")
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(15, 10)) == 100, "out of range: no shot")
+	_check(_shot("Kogetsu", Vector2(5, 10), Vector2(6.5, 10)) == 89, "melee hits within reach (5 + 6)")
+	_check(_shot("Kogetsu", Vector2(5, 10), Vector2(8, 10)) == 100, "melee can't reach 3 m")
+
+	# A building between shooter and target blocks the shot; Viper curves
+	# around it when a teammate sees the target.
+	var ms := _arena(_block(6, 7, 5, 10, 3))
+	var box := _box(ms)
+	var y := box.get_center().y
+	var shooter := Vector2(box.position.x - 1.5, y)
+	var target := Vector2(box.end.x + 1.5, y)
+	ms.setup_team(0, _typed([UnitState.new(TestUnits.legacy()[1], 0, shooter, 0.0),
+		UnitState.new(TestUnits.legacy()[3], 0, target + Vector2(0, 4), -PI / 2)]))
+	ms.setup_team(1, _typed([UnitState.new(TestUnits.legacy()[1], 1, target, PI)]))
+	for card_name in ["Asteroid", "Viper"]:
+		var copy := _clone(ms)
+		var p0 := _plan_for(copy, 0)
+		var shot := PlanAction.new(TriggerLibrary.get_card(card_name))
+		shot.target_unit = 0
+		p0.add(0, shot)
+		var engine := TurnEngine.new()
+		engine.always_hit = true
+		engine.resolve(copy, p0, _plan_for(copy, 1))
+		var hp: int = copy.teams[1][0].trion_hp
+		if card_name == "Asteroid":
+			_check(hp == 100, "a building between shooter and target blocks the shot")
+		else:
+			_check(hp < 100, "Viper curves around the building to a target the team sees")
+
+	# Can't shoot what the team doesn't see (target behind, out of detection).
+	var blind := _arena()
+	blind.setup_team(0, _typed([UnitState.new(TestUnits.legacy()[1], 0, Vector2(5, 10), PI)]))
+	blind.setup_team(1, _typed([UnitState.new(TestUnits.legacy()[1], 1, Vector2(11, 10), PI)]))
+	_check(_fire(blind, "Asteroid") == 100, "no shooting at an enemy nobody on the team sees")
+
+
+func _test_shields() -> void:
+	# Standing still behind a shield: Full Guard (defense x1.5 all round).
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), PI, "shield_still") == 97, "a standing shield is a Full Guard (10 - 7.5)")
+	# Walking away with the shield up: hit from behind, no protection.
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(7, 10), 0.0, "shield_away") == 90, "a shield doesn't cover your back")
+	# Walking but watching the shooter: the front shield holds.
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), 0.0, "shield_watch") == 95, "a front shield on the move stops 5")
+	# A raised front shield (not a Full Guard) against a blade that bends around it.
+	var ms := _arena()
+	_duel(ms, Vector2(5, 10), Vector2(6.5, 10), 3, 1)
+	var guard: UnitState = ms.teams[1][0]
+	guard.shield_active = true
+	guard.full_guard = false
+	var engine := TurnEngine.new()
+	engine.begin(ms, _plan_for(ms, 0), _plan_for(ms, 1))
+	guard.shield_active = true
+	_check(is_equal_approx(engine._mitigation(guard, Vector2(5, 10), TriggerLibrary.get_card("Asteroid")), 5.0)
+		and is_equal_approx(engine._mitigation(guard, Vector2(5, 10), TriggerLibrary.get_card("Scorpion")), 0.0),
+		"Scorpion strikes around a front shield")
+	_check(_shot("Ibis", Vector2(2, 10), Vector2(10, 10), PI, "shield_still") == 91, "Ibis pierces: Full Guard only halves (13 - 3.75)")
+	var u := UnitState.new(TestUnits.legacy()[0], 0, Vector2.ZERO, 0.0)
+	_check(TurnEngine.in_shield_arc(u, Vector2(3, 1)) and not TurnEngine.in_shield_arc(u, Vector2(-3, 0.5)), "a shield covers the front half")
+
+
+func _test_triggers() -> void:
+	# Lead Bullet: no damage, but the target can't move or dodge.
+	var ms := _arena()
+	_duel(ms, Vector2(5, 10), Vector2(10, 10), 3, 1)
+	ms.teams[0][0].facing = 0.0
+	ms.teams[1][0].facing = PI
+	var p0 := _plan_for(ms, 0)
+	var tag := PlanAction.new(TriggerLibrary.get_card("Lead Bullet"))
+	tag.target_unit = 0
+	p0.add(0, tag)
+	var p1 := _plan_for(ms, 1)
+	p1.add(0, _hold("Wait", 1.5), TurnPlan.MOVE_LANE)
+	p1.add(0, _point("Move", Vector2(10, 20)))
+	var engine := TurnEngine.new()
 	engine.always_hit = true
-	engine.resolve_tick(ms, p0, p1, 0)
-	return (ms.teams[1][0] as UnitState).trion_hp
+	engine.resolve(ms, p0, p1)
+	var b: UnitState = ms.teams[1][0]
+	_check(b.trion_hp == 100 and b.pos.distance_to(Vector2(10, 10)) < 6.0, "Lead Bullet roots the target (moved %.1f m)" % b.pos.distance_to(Vector2(10, 10)))
 
-
-func _test_contested_move() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(2, 0), 0]])
-	var p0 := _move_plan(ms, 0, Vector2i(1, 0))
-	var p1 := _move_plan(ms, 1, Vector2i(1, 0))
-	TickEngine.new().resolve_tick(ms, p0, p1, 0)
-	_check(ms.teams[0][0].hex == Vector2i(0, 0) and ms.teams[1][0].hex == Vector2i(2, 0),
-		"contested hex: both units bounce (no team-0 priority)")
-
-
-func _test_swap_move() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(1, 0), 0]])
-	var p0 := _move_plan(ms, 0, Vector2i(1, 0))
-	var p1 := _move_plan(ms, 1, Vector2i(0, 0))
-	TickEngine.new().resolve_tick(ms, p0, p1, 0)
-	_check(ms.teams[0][0].hex == Vector2i(0, 0) and ms.teams[1][0].hex == Vector2i(1, 0),
-		"swap: units cannot pass through each other")
-
-
-func _test_chain_move() -> void:
-	# Team 1 vacates (1,0) in the same tick team 0 enters it.
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(1, 0), 0]])
-	var p0 := _move_plan(ms, 0, Vector2i(1, 0))
-	var p1 := _move_plan(ms, 1, Vector2i(2, 0))
-	TickEngine.new().resolve_tick(ms, p0, p1, 0)
-	_check(ms.teams[0][0].hex == Vector2i(1, 0) and ms.teams[1][0].hex == Vector2i(2, 0),
-		"chain: follow into a hex vacated the same tick")
-
-
-func _test_grasshopper_sub() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(4, 0), 0]])
-	var p0 := _plan(ms, 0)
-	var ok := p0.assign(0, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Grasshopper"))
-	p0.set_target(0, 0, Vector2i(0, 1), 0, TurnPlan.SUB_SLOT)
-	TickEngine.new().resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ok and ms.teams[0][0].hex == Vector2i(0, 1), "Grasshopper in sub slot moves the unit")
-
-
-func _test_elevation_chain() -> void:
-	# A climbs from floor 1 to floor 2 while B enters floor 1 from the street.
-	var ms := _match([[0, Vector2i(1, 0), 0], [1, Vector2i(0, 0), 0]])
-	ms.buildings[Vector2i(1, 0)] = 2
-	ms.teams[0][0].floor = 1
-	var p0 := _move_plan(ms, 0, Vector2i(1, 0), 2)
-	var p1 := _move_plan(ms, 1, Vector2i(1, 0), 1)
-	TickEngine.new().resolve_tick(ms, p0, p1, 0)
-	_check(ms.teams[0][0].floor == 2 and ms.teams[1][0].hex == Vector2i(1, 0) and ms.teams[1][0].floor == 1,
-		"elevation: climb + enter below resolve together")
-
-
-func _test_elevation_contest() -> void:
-	# Both teams try to enter floor 1 of the same building in the same tick.
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(2, 0), 0]])
-	ms.buildings[Vector2i(1, 0)] = 1
-	var p0 := _move_plan(ms, 0, Vector2i(1, 0), 1)
-	var p1 := _move_plan(ms, 1, Vector2i(1, 0), 1)
-	TickEngine.new().resolve_tick(ms, p0, p1, 0)
-	_check(ms.teams[0][0].hex == Vector2i(0, 0) and ms.teams[1][0].hex == Vector2i(2, 0),
-		"elevation: contested floor bounces both units")
-
-
-func _test_elevation_rules() -> void:
-	var ms := MatchState.new(1)
-	ms.buildings[Vector2i(1, 0)] = 3
-	ms.buildings[Vector2i(2, 0)] = 1
-	_check(TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(1, 0), 1), "enter building from street")
-	_check(not TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(1, 0), 0), "cannot walk into a building at ground level")
-	_check(not TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(1, 0), 3), "climb only one floor per move")
-	_check(not TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(2, 0), 0), "cannot exit onto another building's ground")
-	_check(TickEngine.is_valid_move(ms, Vector2i(1, 0), 1, Vector2i(2, 0), 1), "cross between equal-height floors")
-
-
-func _test_ranged_at_elevated_target() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
-	ms.buildings[Vector2i(0, 3)] = 2
-	ms.teams[1][0].floor = 2
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
-	p0.set_target(0, 0, Vector2i(0, 3))
-	var engine := TickEngine.new()
+	# Bagworm: hidden beyond the reveal range, revealed by attacking.
+	ms = _arena()
+	_duel(ms, Vector2(4, 10), Vector2(11, 10), 1, 3)
+	ms.teams[0][0].facing = 0.0
+	ms.teams[1][0].facing = PI
+	p1 = _plan_for(ms, 1)
+	p1.add(0, PlanAction.new(TriggerLibrary.get_card("Bagworm")))
+	var p0b := _plan_for(ms, 0)
+	var shot := PlanAction.new(TriggerLibrary.get_card("Asteroid"))
+	shot.target_unit = 0
+	p0b.add(0, _hold("Wait", 1.0))
+	p0b.add(0, shot)
+	engine = TurnEngine.new()
 	engine.always_hit = true
-	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ms.teams[1][0].trion_hp == 90, "ranged attack reaches a unit on an upper floor")
+	engine.resolve(ms, p0b, p1)
+	_check(ms.teams[1][0].trion_hp == 100 and ms.teams[1][0].stealth_active, "Bagworm hides a character beyond the reveal range")
+	_check(Visibility.enemy_states(ms, 0)[ms.teams[1][0]] == Visibility.State.HIDDEN, "a Bagworm user is off radar")
+
+	# Spider wire: the deploying team gets defense and dodge on it.
+	ms = _arena()
+	_duel(ms, Vector2(5, 10), Vector2(12, 10), 3, 1)
+	var scout: UnitState = ms.teams[0][0]
+	var enemy: UnitState = ms.teams[1][0]
+	var e2 := TurnEngine.new()
+	e2.begin(ms, _plan_for(ms, 0), _plan_for(ms, 1))
+	var before := e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid"))
+	ms.wires.append({ "pos": scout.pos, "team": 0 })
+	var after := e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid"))
+	_check(after < before, "standing on your own Spider wire makes you harder to hit")
+	ms.wires[0]["team"] = 1
+	_check(is_equal_approx(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")), before), "the enemy's wire gives no bonus")
+	enemy.moving = true
+	_check(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")) < before, "shooting on the move is less accurate")
+	enemy.moving = false
+	scout.moving = true
+	_check(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")) < before
+		and is_equal_approx(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Hound")), before + 0.15),
+		"a moving target dodges straight shots, but not Hound")
+
+	# Spider placement range.
+	ms = _arena()
+	_duel(ms, Vector2(5, 10), Vector2(20, 20), 3, 1)
+	p0 = _plan_for(ms, 0)
+	p0.add(0, _point("Spider", Vector2(7, 10)))
+	p0.add(0, _point("Spider", Vector2(14, 10)))
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(ms.wires.size() == 1 and (ms.wires[0]["pos"] as Vector2).distance_to(Vector2(7, 10)) < 0.01, "Spider wires go only within reach")
 
 
-func _test_split_targets() -> void:
-	# Main moves one way while Sub (Viper) shoots a different hex, same tick.
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	p0.set_target(0, 0, Vector2i(-1, 0), 0, TurnPlan.MAIN_SLOT)
-	var ok := p0.assign(0, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Viper"))
-	p0.set_target(0, 0, Vector2i(0, 3), 0, TurnPlan.SUB_SLOT)
-	var engine := TickEngine.new()
+func _test_simultaneity() -> void:
+	# Both 1 HP, both swing at the same moment: both bail out, a draw.
+	var ms := _arena()
+	_duel(ms, Vector2(5, 10), Vector2(6.5, 10), 0, 0)
+	for u in ms.all_units():
+		u.trion_hp = 1
+	var plans := [_plan_for(ms, 0), _plan_for(ms, 1)]
+	for team in 2:
+		var hit := PlanAction.new(TriggerLibrary.get_card("Kogetsu"))
+		hit.target_unit = 0
+		plans[team].add(0, hit)
+	var engine := TurnEngine.new()
 	engine.always_hit = true
-	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ok and ms.teams[0][0].hex == Vector2i(-1, 0) and ms.teams[1][0].trion_hp < 100,
-		"Main and Sub slots aim at different targets")
-
-	var round_trip := PlanCodec.decode_plan(PlanCodec.encode_plan(p0), p0.units)
-	var ta := round_trip.get_tick(0, 0)
-	_check(ta.slot_target(TurnPlan.SUB_SLOT) == Vector2i(0, 3) and ta.slot_target(TurnPlan.MAIN_SLOT) == Vector2i(-1, 0),
-		"per-slot targets survive JSON encoding")
-
-
-func _test_bagworm_cost() -> void:
-	var units := TriggerLibrary.sample_units()
-	var plan := TurnPlan.new(units)
-	var bag := TriggerLibrary.get_card("Bagworm")
-	for t in 3:
-		plan.assign(0, t, TurnPlan.MAIN_SLOT, bag)
-	_check(plan.get_at_spent(0) == bag.action_at_cost, "Bagworm costs 1 AT per turn, not per tick")
-
-
-func _test_bagworm_toggle() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(6, 0), 0]])
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Bagworm"))
-	var engine := TickEngine.new()
-	for t in 4:
-		engine.resolve_tick(ms, p0, _plan(ms, 1), t)
-	_check(ms.teams[0][0].stealth_active, "Bagworm stays on for the rest of the turn")
-	engine.resolve_tick(ms, _plan(ms, 0), _plan(ms, 1), 0)
-	_check(not ms.teams[0][0].stealth_active, "Bagworm drops at the next turn unless maintained")
-
-
-func _test_building_blocks_shot() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
-	ms.buildings[Vector2i(0, 1)] = 3
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
-	p0.set_target(0, 0, Vector2i(0, 3))
-	var engine := TickEngine.new()
+	engine.resolve(ms, plans[0], plans[1])
+	_check(ms.teams[0][0].is_bailed and ms.teams[1][0].is_bailed and MatchRunner.winner(ms) == MatchRunner.DRAW,
+		"blows landing at the same moment knock both out (draw)")
+	# A faster character (Stamina) lands first.
+	ms = _arena()
+	_duel(ms, Vector2(5, 10), Vector2(6.5, 10), 0, 0)
+	ms.teams[0][0].unit_data.talent_stamina = 4
+	Talents.apply(ms.teams[0][0].unit_data)
+	for u in ms.all_units():
+		u.trion_hp = 1
+	plans = [_plan_for(ms, 0), _plan_for(ms, 1)]
+	for team in 2:
+		var hit := PlanAction.new(TriggerLibrary.get_card("Kogetsu"))
+		hit.target_unit = 0
+		plans[team].add(0, hit)
+	engine = TurnEngine.new()
 	engine.always_hit = true
-	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ms.teams[1][0].trion_hp == 100, "a building between shooter and target blocks the shot")
+	engine.resolve(ms, plans[0], plans[1])
+	_check(not ms.teams[0][0].is_bailed and ms.teams[1][0].is_bailed, "with more Stamina your blow lands first")
 
 
-func _test_line_of_sight() -> void:
-	var ms := MatchState.new(1)
-	ms.buildings[Vector2i(0, 1)] = 2
-	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 3), 0), "building blocks ground-level sight")
-	_check(Visibility.has_los(ms, Vector2i(0, 0), 3, Vector2i(0, 3), 0), "a viewer above the building sees over it")
-	ms.cover[Vector2i(0, 2)] = 2
-	ms.buildings.clear()
-	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 3), 0), "full cover blocks ground-level sight")
+# --- Vision ---------------------------------------------------------------------
+
+func _test_visibility() -> void:
+	var ms := _arena()
+	var viewer := UnitState.new(TestUnits.legacy()[0], 0, Vector2(10, 10), 0.0)
+	var sniper := UnitState.new(TestUnits.legacy()[2], 0, Vector2(10, 10), 0.0)
+	var pa := Visibility.profile(viewer)
+	var ps := Visibility.profile(sniper)
+	_check(is_equal_approx(float(ps["sight_range"]), float(pa["sight_range"]) + Visibility.SCOPE_BONUS), "a sniper scope extends the sight range")
+	sniper.level = 3
+	_check(is_equal_approx(float(Visibility.profile(sniper)["sight_range"]), float(ps["sight_range"]) + 3 * Visibility.LEVEL_SIGHT_BONUS), "height extends sight")
+	var o := viewer.pos
+	_check(Visibility.in_view(viewer, o + Vector2(Visibility.SIGHT_RANGE - 0.1, 0)), "sees far straight ahead (sight cone)")
+	_check(not Visibility.in_view(viewer, o + Vector2(Visibility.SIGHT_RANGE + 0.5, 0)), "not past the sight range")
+	_check(not Visibility.in_view(viewer, o + Vector2(0, Visibility.DETECT_RANGE + 1.0)), "doesn't see past the detection radius to the side")
+	var all_round := true
+	for k in 8:
+		all_round = all_round and Visibility.in_view(viewer, o + Vector2.from_angle(TAU * k / 8.0) * (Visibility.DETECT_RANGE - 0.1))
+	_check(all_round, "detects within %.1f m in every direction" % Visibility.DETECT_RANGE)
+
+	ms = _arena(_block(6, 7, 5, 10, 2))
+	var box := _box(ms)
+	var y := box.get_center().y
+	var a := Vector2(box.position.x - 1.0, y)
+	var b := Vector2(box.end.x + 1.0, y)
+	_check(not Visibility.has_los(ms, a, 0, b, 0), "nobody sees through a building")
+	_check(Visibility.has_los(ms, a, 0, Vector2(a.x, y - 4.0), 0), "open street lines are clear")
+	var deep := box.get_center()
+	var window := Vector2(box.position.x + 0.4, y)
+	var street := Vector2(box.position.x - 4.0, y)
+	_check(not Visibility.has_los(ms, street, 0, deep, 1), "a character deep inside a building is hidden from the street")
+	_check(Visibility.has_los(ms, street, 0, window, 1), "a character at the window can be seen")
 
 
-func _test_fog_states() -> void:
-	# Viewer at (0,0) faces E (+q). Enemies: ahead in the cone, behind it far
-	# away, and a Bagworm user nearby.
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(5, 0), 3], [1, Vector2i(-5, 0), 0], [1, Vector2i(3, 0), 0]])
-	ms.teams[1][2].stealth_active = true
-	var states := Visibility.enemy_states(ms, 0)
-	_check(int(states[ms.teams[1][0]]) == Visibility.State.SIGHT, "enemy in the vision cone is in direct sight")
-	_check(int(states[ms.teams[1][1]]) == Visibility.State.RADAR, "enemy behind the viewer shows only on radar")
-	_check(int(states[ms.teams[1][2]]) == Visibility.State.SIGHT, "Bagworm user within 3 hexes is revealed")
-	ms.teams[1][2].hex = Vector2i(6, -3)
-	states = Visibility.enemy_states(ms, 0)
-	_check(int(states[ms.teams[1][2]]) == Visibility.State.HIDDEN, "distant Bagworm user is removed from radar")
-
-	var view := Visibility.encode_view(ms, 0, 5)
-	var behind: Dictionary = view["units"][2]
-	_check(int(behind["vis"]) == Visibility.State.RADAR and not behind.has("hp") and behind.has("ping"),
-		"radar entries carry a ping but no identity or HP")
-	var ping := Vector2i(int(behind["ping"][0]), int(behind["ping"][1]))
-	var off := HexCoord.distance(ping, Vector2i(-5, 0))
-	_check(off >= 1 and off <= 2, "radar ping is offset 1-2 hexes from the true position")
-
+# --- Map, spawns, sections ------------------------------------------------------
 
 func _test_city_map() -> void:
 	var map := MapData.city()
 	_check(map.tiles.size() == MapData.COLS * MapData.ROWS, "city map is %dx%d hexes" % [MapData.COLS, MapData.ROWS])
-	_check(map.spawns[0].size() == 4 and map.spawns[1].size() == 4, "four spawn hexes per team")
-	var spawns_clear := true
-	for team in 2:
-		for hex in map.spawns[team]:
-			if map.buildings.has(hex) or map.cover.has(hex):
-				spawns_clear = false
-	_check(spawns_clear, "spawns are on open street")
 	_check(map.buildings.size() == 472, "building footprint traced from the reference sheet (472 hexes)")
 	var floors := [0, 0]
 	for row in MapData.ROWS:
@@ -270,291 +458,185 @@ func _test_city_map() -> void:
 				floors[0 if row >= MapData.ROWS / 2 else 1] += int(ch)
 	_check(floors[0] == floors[1] and floors[0] > 0, "both halves have identical building mass (point-symmetric sheet)")
 
-	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units())
-	_check(not ms.has_tile(Vector2i(500, 500)) and not TickEngine.is_valid_move(ms, ms.teams[0][0].hex, 0, Vector2i(500, 500), 0),
-		"moves off the map are rejected")
-
-
-func _test_server_persistence() -> void:
-	var server := MatchServer.new()
-	server.persist = false
-	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
-	var created := server._create_match({ "squad": squad, "seed": 99 })
-	var id := str(created["body"]["match_id"])
-	server._join_match(id, { "squad": squad })
-	var m: Dictionary = server._matches[id]
-	(m["ms"] as MatchState).teams[0][0].trion_hp = 61
-	var stored: Variant = JSON.parse_string(JSON.stringify(server._serialize(m)))
-	var restored := server._deserialize(stored)
-	var ms: MatchState = restored["ms"]
-	_check(ms != null and ms.teams[0][0].trion_hp == 61 and restored["tokens"] == m["tokens"] and int(restored["turn"]) == 1,
-		"server match survives save/load (state, tokens, turn)")
-	server.free()
-
-
-# --- Trigger traits & combos -----------------------------------------------
-
-## Team 0 unit `idx` fires `card_name` at `target_hex` on tick 0 (always hits).
-func _fire(ms: MatchState, card_name: String, target_hex: Vector2i, p1: TurnPlan = null, idx: int = 0) -> void:
-	var p0 := _plan(ms, 0)
-	p0.assign(idx, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card(card_name))
-	p0.set_target(idx, 0, target_hex)
-	var engine := TickEngine.new()
-	engine.always_hit = true
-	engine.resolve_tick(ms, p0, p1 if p1 != null else _plan(ms, 1), 0)
-
-
-## HP of a team-1 target at range 3 after one shot (target faces the shooter).
-func _shot_hp(card_name: String, setup: Callable = Callable(), shield := 0, target := Vector2i(0, 3)) -> int:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, target, TickEngine.attack_direction(target, Vector2i(0, 0))]])
-	if setup.is_valid():
-		setup.call(ms)
-	var p1 := _plan(ms, 1)
-	if shield >= 1:
-		p1.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
-	if shield >= 2:
-		p1.assign(0, 0, TurnPlan.SUB_SLOT, TriggerLibrary.get_card("Shield"))
-	_fire(ms, card_name, target, p1)
-	return (ms.teams[1][0] as UnitState).trion_hp
-
-
-func _test_trigger_traits() -> void:
-	var half_cover := func(ms: MatchState) -> void: ms.cover[Vector2i(0, 1)] = 1
-	_check(_shot_hp("Asteroid", half_cover) == 95, "Asteroid is halved by half cover")
-	_check(_shot_hp("Hound", half_cover) == 91, "Hound homes past half cover")
-
-	var tower := func(ms: MatchState) -> void: ms.buildings[Vector2i(0, 1)] = 3
-	_check(_shot_hp("Asteroid", tower) == 100, "Asteroid is stopped by a building")
-	_check(_shot_hp("Viper", tower) == 91, "Viper curves around a building")
-
-	_check(_shot_hp("Asteroid", Callable(), 1) == 95, "Shield mitigates Asteroid")
-	_check(_shot_hp("Ibis", Callable(), 1) == 87, "Ibis pierces a Shield")
-	_check(_shot_hp("Ibis", Callable(), 2) == 91, "Full Guard only halves Ibis")
-
-	_check(_shot_hp("Egret", Callable(), 0, Vector2i(0, 9)) == 90, "Egret snipes at range 9")
-	_check(_shot_hp("Asteroid", Callable(), 0, Vector2i(0, 9)) == 100, "Asteroid can't reach range 9")
-
-	_check(_shot_hp("Kogetsu", Callable(), 1, Vector2i(0, 1)) == 94, "Kogetsu is mitigated by a front Shield")
-	_check(_shot_hp("Scorpion", Callable(), 1, Vector2i(0, 1)) == 91, "Scorpion strikes around a Shield")
-
-	# Raygust: the wielder's own strike raises a front shield that tick.
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), TickEngine.attack_direction(Vector2i(0, 3), Vector2i(0, 0))]])
-	var p1 := _plan(ms, 1)
-	p1.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Raygust"))
-	p1.set_target(0, 0, Vector2i(0, 4))
-	_fire(ms, "Asteroid", Vector2i(0, 3), p1)
-	_check(ms.teams[1][0].trion_hp == 95, "Raygust blocks like a Shield while swinging")
-
-
-func _test_lead_bullet() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
-	_fire(ms, "Lead Bullet", Vector2i(0, 3))
-	var target: UnitState = ms.teams[1][0]
-	_check(target.trion_hp == 100 and target.weight_ticks == TickEngine.WEIGHT_TICKS, "Lead Bullet weighs the target down without damage")
-	var p1 := _plan(ms, 1)
-	p1.assign(0, 1, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	p1.set_target(0, 1, Vector2i(0, 4))
-	TickEngine.new().resolve_tick(ms, _plan(ms, 0), p1, 1)
-	_check(target.hex == Vector2i(0, 3), "a weighed-down unit cannot move")
-
-
-func _test_grasshopper_jump() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(6, 0), 0], [0, Vector2i(0, 1), 0]])
-	ms.buildings[Vector2i(0, 2)] = 3
-	var hopper := TriggerLibrary.get_card("Grasshopper")
-	_check(TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(0, 2), 3, hopper, 0), "Grasshopper jumps 2 hexes onto a rooftop")
-	_check(not TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(0, 2), 3, TriggerLibrary.get_move_card(), 0), "a plain Move can't")
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, hopper)
-	p0.set_target(0, 0, Vector2i(0, 2), 3)
-	TickEngine.new().resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ms.teams[0][0].hex == Vector2i(0, 2) and ms.teams[0][0].floor == 3, "Grasshopper leaps over an ally onto the roof")
-
-
-func _test_wire_penchant() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(6, 0), 0]])
-	ms.wires[Vector2i(0, 0)] = 0
-	ms.wires[Vector2i(0, 1)] = 0
-	var move := TriggerLibrary.get_move_card()
-	_check(TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(0, 2), 0, move, 0), "own wires allow a 2-hex dash")
-	_check(not TickEngine.is_valid_move(ms, Vector2i(0, 0), 0, Vector2i(0, 2), 0, move, 1), "enemy wires don't")
-
-	# +20% defense on own wire: Shield mitigates 6 instead of 5.
-	var own := func(m: MatchState) -> void: m.wires[Vector2i(0, 3)] = 1
-	var enemy := func(m: MatchState) -> void: m.wires[Vector2i(0, 3)] = 0
-	_check(_shot_hp("Asteroid", own, 1) == 96, "own wire boosts defense")
-	_check(_shot_hp("Asteroid", enemy, 1) == 95, "enemy wire gives no bonus")
-
-
-func _test_melee_assist() -> void:
-	# Attacker strikes (0,1); the Scout stands next to the target and follows up.
-	var ms := _match([[0, Vector2i(0, 0), 0, 0], [0, Vector2i(1, 0), 0, 3], [1, Vector2i(0, 1), 0, 1]])
-	_fire(ms, "Kogetsu", Vector2i(0, 1))
-	_check(ms.teams[1][0].trion_hp == 80, "Melee Assist: adjacent ally follows up for free (hp %d)" % ms.teams[1][0].trion_hp)
-
-
-func _test_crossfire_assist() -> void:
-	var target := Vector2i(0, 4)
-	var ally_hex := Vector2i(2, 0)
-	var specs := [[0, Vector2i(0, 0), 0, 0], [0, ally_hex, TickEngine.attack_direction(ally_hex, target), 1], [1, target, 0, 2]]
-	var ms := _match(specs)
-	_fire(ms, "Asteroid", target)
-	_check(ms.teams[1][0].trion_hp == 80, "Crossfire Assist: ally with the target in its arc fires too (hp %d)" % ms.teams[1][0].trion_hp)
-
-	# Same setup, but the ally has spent all its AT: no follow-up.
-	ms = _match(specs)
-	var p0 := _plan(ms, 0)
-	p0.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Asteroid"))
-	p0.set_target(0, 0, target)
-	for t in range(1, 5):
-		p0.assign(1, t, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
-	var engine := TickEngine.new()
-	engine.always_hit = true
-	engine.resolve_tick(ms, p0, _plan(ms, 1), 0)
-	_check(ms.teams[1][0].trion_hp == 90, "Crossfire Assist needs unspent AT")
-
-
-# --- Vision & city -------------------------------------------------------------
-
-func _test_vision_profiles() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0, 0], [0, Vector2i(3, 0), 0, 2]])
-	var attacker: UnitState = ms.teams[0][0]
-	var sniper: UnitState = ms.teams[0][1]
-	var pa := Visibility.profile(attacker)
-	var ps := Visibility.profile(sniper)
-	_check(int(ps["focus_range"]) == int(pa["focus_range"]) + Visibility.SCOPE_BONUS, "sniper scope extends focus range")
-	sniper.floor = 3
-	_check(int(Visibility.profile(sniper)["focus_range"]) == int(ps["focus_range"]) + 3, "elevation extends vision")
-
-	# Focus cone is long and narrow; peripheral is wide and short.
-	var viewer := attacker
-	var far_ahead := HexCoord.neighbor(Vector2i(0, 0), 0) * 7
-	_check(Visibility.in_view(viewer, far_ahead), "sees far straight ahead (focus cone)")
-	var side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 7
-	_check(not Visibility.in_view(viewer, side), "doesn't see far off to the side")
-	var near_side := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[1] * 4
-	_check(Visibility.in_view(viewer, near_side), "peripheral vision catches nearby flanks")
-	var behind := Vector2i(0, 0) + HexCoord.AXIAL_DIRECTIONS[3] * 4
-	_check(not Visibility.in_view(viewer, behind), "can't see behind")
-	_check(Visibility.sees_position(ms, viewer, HexCoord.neighbor(Vector2i(0, 0), 3), 0), "hears an adjacent enemy behind it")
-
-
-func _test_los_3d() -> void:
-	var ms := MatchState.new(1)
-	ms.buildings[Vector2i(0, 1)] = 1
-	# Ground to ground at range 4 over a 1-floor building right next to the viewer: blocked.
-	_check(not Visibility.has_los(ms, Vector2i(0, 0), 0, Vector2i(0, 4), 0), "low building blocks a ground-level line")
-	# From floor 2 the line clears the 1-floor roof.
-	_check(Visibility.has_los(ms, Vector2i(0, 0), 2, Vector2i(0, 4), 0), "shooting down from floor 2 clears a lower roof")
-	# A tall building far away still blocks a high line where it rises above it.
-	ms.buildings[Vector2i(0, 3)] = 4
-	_check(not Visibility.has_los(ms, Vector2i(0, 0), 2, Vector2i(0, 5), 0), "a taller tower in the way blocks")
-
-
-func _test_interior_vision() -> void:
-	# A 3-hex building at (0,2),(0,3),(0,4); a unit on floor 1 inside.
-	var ms := _match([[0, Vector2i(0, 0), 5, 0], [1, Vector2i(0, 3), 0]])
-	for r in [2, 3, 4]:
-		ms.buildings[Vector2i(0, r)] = 3
-	var watcher: UnitState = ms.teams[0][0]
-	var inside: UnitState = ms.teams[1][0]
-	inside.floor = 1
-	watcher.facing = TickEngine.attack_direction(watcher.hex, inside.hex)
-	_check(not Visibility.sees_position(ms, watcher, inside.hex, 1), "a unit deep inside a building is hidden from the street")
-	inside.hex = Vector2i(0, 2)
-	_check(Visibility.sees_position(ms, watcher, inside.hex, 1), "a unit at the window (outer wall) can be seen")
-
-
-func _test_look_and_attack_facing() -> void:
-	var ms := _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 4), 0]])
-	var plan := _plan(ms, 0)
-	var look := TriggerLibrary.get_look_card()
-	var ok_move := plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	plan.set_target(0, 0, Vector2i(1, 0))
-	var ok_look := plan.assign(0, 0, TurnPlan.SUB_SLOT, look)
-	plan.set_target(0, 0, Vector2i(-3, 0), 0, TurnPlan.SUB_SLOT)
-	_check(ok_move and ok_look and plan.get_at_spent(0) == 1, "Look is free and adds no Mental Load")
-	TickEngine.new().resolve_tick(ms, plan, _plan(ms, 1), 0)
-	var u: UnitState = ms.teams[0][0]
-	_check(u.hex == Vector2i(1, 0) and u.facing == TickEngine.attack_direction(Vector2i(1, 0), Vector2i(-3, 0)),
-		"move, then Look turns to watch the chosen hex")
-
-	ms = _match([[0, Vector2i(0, 0), 0], [1, Vector2i(0, 3), 0]])
-	_fire(ms, "Asteroid", Vector2i(0, 3))
-	_check(ms.teams[0][0].facing == TickEngine.attack_direction(Vector2i(0, 0), Vector2i(0, 3)), "attacking turns the unit toward its target")
-
 
 func _test_city_rects() -> void:
 	var map := MapData.city()
-	var rects := CityBuildings.compute_rects(map.buildings)
+	var rects := BuildingRects.compute(map.buildings)
 	var covered := true
 	var street_clear := true
-	var heights_match := true
 	for hex in map.tiles:
 		var p := HexCoord.axial_to_world(hex, 1.0)
 		var hit: Dictionary = {}
 		for r in rects:
-			var x0 := 1.5 * int(r["c0"]) - 0.75
-			var x1 := 1.5 * int(r["c1"]) + 0.75
-			if p.x > x0 and p.x < x1 and p.z > float(r["top"]) and p.z < float(r["bot"]):
+			if BuildingRects.bounds(r).has_point(Vector2(p.x, p.z)):
 				hit = r
 				break
 		if map.buildings.has(hex):
-			if hit.is_empty():
-				covered = false
-			elif int(hit["floors"]) != int(map.buildings[hex]):
-				heights_match = false
+			covered = covered and not hit.is_empty() and int(hit["floors"]) == int(map.buildings[hex])
 		elif not hit.is_empty():
 			street_clear = false
-	_check(covered, "every building hex sits inside a 3D building")
+	_check(covered, "every building hex sits inside a 3D building of its height")
 	_check(street_clear, "no street hex is covered by a building")
-	_check(heights_match, "3D building heights match the gameplay floors")
 
 
-func _test_no_seeing_through_buildings() -> void:
-	# An enemy on the far side of a building, inside awareness range: unseen.
-	var ms := _match([[0, Vector2i(0, 0), 5], [1, Vector2i(0, 2), 0]])
-	ms.buildings[Vector2i(0, 1)] = 3
-	_check(not Visibility.sees_position(ms, ms.teams[0][0], Vector2i(0, 2), 0), "can't see an adjacent-range enemy through a building")
+func _test_spawns() -> void:
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, TokyoMap.random_section(4242))
+	var geo := ms.geometry()
+	var ok := true
+	for u in ms.all_units():
+		ok = ok and geo.ground_ok(u.pos) and u.level == 0
+		ok = ok and geo.ground_clear(u.pos, u.pos + u.forward() * 1.0)
+	_check(ok, "spawns are on open street, each facing open street")
+	var again := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 4242, TokyoMap.random_section(4242))
+	_check(again.teams[1][2].pos == ms.teams[1][2].pos, "the same seed gives the same spawns")
+	var closest := INF
+	var differs := false
+	for seed in 60:
+		# Mostly Tokyo sections, a few on the old map sheet.
+		var sec: Variant = TokyoMap.random_section(seed) if seed % 6 != 0 else MapData.random_section(seed)
+		var m := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), seed, sec)
+		var units := m.all_units()
+		for i in units.size():
+			for j in range(i + 1, units.size()):
+				closest = minf(closest, units[i].pos.distance_to(units[j].pos))
+		differs = differs or (seed > 0 and m.teams[0][0].pos != ms.teams[0][0].pos)
+	_check(closest >= MatchRunner.SPAWN_MIN_DISTANCE - 0.001, "nobody spawns within 4 old hexes of anyone else (closest pair over 60 maps: %.2f m)" % closest)
+	_check(differs, "different seeds give different spawns")
 
-	# On the real city: whenever a sight line counts as clear, it really
-	# misses every building box (validates the nearby-building shortcut).
-	var city := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units())
-	var hexes: Array = city.tiles.keys().filter(func(h: Vector2i) -> bool: return not city.buildings.has(h))
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 7
-	var leaks := 0
-	var clear := 0
-	for _i in 400:
-		var a: Vector2i = hexes[rng.randi_range(0, hexes.size() - 1)]
-		var b: Vector2i = hexes[rng.randi_range(0, hexes.size() - 1)]
-		if HexCoord.distance(a, b) > 12 or not Visibility.has_los(city, a, 0, b, 0):
-			continue
-		clear += 1
-		var pa := HexCoord.axial_to_world(a, 1.0)
-		var pb := HexCoord.axial_to_world(b, 1.0)
-		pa.y = Visibility.EYE_HEIGHT
-		pb.y = Visibility.BODY_HEIGHT
-		for r in city.building_rects():
-			if not Visibility._segment_box(pa, pb, r).is_empty():
-				leaks += 1
-				break
-	_check(clear > 20 and leaks == 0, "no clear sight line passes through any building (%d clear, %d leaks)" % [clear, leaks])
 
+func _test_map_sections() -> void:
+	var full := MapData.COLS * MapData.ROWS
+	var shapes := {}
+	var all_ok := true
+	for seed in 40:
+		var r := MapData.random_section(seed)
+		var share := float(r.size.x * r.size.y) / full
+		all_ok = all_ok and MapData.valid_section(r) and share > 0.42 and share < 0.58
+		shapes[r] = true
+	_check(all_ok, "map sections are about half the city and inside it")
+	_check(shapes.size() > 20, "map sections differ from match to match (%d/40 distinct)" % shapes.size())
+	var sec := MapData.random_section(3)
+	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 3, sec)
+	_check(ms.tiles.size() == sec.size.x * sec.size.y, "the match board is exactly the section")
+	var inside := true
+	for u in ms.all_units():
+		inside = inside and ms.bounds().has_point(u.pos)
+	_check(inside and ms.building_rects().size() > 0, "spawns lie inside the section, which has buildings")
+	_check(MapData.section_from([0, 0, 5, 5]) == Rect2i() and MapData.section_from("x") == Rect2i(), "malformed sections are rejected")
+	_check(MapData.section_from(MapData.section_to_array(sec)) == sec, "sections survive JSON encoding")
+
+	var server := MatchServer.new()
+	server.persist = false
+	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
+	var id := str(server._create_match({ "squad": squad })["body"]["match_id"])
+	server._join_match(id, { "squad": squad })
+	var m: Dictionary = server._matches[id]
+	var area: Dictionary = m["map"]
+	_check(TokyoMap.valid_section(area) and not TokyoMap.is_sheet(area) and (m["ms"] as MatchState).layout.zone == TokyoMap.section_polygon(area),
+		"server matches are played on a random section of Tokyo (%s)" % TokyoMap.place_name(area))
+	_check(TokyoMap.section_from(server._get_match(id, "")["body"].get("map")) == area, "clients are told the section")
+	var restored := server._deserialize(JSON.parse_string(JSON.stringify(server._serialize(m))))
+	_check(restored["map"] == area and (restored["ms"] as MatchState).layout == (m["ms"] as MatchState).layout,
+		"the section survives a server restart")
+	# A match saved before Tokyo (a hex-sheet section) still loads on the sheet.
+	var old := server._serialize(m)
+	old["map"] = [3, 4, 20, 22]
+	var back := server._deserialize(JSON.parse_string(JSON.stringify(old)))
+	_check(TokyoMap.is_sheet(back["map"]) and (back["ms"] as MatchState).tiles.size() == 20 * 22,
+		"matches saved on the old map sheet still load")
+	server.free()
+
+
+# --- Plans and squads -----------------------------------------------------------
+
+func _test_plan_codec() -> void:
+	var ms := _arena()
+	_duel(ms, Vector2(5, 10), Vector2(12, 10), 1, 1)
+	var units: Array[UnitData] = [ms.teams[0][0].unit_data]
+	var plan := TurnPlan.new(units)
+	plan.add(0, _point("Move", Vector2(7, 12)))
+	plan.add(0, _hold("Wait", 0.5), TurnPlan.MOVE_LANE)
+	var shot := PlanAction.new(TriggerLibrary.get_card("Asteroid"))
+	shot.target_unit = 0
+	plan.add(0, shot)
+	plan.add(0, _hold("Shield", 2.0))
+	plan.add(0, _point("Look", Vector2(12, 10)))
+	var round := PlanCodec.decode_plan_checked(JSON.parse_string(JSON.stringify(PlanCodec.encode_plan(plan))), units, ms, ms.teams[0])
+	_check(str(round["error"]) == "" and (round["plan"] as TurnPlan).lane(0, TurnPlan.ACT_LANE).size() == 3
+		and (round["plan"] as TurnPlan).lane(0, TurnPlan.MOVE_LANE).size() == 2, "a plan survives JSON and the server's checks")
+
+	var base := PlanCodec.encode_plan(plan)
+	var cases := {
+		"rejects an unequipped card": func(d: Dictionary) -> void: d["units"][0]["act"][0]["card"] = "Ibis",
+		"rejects an action in the wrong lane": func(d: Dictionary) -> void: d["units"][0]["move"].append({ "card": "Asteroid", "unit": 0 }),
+		"rejects a target off the map": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = [5000, 10],
+		"rejects a non-number target": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = ["5", 10],
+		"rejects an infinite target": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = [1e300, 10],
+		"rejects a missing target": func(d: Dictionary) -> void: d["units"][0]["act"][0].erase("unit"),
+		"rejects a bad enemy index": func(d: Dictionary) -> void: d["units"][0]["act"][0]["unit"] = 7,
+		"rejects a negative hold": func(d: Dictionary) -> void: d["units"][0]["act"][1]["hold"] = -3,
+		"rejects a lane longer than the turn": func(d: Dictionary) -> void: d["units"][0]["act"][1]["hold"] = 6.0,
+		"rejects an unreachable move": func(d: Dictionary) -> void: d["units"][0]["move"][0]["level"] = 3,
+		"rejects too many actions": func(d: Dictionary) -> void:
+			for _i in 20:
+				d["units"][0]["act"].append({ "card": "Wait", "hold": 0.25 }),
+		"rejects a malformed row": func(d: Dictionary) -> void: d["units"][0] = [1, 2],
+	}
+	for label in cases:
+		var d: Dictionary = base.duplicate(true)
+		(cases[label] as Callable).call(d)
+		_check(str(PlanCodec.decode_plan_checked(d, units, ms, ms.teams[0])["error"]) != "", label)
+
+	var fallback := MatchRunner.build_fallback_plan(TriggerLibrary.sample_units())
+	_check(is_equal_approx(fallback.act_used(0), TurnPlan.TURN_SECONDS), "the AFK fallback holds a shield all turn")
+
+
+func _test_squad_validation() -> void:
+	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
+	_check(PlanCodec.validate_squad(squad) == "", "sample squad is valid")
+	var buffed := squad.duplicate(true)
+	buffed[0]["trion_hp"] = 9999
+	_check(PlanCodec.validate_squad(buffed) != "", "rejects inflated Trion HP")
+	var bad_sub := squad.duplicate(true)
+	bad_sub[0]["sub"] = ["Kogetsu", null, null, null]
+	_check(PlanCodec.validate_squad(bad_sub) != "", "rejects non-dual trigger in sub slot")
+	var over := squad.duplicate(true)
+	over[0]["main"] = ["Ibis", "Ibis", "Ibis", "Ibis"]
+	over[0]["sub"] = ["Shield", null, null, null]
+	_check(PlanCodec.validate_squad(over) != "", "rejects loadout over Trion budget")
+	_check(PlanCodec.validate_squad(squad.slice(0, 2)) != "", "rejects wrong squad size")
+
+	var units := TriggerLibrary.sample_units()
+	_check(Talents.squad_total(units) == Talents.POINTS, "default squad spends the whole talent pool")
+	_check(units.size() == 3 and units[0].unit_name == "Assassin" and units[1].unit_name == "Sniper"
+		and units[2].unit_name == "Scout", "three playable characters")
+	var u := UnitData.new()
+	Talents.set_points(u, "stamina", 2)
+	Talents.set_points(u, "hp", 1)
+	Talents.set_points(u, "atk", 3)
+	_check(is_equal_approx(u.tempo, 1.0 + 2 * Talents.TEMPO_PER_POINT)
+		and u.base_trion_hp == TriggerLibrary.STANDARD_TRION_HP + Talents.HP_PER_POINT
+		and u.attack_rating == TriggerLibrary.STANDARD_RATING + 3 * Talents.ATK_PER_POINT, "talents raise tempo, HP and ATK")
+	var greedy := squad.duplicate(true)
+	greedy[0]["talents"] = { "stamina": 4, "hp": 4, "atk": 4 }
+	_check(PlanCodec.validate_squad(greedy) != "", "rejects a squad over the talent pool")
+	var forged := squad.duplicate(true)
+	forged[0]["attack"] = int(forged[0]["attack"]) + 3
+	_check(PlanCodec.validate_squad(forged) != "", "rejects stats that don't match the talents")
+
+
+# --- Server ---------------------------------------------------------------------
 
 func _test_elo() -> void:
-	_check(MatchServer.elo_deltas(1000, 1000, 0) == [16, -16], "even match: winner +16, loser -16")
-	var upset := MatchServer.elo_deltas(1000, 1400, 0)
-	_check(int(upset[0]) > 16, "beating a stronger player gains more")
-
-	# A ranked match that ends updates both accounts.
 	var server := MatchServer.new()
 	server.persist = false
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
 	var a: Dictionary = server._register({ "name": "A" })["body"]
 	var b: Dictionary = server._register({ "name": "B" })["body"]
-	server._enqueue({ "player_id": a["player_id"], "secret": a["secret"], "squad": squad })
-	var matched: Dictionary = server._enqueue({ "player_id": b["player_id"], "secret": b["secret"], "squad": squad })["body"]
+	var ta: Dictionary = server._enqueue({ "player_id": a["player_id"], "secret": a["secret"], "squad": squad })["body"]
+	var tb: Dictionary = server._enqueue({ "player_id": b["player_id"], "secret": b["secret"], "squad": squad })["body"]
+	server._accept_ticket(str(ta["ticket"]), a["secret"])
+	var matched: Dictionary = server._accept_ticket(str(tb["ticket"]), b["secret"])["body"]
 	var m: Dictionary = server._matches[str(matched["match_id"])]
 	for u in (m["ms"] as MatchState).teams[1]:
 		(u as UnitState).is_bailed = true
@@ -563,113 +645,177 @@ func _test_elo() -> void:
 	server._resolve_turn(m)
 	var acc_a: Dictionary = server._accounts[a["player_id"]]
 	var acc_b: Dictionary = server._accounts[b["player_id"]]
-	_check(int(m["winner"]) == 0 and int(acc_a["rating"]) == 1016 and int(acc_b["rating"]) == 984,
-		"ranked result updates Elo (%d / %d)" % [acc_a["rating"], acc_b["rating"]])
-	_check(int(acc_a["wins"]) == 1 and int(acc_b["losses"]) == 1, "ranked result records win/loss")
+	_check(int(m["winner"]) == 0 and roundi(acc_a["rating"]) == 1162 and roundi(acc_b["rating"]) == 838
+		and m["rating_change"] == [162, -162],
+		"ranked result updates Glicko-2 ratings (%d / %d)" % [roundi(acc_a["rating"]), roundi(acc_b["rating"])])
+	_check(float(acc_a["rd"]) < Matchmaker.START_RD and float(acc_b["rd"]) < Matchmaker.START_RD,
+		"a rated match makes both ratings more certain")
 	server.free()
 
 
-# --- Validation -------------------------------------------------------------
-
-func _test_squad_validation() -> void:
+func _test_server_persistence() -> void:
+	var server := MatchServer.new()
+	server.persist = false
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
-	_check(PlanCodec.validate_squad(squad) == "", "sample squad is valid")
-
-	var buffed := squad.duplicate(true)
-	buffed[0]["trion_hp"] = 9999
-	_check(PlanCodec.validate_squad(buffed) != "", "rejects inflated Trion HP")
-
-	var bad_sub := squad.duplicate(true)
-	bad_sub[0]["sub"] = ["Kogetsu", null, null, null]
-	_check(PlanCodec.validate_squad(bad_sub) != "", "rejects non-dual trigger in sub slot")
-
-	var over := squad.duplicate(true)
-	over[0]["main"] = ["Ibis", "Ibis", "Ibis", "Ibis"]
-	over[0]["sub"] = ["Shield", null, null, null]
-	_check(PlanCodec.validate_squad(over) != "", "rejects loadout over Trion budget")
-
-	var unknown := squad.duplicate(true)
-	unknown[0]["main"] = ["Black Trigger", null, null, null]
-	_check(PlanCodec.validate_squad(unknown) != "", "rejects unknown trigger")
-
-	_check(PlanCodec.validate_squad(squad.slice(0, 3)) != "", "rejects wrong squad size")
-
-
-func _test_plan_validation() -> void:
-	var units := TriggerLibrary.sample_units()
-	for u in units:
-		u.ensure_slot_arrays()
-
-	var good := TurnPlan.new(units)
-	good.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card("Shield"))
-	var res := PlanCodec.decode_plan_checked(PlanCodec.encode_plan(good), units)
-	_check(str(res["error"]) == "", "valid plan accepted")
-
-	# Ibis is not in any sample loadout.
-	var cheat := PlanCodec.encode_plan(TurnPlan.new(units))
-	cheat["units"][0][0]["main"] = "Ibis"
-	res = PlanCodec.decode_plan_checked(cheat, units)
-	_check(str(res["error"]) != "", "rejects card the unit has not equipped")
-
-	# 6 x Kogetsu (3 AT each) blows the 10 AT penchant pool.
-	var overrun := PlanCodec.encode_plan(TurnPlan.new(units))
-	for t in TurnPlan.TICKS_PER_TURN:
-		overrun["units"][0][t]["main"] = "Kogetsu"
-	res = PlanCodec.decode_plan_checked(overrun, units)
-	_check(str(res["error"]) != "", "rejects AT overrun")
+	var id := str(server._create_match({ "squad": squad })["body"]["match_id"])
+	server._join_match(id, { "squad": squad })
+	var m: Dictionary = server._matches[id]
+	var ms: MatchState = m["ms"]
+	ms.teams[0][0].trion_hp = 61
+	ms.teams[0][1].pos += Vector2(0.37, 0.0)
+	for team in 2:
+		m["plans"][team] = MatchRunner.build_fallback_plan(m["teams"][team])
+	server._resolve_turn(m)
+	var frames: Array = m["history"][0]["frames"][0]
+	_check(frames.size() >= 2 and float(frames[0]["t"]) == 0.0 and absf(float(frames.back()["t"]) - TurnEngine.TURN_SECONDS) < 0.01,
+		"a turn records a replay frame every %.2f s" % MatchRunner.FRAME_SECONDS)
+	var restored := server._deserialize(JSON.parse_string(JSON.stringify(server._serialize(m))))
+	var back: MatchState = restored["ms"]
+	_check(back.teams[0][0].trion_hp == 61 and back.teams[0][1].pos.distance_to(ms.teams[0][1].pos) < 0.001
+		and restored["tokens"] == m["tokens"] and int(restored["turn"]) == 2, "server match survives save/load (state, tokens, turn)")
+	server.free()
 
 
 func _test_state_snapshot() -> void:
 	var ms := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 777)
 	ms.teams[0][0].trion_hp = 42
-	ms.teams[0][1].floor = 2
-	ms.wires[Vector2i(1, 1)] = true
+	ms.teams[0][1].level = 2
+	ms.wires.append({ "pos": Vector2(3.5, 4.25), "team": 1 })
 	ms.rng.randf()
 	var snap: Variant = JSON.parse_string(JSON.stringify(PlanCodec.encode_state(ms)))
 	_check(PlanCodec.state_matches(ms, snap), "state matches its own JSON snapshot")
-
 	var other := MatchRunner.build_match(TriggerLibrary.sample_units(), TriggerLibrary.sample_units(), 1)
-	_check(not PlanCodec.state_matches(other, snap), "different state detected as desync")
+	_check(not PlanCodec.state_matches(other, snap), "a different state is detected as a desync")
 	PlanCodec.apply_state(other, snap)
 	_check(PlanCodec.state_matches(other, snap), "apply_state resyncs units, wires, and RNG")
-	_check(other.rng.randf() == ms.rng.randf(), "RNG continues identically after resync")
+	_check(is_equal_approx(other.rng.randf(), ms.rng.randf()), "RNG continues identically after resync")
 
 
-# --- Helpers ----------------------------------------------------------------
+# --- Helpers --------------------------------------------------------------------
 
-## Builds a cover-free MatchState. Each spec is [team, hex, facing] plus an
-## optional sample-unit index (0 Attacker, 1 Shooter, 2 Sniper, 3 Scout;
-## defaults to the spec's position).
-func _match(specs: Array) -> MatchState:
+## An open 16 x 16-hex square of street (about 24 x 28 m), with optional
+## buildings (map hex -> floors).
+func _arena(buildings: Dictionary = {}) -> MatchState:
 	var ms := MatchState.new(1)
-	var teams: Array = [[], []]
-	var data := TriggerLibrary.sample_units()
-	for i in specs.size():
-		var spec: Array = specs[i]
-		var unit_data: UnitData = data[spec[3]] if spec.size() > 3 else data[i]
-		teams[spec[0]].append(UnitState.new(unit_data, spec[0], spec[1], spec[2]))
-	for team in 2:
-		var typed: Array[UnitState] = []
-		typed.assign(teams[team])
-		ms.setup_team(team, typed)
+	for col in 16:
+		for row in 16:
+			ms.tiles[MapData.offset_to_axial(col, row)] = true
+	ms.buildings = buildings
 	return ms
 
 
-func _plan(ms: MatchState, team: int) -> TurnPlan:
+## A solid building block over offset columns c0..c1, rows r0..r1.
+func _block(c0: int, c1: int, r0: int, r1: int, floors: int) -> Dictionary:
+	var out := {}
+	for c in range(c0, c1 + 1):
+		for r in range(r0, r1 + 1):
+			out[MapData.offset_to_axial(c, r)] = floors
+	return out
+
+
+func _box(ms: MatchState) -> Rect2:
+	var box := BuildingRects.bounds(ms.building_rects()[0])
+	for r in ms.building_rects():
+		box = box.merge(BuildingRects.bounds(r))
+	return box
+
+
+func _typed(list: Array) -> Array[UnitState]:
+	var out: Array[UnitState] = []
+	out.assign(list)
+	return out
+
+
+## One character per team (legacy fixtures, standard stats).
+func _duel(ms: MatchState, a: Vector2, b: Vector2, a_kind: int, b_kind: int) -> void:
+	ms.setup_team(0, _typed([UnitState.new(TestUnits.legacy()[a_kind], 0, a, (b - a).angle())]))
+	ms.setup_team(1, _typed([UnitState.new(TestUnits.legacy()[b_kind], 1, b, (a - b).angle())]))
+
+
+func _plan_for(ms: MatchState, team: int) -> TurnPlan:
 	var units: Array[UnitData] = []
 	for u in ms.teams[team]:
 		units.append((u as UnitState).unit_data)
 	return TurnPlan.new(units)
 
 
-func _move_plan(ms: MatchState, team: int, target: Vector2i, target_floor: int = 0) -> TurnPlan:
-	var plan := _plan(ms, team)
-	plan.assign(0, 0, TurnPlan.MAIN_SLOT, TriggerLibrary.get_move_card())
-	plan.set_target(0, 0, target, target_floor)
-	return plan
+func _point(card_name: String, p: Vector2, level: int = 0) -> PlanAction:
+	var a := PlanAction.new(TriggerLibrary.get_card(card_name))
+	a.set_point(p, level)
+	return a
+
+
+func _hold(card_name: String, seconds: float) -> PlanAction:
+	var a := PlanAction.new(TriggerLibrary.get_card(card_name))
+	a.hold = seconds
+	return a
+
+
+func _clone(ms: MatchState) -> MatchState:
+	var c := MatchState.new(1)
+	c.tiles = ms.tiles
+	c.buildings = ms.buildings
+	for team in 2:
+		var list: Array = []
+		for u in ms.teams[team]:
+			var copy := UnitState.new(u.unit_data, u.team, u.pos, u.facing)
+			copy.level = u.level
+			list.append(copy)
+		c.setup_team(team, _typed(list))
+	return c
+
+
+## Team 0's only character fires `card_name` at team 1's (always hits);
+## returns the target's HP.
+func _fire(ms: MatchState, card_name: String) -> int:
+	var p0 := _plan_for(ms, 0)
+	var a := PlanAction.new(TriggerLibrary.get_card(card_name))
+	a.target_unit = 0
+	p0.add(0, a)
+	var engine := TurnEngine.new()
+	engine.always_hit = true
+	engine.resolve(ms, p0, _plan_for(ms, 1))
+	return ms.teams[1][0].trion_hp
+
+
+## A shooter (facing the target) at `from` fires `card_name` at a target at
+## `to` facing `target_facing`; `defense` sets up the target:
+##   "shield_still"  holds a shield standing still (Full Guard)
+##   "shield_away"   shield up, walking straight away from the shooter
+##   "shield_watch"  shield up, walking sideways while watching the shooter
+## Returns the target's HP after the turn.
+func _shot(card_name: String, from: Vector2, to: Vector2, target_facing: float = PI, defense: String = "") -> int:
+	var ms := _arena()
+	var card := TriggerLibrary.get_card(card_name)
+	var kind := 0 if card.card_type == TriggerCard.CardType.MELEE else (2 if card.attack_range >= 15.0 else 1)
+	if card_name == "Scorpion":
+		kind = 3
+	ms.setup_team(0, _typed([UnitState.new(TestUnits.legacy()[kind], 0, from, (to - from).angle())]))
+	ms.setup_team(1, _typed([UnitState.new(TestUnits.legacy()[1], 1, to, target_facing)]))
+	var p1 := _plan_for(ms, 1)
+	match defense:
+		"shield_still":
+			p1.add(0, _hold("Shield", TurnPlan.TURN_SECONDS))
+		"shield_away":
+			p1.add(0, _hold("Shield", TurnPlan.TURN_SECONDS))
+			p1.add(0, _point("Move", to + (to - from).normalized() * 12.0))
+		"shield_watch":
+			p1.add(0, _point("Look", from))
+			p1.add(0, _hold("Shield", TurnPlan.TURN_SECONDS - 0.5))
+			p1.add(0, _point("Move", to + Vector2(0, 6.0)))
+	var p0 := _plan_for(ms, 0)
+	var a := PlanAction.new(card)
+	a.target_unit = 0
+	p0.add(0, a)
+	var engine := TurnEngine.new()
+	engine.always_hit = true
+	engine.resolve(ms, p0, p1)
+	return ms.teams[1][0].trion_hp
 
 
 func _check(cond: bool, label: String) -> void:
+	if label == "-":
+		return
 	if cond:
 		print("  ok: ", label)
 	else:

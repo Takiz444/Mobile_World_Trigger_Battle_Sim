@@ -36,6 +36,7 @@ func _run() -> void:
 	await _test_turn_cap()
 	await _test_forfeit_and_delete()
 	await _test_controller_buzzer()
+	await _test_surrender_button()
 
 	print("LIVE TEST %s" % ("PASS" if not _failed else "FAIL"))
 	get_tree().quit(1 if _failed else 0)
@@ -54,11 +55,8 @@ func _test_ladder() -> void:
 	_check(Ladder.arena_index(0) == 0 and Ladder.arena_index(299) == 0 and Ladder.arena_index(300) == 1,
 		"arena thresholds")
 	_check(Ladder.season_reset(4500) == 4000 and Ladder.season_reset(1200) == 1200, "season soft reset")
-	_check(Ladder.search_window(0) == 100 and Ladder.search_window(100) == Ladder.MM_WINDOW_MAX,
-		"search window widens and caps")
-	_check(Ladder.can_pair(1000, 0, 1090, 0) and not Ladder.can_pair(1000, 0, 1300, 0)
-		and Ladder.can_pair(1000, 10, 1300, 10), "wide gaps pair only after waiting")
-	_check(MatchServer.elo_deltas(1000, 1000, MatchRunner.DRAW) == [0, 0], "even draw: no rating change")
+	_check(Matchmaker.fairness_limit(0) < Matchmaker.fairness_limit(20) and Matchmaker.fairness_limit(60) == 1.0,
+		"the accepted unfairness widens with waiting, then anyone will do")
 
 
 func _test_tiebreak() -> void:
@@ -82,7 +80,10 @@ func _test_live_ranked_flow() -> void:
 	var q_async := await b.queue_ranked(acc1["player_id"], acc1["secret"], squad, "async")
 	_check(str(q_async["body"].get("status")) == "queued", "live and async queues don't mix")
 	var q1 := await b.queue_ranked(acc1["player_id"], acc1["secret"], squad, "live")
-	_check(str(q1["body"].get("status")) == "matched" and str(q1["body"].get("mode")) == "live", "live queue pairs")
+	_check(str(q1["body"].get("status")) == "found", "live queue pairs (ready check pending)")
+	await b.accept_queue(q0["body"]["ticket"], acc0["secret"])
+	q1 = await b.accept_queue(q1["body"]["ticket"], acc1["secret"])
+	_check(str(q1["body"].get("status")) == "matched" and str(q1["body"].get("mode")) == "live", "both accepted: live match made")
 	var p0 := await b.poll_queue(q0["body"]["ticket"], acc0["secret"])
 	var match_id := str(p0["body"]["match_id"])
 
@@ -156,6 +157,8 @@ func _test_forfeit_and_delete() -> void:
 	var squad := PlanCodec.encode_squad(TriggerLibrary.sample_units())
 	var q0 := await b.queue_ranked(acc0["player_id"], acc0["secret"], squad, "live")
 	var q1 := await b.queue_ranked(acc1["player_id"], acc1["secret"], squad, "live")
+	await b.accept_queue(q0["body"]["ticket"], acc0["secret"])
+	q1 = await b.accept_queue(q1["body"]["ticket"], acc1["secret"])
 	var match_id := str(q1["body"].get("match_id", ""))
 	var c0 := _client(match_id, str((await b.poll_queue(q0["body"]["ticket"], acc0["secret"]))["body"]["token"]))
 	await _wait(func() -> bool: return c0["state"].size() > 0, 2.0)
@@ -194,7 +197,7 @@ func _test_controller_buzzer() -> void:
 
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var board := HexBoard.new()
+	var board := CityBoard.new()
 	board.hex_size = 1.0
 	add_child(board)
 	var timeline := TimelineUI.new()
@@ -220,6 +223,61 @@ func _test_controller_buzzer() -> void:
 	_check(controller._turn >= 2, "pushed result replayed and the next turn began")
 	controller._live.close()
 	MatchSession.live = false
+
+
+## The Surrender button: two taps concede. Local = instant defeat; live =
+## the server records a forfeit and pushes the result back.
+func _test_surrender_button() -> void:
+	var squad := TriggerLibrary.sample_units()
+	MatchSession.mode = MatchSession.Mode.LOCAL
+	MatchSession.live = false
+	var local := _controller(squad)
+	local._on_surrender_pressed()
+	_check(not local._over_shown and local._surrender_btn.text.begins_with("Tap again"), "first tap only arms surrender")
+	local._on_surrender_pressed()
+	_check(local._over_shown and local._result_label.text == "DEFEAT" and local._turn_info.text.contains("You surrendered"),
+		"local surrender ends in defeat")
+
+	var b := _backend()
+	var created := await b.request("POST", "/match/create", { "seed": 4, "squad": PlanCodec.encode_squad(squad), "mode": "live" })
+	var match_id := str(created["body"]["match_id"])
+	await b.join_match(match_id, PlanCodec.encode_squad(squad))
+	MatchSession.mode = MatchSession.Mode.ONLINE
+	MatchSession.live = true
+	MatchSession.live_url = LIVE_URL
+	MatchSession.server_url = URL
+	MatchSession.match_id = match_id
+	MatchSession.team = 0
+	MatchSession.token = str(created["body"]["token"])
+	var live := _controller(squad)
+	await _wait(func() -> bool: return live._live != null and live._live.is_open(), 3.0)
+	live._on_surrender_pressed()
+	live._on_surrender_pressed()
+	await _wait(func() -> bool: return live._over_shown, 3.0)
+	var m: Dictionary = _server._matches[match_id]
+	_check(int(m["winner"]) == 1 and str(m["end_reason"]) == "forfeit", "live surrender reaches the server")
+	_check(live._over_shown and live._result_label.text == "DEFEAT" and not live._rematch_btn.visible,
+		"live surrender shows the result (no local rematch)")
+	live._live.close()
+	MatchSession.live = false
+	MatchSession.mode = MatchSession.Mode.LOCAL
+
+
+func _controller(squad: Array[UnitData]) -> MatchController:
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	var board := CityBoard.new()
+	board.hex_size = 1.0
+	add_child(board)
+	var timeline := TimelineUI.new()
+	layer.add_child(timeline)
+	timeline.setup(squad)
+	var event_log := EventLogUI.new()
+	layer.add_child(event_log)
+	var controller := MatchController.new()
+	add_child(controller)
+	controller.setup(board, timeline, event_log, layer)
+	return controller
 
 
 # --- Helpers ------------------------------------------------------------------

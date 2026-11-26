@@ -47,8 +47,9 @@ func _ready() -> void:
 ## bottom timeline), since it lives directly under a CanvasLayer.
 func _fit_viewport() -> void:
 	var vs := get_viewport().get_visible_rect().size
-	position = Vector2(vs.x - 368.0 - 12.0, 52.0)
-	size = Vector2(368.0, maxf(0.0, vs.y - 52.0 - 262.0))
+	var top := TimelineUI.TOP_BAR_HEIGHT + 6.0
+	position = Vector2(vs.x - 368.0 - 12.0, top)
+	size = Vector2(368.0, maxf(0.0, vs.y - top - TimelineUI.PANEL_HEIGHT - 6.0))
 
 
 func set_turn(n: int) -> void:
@@ -66,11 +67,13 @@ func add_event(ev: CombatEvent) -> void:
 
 ## Server replay events arrive as encoded dictionaries (PlanCodec.encode_events).
 func add_event_dict(d: Dictionary) -> void:
-	add_message("[T%d] %s" % [int(d.get("tick", 0)) + 1, str(d.get("message", ""))], _phase_color(int(d.get("phase", -1))))
+	add_message("[%.1fs] %s" % [float(d.get("time", 0.0)), str(d.get("message", ""))], _phase_color(int(d.get("phase", -1))))
 
 
 func add_message(text: String, color: Color = Color(0.9, 0.92, 0.95)) -> void:
-	_entries.append("[color=#%s]%s[/color]" % [color.to_html(false), text.xml_escape()])
+	# "[" starts a BBCode tag: escape it so text from the network (unit and
+	# player names inside combat messages) can never inject markup.
+	_entries.append("[color=#%s]%s[/color]" % [color.to_html(false), text.replace("[", "[lb]")])
 	if _entries.size() > MAX_ENTRIES:
 		_entries.pop_front()
 	_render()

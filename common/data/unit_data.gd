@@ -8,13 +8,18 @@ const MAX_SUB_SLOTS: int = 4
 
 @export var unit_name: String = ""
 @export var base_trion_hp: int = 0
-@export var base_at_pool: int = 8
+## Action speed multiplier from Stamina (1.0 = standard; see Talents).
+@export var tempo: float = 1.0
 @export var mobility_rating: int = 0
 @export var attack_rating: int = 0
 @export var defense_rating: int = 0
 ## Max Trion loadout budget (section 6.1 of the GDD).
 @export var max_trion_capacity: int = 100
 @export var main_trigger_slots: Array[TriggerCard] = []   # Max 4
+## Talent points spent on this character (see Talents; stats derive from them).
+@export var talent_stamina: int = 0
+@export var talent_hp: int = 0
+@export var talent_atk: int = 0
 @export var sub_trigger_slots: Array[TriggerCard] = []    # Max 4
 
 

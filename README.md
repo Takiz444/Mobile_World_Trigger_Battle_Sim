@@ -1,8 +1,9 @@
 # Trion Tactics (World Trigger Battle Sim)
 
 Cross-platform online turn-based strategy game built in **Godot 4.6**.
-Simultaneous-execution 4v4 hex-grid skirmishes based on the *World Trigger*
-Away Mission Test Battle Simulation Exercise.
+Simultaneous-execution 3v3 skirmishes in a low-poly **Tokyo** (real districts
+built from OpenStreetMap), with free movement and time-based turns, based on
+the *World Trigger* Away Mission Test Battle Simulation Exercise.
 
 See `Project Docs/GDDV1.pdf` for the full design document.
 
@@ -13,15 +14,15 @@ See `Project Docs/GDDV1.pdf` for the full design document.
 /common/           # Shared resources, math, and data definitions
     /hex_grid/     # Hexagonal grid math (axial coords, pathfinding, mesh)
     /data/         # Core Resource/RefCounted definitions
-    /combat/       # Deterministic tick engine + shared match runner
+    /combat/       # Deterministic continuous-time turn engine + shared match runner
     /net/          # JSON codec, HTTP client, HTTP server
 /entities/         # Units, actors (future)
 /ui/
-    /timeline/     # 6-tick timeline ribbon + drag-and-drop planning UI
+    /timeline/     # two 6-second lanes per character (the planning UI)
     /event_log/    # On-screen combat log panel
     /hangar/       # pre-match deck-builder (Trigger Holder + Trion budget)
 /levels/
-    /board/        # 3D tabletop diorama (hex board + camera + controller)
+    /board/        # 3D city diorama (board + camera + controller)
 /server/           # Headless REST backend (async multiplayer)
 /test/             # Headless smoke / networking tests
 /addons/           # Third-party plugins
@@ -31,58 +32,151 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ## Implemented So Far
 
-### Hex Grid Math — `common/hex_grid/hex_coord.gd`
-- Axial ⇄ cube conversion, neighbors/ring/line, 3D (XZ) mapping, deterministic A*.
+### How a turn works
+- **Free movement.** Characters stand anywhere on the street, inside a
+  building on its ground floor, or on a roof (`common/map/city_geometry.gd`). A tapped
+  destination is routed around buildings (A* on a fine grid + string
+  pulling); entering a building, stairs, and Grasshopper jumps take time.
+- **Time, not tokens.** Each turn every character gets **6 seconds** and two
+  lanes that run side by side (`common/data/turn_plan.gd`): **Movement**
+  (Move, Jump, Wait) and **Actions** (attacks, Shield, Look, Bagworm, Spider,
+  Wait). Every action takes time (`TriggerCard.action_time`, e.g. Kogetsu
+  1.8 s, Ibis 2.4 s); a lane must fit in the turn.
+- **Stamina = speed.** Stamina talents raise a character's tempo: every
+  action takes less time and it walks faster, so more fits in a turn.
+- **Resolution** (`common/combat/turn_engine.gd`): both squads' plans play out
+  at once in 0.05 s steps. Attacks land when their wind-up ends, all against
+  the same moment; moves that would bump into someone wait (the same rule for
+  everyone, whatever the order). The server records a fog-filtered frame
+  every 0.25 s that the client replays smoothly.
 
 ### Data Definitions — `common/data/`
-- `trigger_card.gd`, `unit_data.gd` (8-slot Trigger Holder + Trion budget),
-  `tick_action.gd`, `turn_plan.gd` (6-tick AT economy), `trigger_library.gd`
-  (13-card catalog + `get_card(name)` for network serialization).
+- `trigger_card.gd` (action time, reach in metres, traits), `unit_data.gd`
+  (8-slot Trigger Holder + Trion budget, tempo), `plan_action.gd`,
+  `turn_plan.gd` (the two time lanes, timing, validation), `trigger_library.gd`
+  (13-card catalog + Move / Look / Wait).
 
 ### Global State — `common/squad_store.gd` / `common/match_session.gd`
 - `SquadStore` — static player squad (survives Hangar → Battle).
 - `MatchSession` — static online config (mode, server URL, match id, team).
 
-### City Map — `common/map/map_data.gd`
-- The 32×32 flat-top hex map from `Project Docs/Map refrence with building.png`,
-  traced hex by hex: the scan's hex lattice was fitted and every hex classified
-  as street or building, so streets and building footprints match the sheet
-  (472 building hexes in 40 blocks; the sheet is point-symmetric, so it's fair).
-- The sheet is top-down and shows no heights: each block is split into
-  rectangular segments (towers with lower wings), each with its own height
-  (1–4 floors), mirrored across the map so both sides stay fair. Edit the
-  digits in `LAYOUT` to change them (keep a segment's hexes the same digit).
-- Spawns: four streets along each short edge. Shared by client and server.
+### The Battlefield: Tokyo — `common/map/tokyo_map.gd`
+- **The city is Tokyo**, built from official and open map data in a
+  low-poly style: every building footprint and its **measured height** from
+  **Project PLATEAU** (MLIT's 3D city model of the 23 wards), checked against
+  the **GSI** national base map; streets, railways, water, parks and street
+  furniture from **OpenStreetMap**. Twelve real districts ship with the game (`common/map/tokyo/`):
+  Shibuya (Scramble Crossing), Shinjuku (Kabukicho), Akihabara, Ginza,
+  Asakusa (Kaminarimon & the Sumida), Ikebukuro, Ueno (Ameyoko), Roppongi,
+  Harajuku, Nihonbashi, Shimokitazawa, and Shiba (Tokyo Tower & Kamiyacho).
+  Each is a square of real city 800–960 m a side at **1 game unit = 2.5 m**,
+  turned so its main street grid runs along the screen axes.
+- **Every match is fought in a battle zone** in the built-up city (at least
+  half of the zone's blocks covered by buildings: no empty grounds): a set
+  of whole city blocks
+  the **size and shape of the original battle map** (the 32×32 hex sheet:
+  about 2,730 square units, 48.5 × 56.3, roughly 130 m across; zones are
+  never longer than 1.6 to 1) with a border you can read on the ground:
+  - small streets and footpaths around and between its blocks are in the
+    zone at full width (the border runs along the far curb),
+  - avenues, highways and railways are a hard edge (the border runs along
+    the near curb) unless the zone takes the blocks on both sides,
+  - big parks are their own blocks; a park too big for a zone is divided
+    along footpaths (drawn on the ground),
+  - medians and traffic islands count as road, so no zone grabs a strip of
+    an avenue; by a river the zone takes a strip of water along the bank.
+  - zones are **as rectangular as the blocks allow**: the build
+    (`tools/tokyo/zones.py`) tries rectangles turned to the local street
+    grid, keeps the blocks mostly inside, and prefers the zones that fill
+    most of their rectangle; the outline is then straightened (sides along
+    the streets snapped to them, small steps folded in), so the red line is
+    a few clean straight sides,
+  - zones keep **80 m (32 units) clear of the edge of the map data**.
+  A well-spread set is kept per district (`common/map/tokyo/*.json` "zones").
+  The server picks one from the match seed (`TokyoMap.random_section`) and
+  sends it as `"map": ["asakusa", 12]`; it is saved with the match. Outside
+  the zone nothing can be reached (street, roof or interior). Around it the
+  rest of the district is drawn as **plain grey boxes** on ground that
+  **darkens in a gradient** away from the zone (per pixel, from the zone
+  polygon), and a **red line and low red curtain** follow its edge. Where
+  the map data ends the city fades into **fog** along a wavy front: no
+  made-up blocks, no hard edge.
+- **City geometry** (`common/map/city_box.gd`, `city_geometry.gd`): every
+  solid thing is an oriented box (real streets run at every angle):
+  *buildings* (enterable: ground floor + roof, 1–7 floors), *sealed solids*
+  (skyscrapers over ~20 storeys, temples, viaduct and expressway piers, gate
+  posts: block walking and sight, nobody stands on them), and *elevated
+  decks* (JR / metro viaducts, the Shuto Expressway, gate roofs: block sight
+  between their heights only, you walk underneath). Rivers, canals and
+  fenced at-grade railways (`blocked_mask.gd`) can't be walked on but are
+  seen across; bridges and level crossings cross them, and Grasshopper can
+  jump a narrow canal. Tapping a spot nobody can reach says why ("That's
+  the Sumida River…", "Railway tracks are fenced off…", "That's outside the
+  battle zone…", `CityGeometry.why_not`). The same boxes are drawn, traced for sight, and used
+  for physics, and tests check they agree.
+- **Heights** are PLATEAU's measured heights, compressed so streets stay
+  visible from the camera: under 7.5 m → 1 floor, 12 → 2, 18 → 3, 25 → 4,
+  34 → 5, 45 → 6, 60 m → 7 floors (all enterable); taller buildings are
+  sealed towers drawn up to 22 units high. Footprints that overhang a
+  carriageway are trimmed, so roads stay open.
+- **Checked against the real map**: each district's build records how well
+  it matches (`"quality"` in its JSON): PLATEAU covers 89–99% of the GSI base
+  map's buildings, and the game's boxes reproduce 90%+ of the PLATEAU
+  footprints at 98%+ precision; `tokyo_test` enforces these.
+- **Map data pipeline** (`tools/tokyo/`, see its README): `fetch_osm.py`
+  downloads each district from the Overpass API, `build_districts.py`
+  simplifies it (oriented boxes, triangulated water / parks / land,
+  roads and rail as polylines, decks + piers, street furniture placement)
+  into the JSON the game loads. Add a district by adding it to
+  `districts.py` and re-running both. **Map data © OpenStreetMap
+  contributors (ODbL)**: the credit is shown in every battle.
+- The old 32×32 hex map sheet (`map_data.gd`, from
+  `Project Docs/Map refrence with building.png`) is kept for test arenas and
+  so matches saved before Tokyo can finish. The Welcome screen's **Test**
+  button (bottom left) starts an offline match vs AI on a random half of
+  the sheet (`MapData.random_section`, new each match)
+  (`MatchSession.test_stage`, cleared by the Hangar) for development.
+- Spawns: random open street spots in the section's largest connected
+  street area; nobody, friend or foe, starts within about 7 m of anyone else
+  (`MatchRunner.SPAWN_MIN_DISTANCE`), each facing its most open street.
+  Derived from the hidden match seed, so the server can rebuild a match but
+  players can't predict enemy positions.
+
+### Squad & Talents — `common/data/talents.gd`
+- Three playable characters: **Assassin** (blades, stealth, jump),
+  **Sniper** (Egret / Ibis), **Scout** (Hound / Asteroid, Spider, Lead Bullet).
+- Every squad has the same **talent pool** (`Talents.POINTS` = 9) to spread
+  over its characters: **Stamina** (+10% speed: actions take less time, faster on foot), **HP** (+15 Trion),
+  **ATK** (+1 damage per hit), at most 4 points per stat. Stats are derived
+  from talents on the server; client-sent stats are only checked, never
+  trusted. The squad (loadouts + talents) is saved in `user://squad.json`.
 
 ### Combat Resolution — `common/combat/`
-- `unit_state.gd`, `match_state.gd`, `combat_event.gd`
-- `tick_engine.gd` — deterministic 6-tick pipeline (resumable per-tick).
-  Simultaneous movement on (hex, floor) cells, per-slot targets (Main and Sub
-  aim independently), buildings block shots, and Bagworm as a per-turn toggle
-  (1 AT per turn, drops when attacking).
-- Trigger behaviour (`TriggerCard` traits): Scorpion strikes around shields,
-  Raygust shields while swinging, Viper curves around buildings, Hound homes
-  (+hit, ignores half cover), Egret/Ibis are long-range snipers (Ibis pierces
-  shields), Lead Bullet weighs targets down (no moving or dodging for 6 ticks),
-  Grasshopper jumps 2 hexes or onto rooftops.
-- GDD 5.3 combos: **Melee Assist** (an ally next to your melee target follows
-  up for free) and **Crossfire Assist** (an ally with the target in its firing
-  arc follows up for half AT from its unspent pool). **Wire Mobility
-  Penchant**: on your own team's Spider wires you get +20% defense, +10%
-  evasion, and a 2-hex wire dash.
-- `visibility.gd` — per-character vision and fog of war (GDD 4.3). Each unit
-  has a long narrow **focus cone**, a wide short **peripheral cone**, and an
-  all-round awareness radius. Sniper scopes extend the focus range; each
-  floor of height adds range. Line of sight is traced in 3D (eye height to
-  body height) against the real building boxes (`common/map/building_rects.gd`,
-  the same geometry that's rendered), so nobody sees through a building.
-  Units inside buildings see and are seen only from near the outer wall. Unseen enemies show as radar pings offset 1–2 hexes;
-  Bagworm hides from radar until within 3 hexes.
-- Facing matters: units turn toward what they attack, and the free **Look**
-  action (0 AT, no Mental Load) turns a unit to watch a hex after moving.
-- `match_runner.gd` — shared squad placement, turn resolution, winner detection,
-  and the GDD 3.1 "Stand Ground + Shield" fallback plan. Used by both the local
-  client and the headless server.
+- `unit_state.gd` (position, level, facing angle), `match_state.gd` (squads,
+  city, Spider wires), `combat_event.gd` (timestamped).
+- `turn_engine.gd` — the deterministic continuous-time turn (see above).
+  An attack targets an enemy character and only goes off if the attacker's
+  team sees the target at that moment and has a clear line (Viper curves
+  around buildings); melee needs the target within reach on the same level.
+  Failed shots read the same whatever the reason, so they reveal nothing.
+- Triggers: Scorpion strikes around shields, Raygust shields while swinging,
+  Viper curves, Hound homes (+hit, beats a moving target's dodge), Egret /
+  Ibis are long-range snipers (Ibis pierces shields), Lead Bullet roots the
+  target for 3 s, Grasshopper jumps onto roofs, Spider strings a wire your
+  team gets +defense / +dodge on. A **Shield** is held for as long as you
+  choose; standing still behind it is a **Full Guard** (all round, x1.5).
+  Shooting on the move is less accurate; moving targets dodge straight shots.
+- `visibility.gd` — per-character vision and fog of war (GDD 4.3): a short
+  all-round **detection radius** (3.5 m) and a long **sight cone** (15.6 m,
+  ±45°) in the facing direction. Scopes and height extend the sight range.
+  Line of sight is traced in 3D against the real building boxes (the same
+  geometry that's rendered), so nobody sees through a building; characters
+  inside buildings see and are seen only near the outer wall. Unseen enemies
+  show as radar pings a few metres off; Bagworm hides from radar until close.
+- **Look** keeps a character watching a point, even while it walks.
+- `match_runner.gd` — squad placement, the turn recorder (shared by the
+  server and local play), winner detection, and the "Stand Ground + Shield"
+  AFK fallback.
 
 ### Networking — `common/net/`
 - `plan_codec.gd` — JSON (de)serialization for squads, plans, and results
@@ -92,9 +186,19 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 
 ### Headless Backend — `server/server.gd`
 - REST API: `GET /health`, `POST /match/create`, `POST /match/{id}/join`,
-  `POST /match/{id}/submit`, `GET /match/{id}`.
+  `POST /match/{id}/submit`, `GET /match/{id}`, `POST /account/matches`
+  (resume a running match after a restart).
 - Create/join return a secret per-player `token`; submits are attributed to a
-  team by token only, and must name the current `turn`.
+  team by token only, and must name the current `turn`. Tokens and account
+  secrets travel in the JSON body or an `Authorization: Bearer` header,
+  never in the URL.
+- Security model (regression-tested in `test/security_test.gd`): the server
+  picks every match seed and never sends it (it drives the hit rolls); radar
+  ping offsets are keyed with a per-match secret; failed attacks reveal
+  nothing about unseen units; enemy Spider wires are sent only when in sight;
+  account secrets are stored hashed; names are stripped of markup; per-client
+  limits on account creation, match creation, and failed logins; responses
+  are written without blocking the server loop.
 - Accounts + ranked matchmaking: `POST /account/register`, `GET /account/{id}`,
   `GET /leaderboard`, `POST /queue` (pairs the waiting player closest in
   rating), `GET /queue/{ticket}`, `POST /queue/{ticket}/cancel`. Ranked results
@@ -102,10 +206,10 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   **Async Ranked** buttons register once per server (saved in
   `user://account.json`) and queue.
 - Validates every squad (standard stats, slot rules, Trion budget) and plan
-  (only equipped cards, AT budget) before accepting it.
+  (only equipped cards, reachable routes, both lanes inside the 6-second turn) before accepting it.
 - Server-authoritative deterministic resolution via `MatchRunner`, with
   server-enforced fog of war: `GET /match/{id}?token=…` returns only that
-  team's view (own units, enemies in sight, radar pings) and per-tick replay
+  team's view (own units, enemies in sight, radar pings) and replay
   frames filtered the same way. The opponent's plans and the full state never
   leave the server. Clients catch up on missed turns from the history.
 - Matches persist to disk (`TT_DATA_FILE`, default `user://matches.json`) and
@@ -125,34 +229,104 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
   waiting; live and async queues are separate.
 - Reconnects resync automatically; `POST /account/delete` deletes an account
   (App Store requirement).
+
+### Sign-in & Profiles — `ui/welcome/`, `ui/profile/`
+- **First screen** (`ui/welcome/welcome.tscn`, the main scene): sign in with
+  email + password, create an account, or **Continue as Guest**. Signed-in
+  players go straight to the Hangar. **Test** (bottom left) opens the
+  development test stage on the original map. Guests can play everything: offline
+  needs no account, and online play makes a guest account kept on that
+  device only. Creating an account while a guest account is saved moves its
+  trophies and history to the new account.
+- Server: `POST /account/signup`, `/account/login`, `/account/logout`,
+  `/account/profile`, `/account/password_reset`. **Auth0** (`TT_AUTH0_*`,
+  `server/auth0_client.gd`) holds the passwords and sends verification and
+  password-reset emails; the server checks credentials with Auth0 and links
+  each account to its Auth0 user. Without Auth0 (development), passwords are
+  stored as PBKDF2-HMAC-SHA256 hashes (`server/password_hash.gd`), computed
+  on a worker thread so a login never stalls the match clocks. Setup:
+  `deploy/README.md` ("Auth0"). Each signed-in device gets its own session
+  secret; emails are never shown to other players. Wrong passwords count
+  toward the failed-login lockout.
+- **Profile** (Hangar → Profile): current rank (trophies + arena), max rank
+  (best trophies + arena), ladder position, skill rating (now / peak), win
+  rate with W/L/D, current and best win streak, **favorite move** (most used
+  trigger or action, with the top 5), and the last 50 matches (result,
+  opponent, mode, how it ended, turns, units standing, trophy change). Every
+  finished match with an account in a seat counts: ranked, and friendly rooms
+  created or joined while you have an account. Auto-filled turns don't count
+  toward move stats.
 - Launch plan, App Store checklist, and scaling path:
   `docs/multiplayer/LAUNCH_PLAN.md`.
+- **Surrender** button in battle (two taps to confirm) in every mode.
 
-### Hex Mesh & Board — `common/hex_grid/hex_mesh.gd`, `levels/board/`
-- Procedural hex-prism meshes, hover/selection raycasting, orbit/pan/zoom camera.
-- `board_units.gd` — team-colored markers standing on the tile surface,
-  tweened movement/facing, damage flash, bail-out, and radar-ping markers.
-- `city_buildings.gd` + `building.gdshader` — the city: building hexes merge
-  into clean rectangular segments with window-grid facades, floor lines,
-  parapets, and rooftop equipment (water tanks and antennas on towers). Heights
-  come from the map, so rooftops always match where units stand.
-- `hex_board.gd` — street tiles, roof-level pick colliders and highlight caps
-  for building hexes (clipped to the building's footprint, so highlights never
-  spill past a wall), cover props, and the fog overlay.
-- `board_units.gd` — low-poly Border agents in Trion combat suits (team-colored
-  jacket, dark trousers, emblem, team ring) with a role weapon from the
-  loadout: glowing blade, sniper rifle, or a floating Trion cube. Figures turn
-  to face their facing. Units hidden behind or inside buildings show as
-  team-colored x-ray silhouettes; the selected character's vision cones are drawn on the board
-  at its planned position and facing.
+### Persistence — `server/db/`
+- `GameStore` interface; the server keeps live state in memory and writes
+  only changed records behind itself. Pick a backend with `TT_STORE`:
+  `json` (one file, default for dev), `dir` (one file per record),
+  `mongo` (**MongoDB**, the default for new deployments), `postgrest`
+  (Postgres through PostgREST; schema in `deploy/db/`). Network stores batch,
+  coalesce, and retry writes through outages.
+- **MongoDB** (`server/db/mongo_store.gd` + `deploy/mongo-gateway/`): Godot has
+  no MongoDB driver, so a small Node service with the official driver (the
+  "gateway", internal only, token-protected) does the database work. Each
+  record kind is a collection (`accounts`, `matches`, `tickets`, `meta`) and
+  each record a plain document keyed by its id, so you can query it directly,
+  e.g. `db.accounts.find({ email: "…" })`. Accounts have a unique email index.
+  `import-dir.js` / `export-dir.js` move data between the file store and
+  MongoDB (migration and backups).
+- Old tickets and unjoined matches are pruned; finished matches leave memory
+  after `TT_MATCH_RETENTION_SEC` (default 24 h) but stay in the store.
+
+### Connection layer — `common/net/`
+- `GameConnection` (client): server choice, version handshake against
+  `NetProtocol` (old builds are told to update), Online / Offline / Update
+  status, account recovery, and the matchmaking flow. `HttpBackend` is the
+  transport: concurrent requests, timeouts, GET retries.
+- Server hardening (`HttpServer`, `LiveHub`): body/header size limits,
+  request timeouts, per-client rate limit (`TT_TRUST_PROXY=1` behind Caddy),
+  WebSocket keepalive with dead-link detection, 4 MB resync buffers.
+
+### Board — `levels/board/`
+- `city_board.gd` — free picking (street or roof; sealed towers refuse a
+  move), planning overlays (routes, range circles, target markers, Spider
+  wires), and the city: Tokyo (`tokyo_city.gd`) or the old hex sheet
+  (`city_buildings.gd`).
+- `tokyo_city.gd` + `tokyo_building.gdshader` — the low-poly city: every
+  box of the district in one MultiMesh, with facades per building type
+  (houses, balcony-banded apartments, office ribbon glass, lit shopfronts,
+  glass towers), varied roofs and rooftop clutter; physics solids and roof
+  pick bodies for the play area; the district beyond as scenery.
+- **Cutaway**: walls and roofs between the camera and the selected
+  character are cut away in a small dithered circle, so it and the street
+  around it stay visible among tall buildings.
+- `tokyo_ground.gd` + `tokyo_water.gdshader` — land (block interiors darker
+  than the sidewalks that line every street), parks, roads with curbs, lane
+  markings and zebra crossings (Shibuya's diagonal scramble too), rivers sunk
+  between railed embankment walls with moving faceted water, bridges, fenced
+  railway tracks. Yakatabune and water buses bob on the bigger rivers.
+- `tokyo_props.gd` + `low_poly.gd` — street furniture (trees, with autumn
+  ginkgo, lamps, utility poles and wires, vending machines, neon blade signs
+  and screens, traffic signals, torii) and landmarks (Tokyo Tower,
+  Kaminarimon with its lantern, the Kabukicho gate, pagodas and temple
+  roofs, Skytree on Asakusa's skyline, Tokyo Tower as a full lattice over
+  its Foot Town). Open-air parking lots are asphalt with parked cars. Flat-shaded vertex-colored meshes
+  sharing two materials.
+- `place_banner.gd` — the "SHIBUYA · Scramble Crossing" title card at the
+  start of a match and the map-data credit.
+- `board_units.gd` — low-poly agents with a role weapon; they glide between
+  replay frames, turn to their facing, flash on hits, and bail out. Hidden or
+  indoor characters show as x-ray silhouettes; radar pings show unseen enemies.
 - `board_camera.gd` — camera clamped to the map and framed around the UI.
-- `match_controller.gd` — local (vs AI) and online (async) match orchestration,
-  multi-turn lifecycle, win/loss overlay, and replay animation.
+- `match_controller.gd` — local (vs AI) and online match orchestration. Local
+  play keeps the real match hidden and replays only our team's view of it, the
+  same pipeline as online, so the planning UI never knows more than you do.
 
 ### UI — `ui/timeline/`, `ui/event_log/`, `ui/hangar/`
-- Timeline: unit tabs, 6-tick Main/Sub ribbon, draggable card hand, AT meter.
+- Timeline: unit tabs, the two 6-second lanes on a ruler (blocks as wide as
+  the time they take), action cards, hold-time stepper for Shield / Wait.
 - Event log: color-coded, auto-scrolling combat log.
-- Hangar: Trigger Holder deck-builder with Trion budget + async multiplayer
+- Hangar: talent points panel + Trigger Holder deck-builder with Trion budget + async multiplayer
   host/join controls.
 
 ## Run It
@@ -160,26 +334,33 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 **Local play:** open the project in Godot and press F5 (main scene is the Hangar).
 
 **Flow:**
-1. **Hangar** — configure each unit's Trigger Holder, then **Start Match**
-   (local vs AI), **Host Online Match** / **Join** (friendly match by ID),
-   **Live Battle** (live trophy ladder), or **Async Ranked** (correspondence).
-2. **Battle** — click a tick slot → click a hex to target it → drag cards into
-   slots → **Submit All** to watch the animated replay in the combat log.
+1. **Squad Setup (Hangar)** — spend the talent points and configure each
+   character's Trigger Holder, then **Start Match** (local vs AI), **Host
+   Online Match** / **Join** (friendly match by ID), **Live Battle** (live
+   trophy ladder), or **Async Ranked** (correspondence).
+2. **Battle** — tap a character (top tab or on the board): the camera zooms
+   in and the spotlight shows exactly what it can see. Tap an action card: it
+   goes on the end of its lane (Movement or Actions). Aim it on the board:
+   tap the street or a roof for a move (tap a building again for lower
+   floors), an enemy for an attack, a spot for Look / Spider. Blocks are as
+   wide as the time they take; each lane must fit in 6 seconds. Then
+   **Submit Turn** and watch both squads' plans play out together.
 3. Turns advance until one squad bails out entirely; a victory/defeat overlay
    offers Rematch or Return to Hangar.
 
-**Vision:** select a unit to see its focus cone, peripheral cone, and
-awareness ring. The cones are built from 3D physics raycasts from the
-character's eye against the buildings' solid bodies, so they stop at walls,
-and shadow-casting lights from the eye show the same view as light and
-shadow. (The rules use exact ray-vs-box math on the same geometry, and the
-smoke test checks the two agree.) Drag **Look** into a slot and click a hex to choose where it
-watches (free). Rooftops see farther; stand by an outer wall to see out of a
-building.
+**Vision:** every character's vision is drawn as one shape: the detection
+circle plus the sight cone. For the selected character it is also the
+spotlight: everything that character can't see is dimmed. The rest of the
+squad's are faint, so you can see where everyone is looking. Badges over each
+character (pinned to the screen edge when off screen) show where your troops
+are and which way they face; tap one to command that character. The shapes
+come from 3D physics raycasts against the buildings (the rules use exact
+ray-vs-box math on the same geometry, and the smoke test checks the two
+agree). Rooftops see farther; stand by an outer wall to see out of a building.
 
 **Controls:** mouse — scroll to zoom, middle-drag to pan, right-drag to
-rotate, right-click a slot to clear it. Touch — drag to pan, pinch to zoom,
-twist to rotate, tap to select, double-tap a slot to clear it. The UI scales
+rotate, right-click a block to remove it. Touch — drag to pan, pinch to
+zoom, twist to rotate, tap to select, double-tap a block to remove it. The UI scales
 to the screen (1280×720 base, landscape).
 
 ## Run the Async Backend (Phase 3)
@@ -193,7 +374,15 @@ godot --headless --path . res://server/server.tscn
 #   TT_LIVE_PORT=8081          live WebSocket port (default TT_PORT + 1)
 #   TT_PUBLIC_LIVE_URL=wss://play.example.com/live   advertised to clients
 #   TT_ADMIN_KEY=<secret>      enables /admin endpoints (season reset)
+#   TT_STORE=dir TT_DATA_DIR=store   one file per record (or postgrest + TT_DB_URL)
+#   TT_STORE=mongo TT_MONGO_GATEWAY_URL=http://127.0.0.1:8095 TT_MONGO_GATEWAY_TOKEN=dev-token
 ```
+
+Settings and secrets go in **`deploy/.env`** (copy `deploy/.env.example`):
+the server reads it at startup when run as `server.tscn`, and so does the
+Mongo gateway. See `deploy/README.md` ("Where settings go") for MongoDB and
+Auth0. MongoDB locally without installing it: `cd deploy/mongo-gateway &&
+npm ci && npm run dev` (a throwaway in-memory MongoDB plus the gateway on `:8095`).
 
 **Production:** `deploy/` has a Docker image and a Compose stack with Caddy
 for automatic HTTPS/WSS (required on iOS):
@@ -214,13 +403,21 @@ expires), the server resolves deterministically and both clients replay it.
 
 ```bash
 godot --headless --path . res://test/rules_test.tscn   # combat rules + server validation
+godot --headless --path . res://test/tokyo_test.tscn   # Tokyo map: data, sections, boxes, water, render = rules
 godot --headless --path . res://test/smoke_test.tscn   # local multi-turn flow
 godot --headless --path . res://test/net_test.tscn     # backend create/join/submit/resolve
 godot --headless --path . res://test/online_test.tscn  # full online client flow
-godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies
+godot --headless --path . res://test/live_test.tscn    # live ladder, clock, AFK, trophies, surrender
+godot --headless --path . res://test/store_test.tscn   # persistence: restart, Postgres/Mongo (fakes), outage
+godot --headless --path . res://test/account_test.tscn # sign-in, sessions, guest upgrade, profiles, history
+godot --headless --path . res://test/auth0_test.tscn   # Auth0 sign-in (fake Auth0), deploy/.env loading
+cd deploy/mongo-gateway && npm test                    # the Mongo gateway against a real mongod
+godot --headless --path . res://test/security_test.tscn  # abuse / cheating regressions (rules + server)
+godot --headless --path . res://test/stress_test.tscn    # random plans over many turns: client and server agree
 ```
 
-CI (`.github/workflows/tests.yml`) runs all suites and builds the server image.
+CI (`.github/workflows/tests.yml`) runs all suites, the gateway tests, the store
+test against a real gateway + MongoDB, and builds both images.
 
 Each prints `PASS`/`FAIL` and exits non-zero on failure.
 
@@ -230,15 +427,24 @@ Each prints `PASS`/`FAIL` and exits non-zero on failure.
 godot --path . res://test/screenshot.tscn -- out.png [ortho_size] [pitch_deg] [turns]
 ```
 
+**Tokyo map views** (any district or section, the game's lighting):
+
+```bash
+godot --path . res://test/tokyo_shot.tscn -- out.png shibuya [ortho] [pitch] [yaw] [dx] [dz]
+godot --path . res://test/tokyo_shot.tscn -- out.png 1234      # random section of seed 1234
+```
+
 After adding new `class_name` scripts, run `godot --headless --editor --quit --path .`
 once so Godot registers them before running headless tests.
 
 ## Next Up
 
 - Launch blockers and next steps are tracked in `docs/multiplayer/LAUNCH_PLAN.md`
-  (IP licensing, account-deletion UI, Sign in with Apple, Keychain, iOS export).
+  (IP licensing, Sign in with Apple / Steam login, Keychain, store exports).
+- Before a store build: set `ServerConfig.PRODUCTION_URL`
+  (`common/net/server_config.gd`) and fill `common/net/blocked_names.txt`.
 - Real-time spectating over the live channel (GDD 2.2).
-- Phase 4 polish: low-poly models, toon shaders, and balancing AT costs,
+- Phase 4 polish: low-poly models, toon shaders, and balancing action times,
   Trion weights, and penchant modifiers from playtests.
 - Scale-out: the JSON store suits one server; Postgres + match workers for
   many (see the launch plan).

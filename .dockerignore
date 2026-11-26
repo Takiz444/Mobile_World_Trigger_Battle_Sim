@@ -1,6 +1,8 @@
 .git
 .godot
-**/*.import
+build
 Project Docs
+docs
 test
 deploy/.env
+node_modules

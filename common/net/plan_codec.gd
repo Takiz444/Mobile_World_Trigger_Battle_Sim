@@ -18,11 +18,11 @@ static func encode_unit(u: UnitData) -> Dictionary:
 	return {
 		"name": u.unit_name,
 		"trion_hp": u.base_trion_hp,
-		"at_pool": u.base_at_pool,
 		"mobility": u.mobility_rating,
 		"attack": u.attack_rating,
 		"defense": u.defense_rating,
 		"trion_capacity": u.max_trion_capacity,
+		"talents": { "stamina": u.talent_stamina, "hp": u.talent_hp, "atk": u.talent_atk },
 		"main": _names(u.main_trigger_slots),
 		"sub": _names(u.sub_trigger_slots),
 	}
@@ -38,12 +38,13 @@ static func decode_squad(arr: Array) -> Array[UnitData]:
 static func decode_unit(d: Dictionary) -> UnitData:
 	var u := UnitData.new()
 	u.unit_name = str(d.get("name", "Unit"))
-	u.base_trion_hp = int(d.get("trion_hp", 100))
-	u.base_at_pool = int(d.get("at_pool", 8))
-	u.mobility_rating = int(d.get("mobility", 5))
-	u.attack_rating = int(d.get("attack", 5))
-	u.defense_rating = int(d.get("defense", 5))
-	u.max_trion_capacity = int(d.get("trion_capacity", 100))
+	# Stats come only from talents (validate_squad has checked them).
+	var talents: Variant = d.get("talents", {})
+	if talents is Dictionary:
+		u.talent_stamina = clampi(_whole(talents.get("stamina", 0)), 0, Talents.MAX_PER_STAT)
+		u.talent_hp = clampi(_whole(talents.get("hp", 0)), 0, Talents.MAX_PER_STAT)
+		u.talent_atk = clampi(_whole(talents.get("atk", 0)), 0, Talents.MAX_PER_STAT)
+	Talents.apply(u)
 	u.main_trigger_slots = _cards(d.get("main", []))
 	u.sub_trigger_slots = _cards(d.get("sub", []))
 	u.ensure_slot_arrays()
@@ -66,48 +67,73 @@ static func _cards(names: Array) -> Array[TriggerCard]:
 
 
 # --- Plans ----------------------------------------------------------------
+# {"units": [{"move": [action...], "act": [action...]}, ...]}
+# action: {"card": name, "to": [x, z], "level": n, "unit": i, "hold": seconds}
+# ("to"/"level" for points, "unit" for attack targets, "hold" for Shield/Wait)
 
 static func encode_plan(plan: TurnPlan) -> Dictionary:
 	var units: Array = []
 	for u in plan.units.size():
-		var ticks: Array = []
-		for t in TurnPlan.TICKS_PER_TURN:
-			var ta := plan.get_tick(u, t)
-			ticks.append({
-				"main": ta.main_card.card_name if ta.main_card != null else null,
-				"sub": ta.sub_card.card_name if ta.sub_card != null else null,
-				"target": [ta.target_hex.x, ta.target_hex.y] if ta.has_target else null,
-				"target_floor": ta.target_floor,
-				"sub_target": [ta.sub_target_hex.x, ta.sub_target_hex.y] if ta.sub_has_target else null,
-				"sub_target_floor": ta.sub_target_floor,
-			})
-		units.append(ticks)
+		var row := {}
+		for lane_id in [TurnPlan.MOVE_LANE, TurnPlan.ACT_LANE]:
+			var out: Array = []
+			for a in plan.lane(u, lane_id):
+				out.append(encode_action(a))
+			row["move" if lane_id == TurnPlan.MOVE_LANE else "act"] = out
+		units.append(row)
 	return { "units": units }
 
 
+static func encode_action(a: PlanAction) -> Dictionary:
+	var d := { "card": a.card.card_name }
+	if a.has_point:
+		d["to"] = [a.point.x, a.point.y]
+		d["level"] = a.level
+	if a.target_unit >= 0:
+		d["unit"] = a.target_unit
+	if a.uses_hold():
+		d["hold"] = snappedf(a.hold, 0.01)
+	return d
+
+
+## Lenient decode (server's own stored plans): unknown entries are dropped.
 static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 	var plan := TurnPlan.new(units)
-	var rows: Array = d.get("units", [])
-	for u in units.size():
-		if u >= rows.size():
+	var rows: Variant = d.get("units", [])
+	if not (rows is Array):
+		return plan
+	for u in mini(units.size(), (rows as Array).size()):
+		var row: Variant = rows[u]
+		if not (row is Dictionary):
 			continue
-		var row: Array = rows[u]
-		for t in TurnPlan.TICKS_PER_TURN:
-			if t >= row.size():
+		for lane_id in [TurnPlan.MOVE_LANE, TurnPlan.ACT_LANE]:
+			var list: Variant = row.get("move" if lane_id == TurnPlan.MOVE_LANE else "act", [])
+			if not (list is Array):
 				continue
-			var tdata: Dictionary = row[t]
-			var main_name: Variant = tdata.get("main")
-			var sub_name: Variant = tdata.get("sub")
-			if main_name != null:
-				plan.assign(u, t, TurnPlan.MAIN_SLOT, TriggerLibrary.get_card(str(main_name)))
-			if sub_name != null:
-				plan.assign(u, t, TurnPlan.SUB_SLOT, TriggerLibrary.get_card(str(sub_name)))
-			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
-				var prefix := "sub_" if slot == TurnPlan.SUB_SLOT else ""
-				var target: Variant = tdata.get(prefix + "target")
-				if target != null:
-					plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(tdata.get(prefix + "target_floor", 0)), slot)
+			for item in list:
+				if item is Dictionary:
+					var a := _decode_action(item)
+					if a != null:
+						plan.add(u, a, lane_id)
 	return plan
+
+
+static func _decode_action(d: Dictionary) -> PlanAction:
+	var name: Variant = d.get("card")
+	if not (name is String):
+		return null
+	var card := TriggerLibrary.get_card(name)
+	if card == null:
+		return null
+	var a := PlanAction.new(card)
+	var to: Variant = d.get("to")
+	if to is Array and (to as Array).size() == 2 and _is_number(to[0]) and _is_number(to[1]):
+		a.set_point(Vector2(float(to[0]), float(to[1])), _whole(d.get("level", 0)))
+	if _is_number(d.get("unit")):
+		a.target_unit = int(d["unit"])
+	if _is_number(d.get("hold")):
+		a.hold = float(d["hold"])
+	return a
 
 
 # --- Server-side Validation -----------------------------------------------
@@ -115,29 +141,66 @@ static func decode_plan(d: Dictionary, units: Array[UnitData]) -> TurnPlan:
 # a legal loadout, and plans may only use cards the unit actually equips.
 # Each validator returns "" when valid, otherwise a human-readable error.
 
-const SQUAD_SIZE := 4
+const SQUAD_SIZE := 3
+## Largest coordinate / floor accepted in a plan target. The map is 32x32;
+## anything outside it is ignored by the engine, this only bounds the numbers.
+const MAX_TARGET_COORD := 256
+const MAX_TARGET_FLOOR := 16
 
 
 static func validate_squad(arr: Array) -> String:
 	if arr.size() != SQUAD_SIZE:
 		return "squad must have exactly %d units" % SQUAD_SIZE
+	var points := 0
 	for i in arr.size():
 		if not (arr[i] is Dictionary):
 			return "unit %d: malformed" % i
 		var err := _validate_unit(arr[i])
 		if err != "":
 			return "unit %d: %s" % [i, err]
+		var t: Variant = arr[i].get("talents", {})
+		for stat in Talents.STATS:
+			points += _whole(t.get(stat, 0)) if t is Dictionary else 0
+	if points > Talents.POINTS:
+		return "squad spends %d talent points (max %d)" % [points, Talents.POINTS]
 	return ""
 
 
+## A JSON number as an int (non-numbers become 0; callers validate first).
+static func _whole(v: Variant) -> int:
+	if typeof(v) == TYPE_INT:
+		return v
+	if typeof(v) == TYPE_FLOAT and is_finite(v) and absf(v) < 1.0e9:
+		return int(v)
+	return 0
+
+
 static func _validate_unit(d: Dictionary) -> String:
+	var talents: Variant = d.get("talents", {})
+	if not (talents is Dictionary):
+		return "malformed talents"
+	for stat in Talents.STATS:
+		var v: Variant = talents.get(stat, 0)
+		if not _in_range(v, 0, Talents.MAX_PER_STAT):
+			return "%s talent must be 0-%d" % [stat, Talents.MAX_PER_STAT]
+	# Names are shown to the opponent: text only, short, no markup.
+	if d.has("name"):
+		if not (d["name"] is String) or not NameRules.is_clean(d["name"], NameRules.UNIT_NAME_MAX):
+			return "name must be 1-%d plain characters" % NameRules.UNIT_NAME_MAX
+		if not NameRules.is_allowed(d["name"]):
+			return "name is not allowed"
+	# Stats a client sends must be exactly what its talents give.
+	var derived := UnitData.new()
+	derived.talent_stamina = int(talents.get("stamina", 0))
+	derived.talent_hp = int(talents.get("hp", 0))
+	derived.talent_atk = int(talents.get("atk", 0))
+	Talents.apply(derived)
 	var expected := {
-		"trion_hp": TriggerLibrary.STANDARD_TRION_HP,
-		"at_pool": TriggerLibrary.STANDARD_AT_POOL,
-		"mobility": TriggerLibrary.STANDARD_RATING,
-		"attack": TriggerLibrary.STANDARD_RATING,
-		"defense": TriggerLibrary.STANDARD_RATING,
-		"trion_capacity": TriggerLibrary.STANDARD_TRION_CAPACITY,
+		"trion_hp": derived.base_trion_hp,
+		"mobility": derived.mobility_rating,
+		"attack": derived.attack_rating,
+		"defense": derived.defense_rating,
+		"trion_capacity": derived.max_trion_capacity,
 	}
 	for key in expected:
 		if d.has(key) and (not _is_number(d[key]) or int(d[key]) != int(expected[key])):
@@ -146,6 +209,12 @@ static func _validate_unit(d: Dictionary) -> String:
 	var sub: Variant = d.get("sub", [])
 	if not (main is Array) or not (sub is Array):
 		return "malformed trigger slots"
+	if main.size() > UnitData.MAX_MAIN_SLOTS or sub.size() > UnitData.MAX_SUB_SLOTS:
+		return "too many trigger slots"
+	for slot_list in [main, sub]:
+		for n in slot_list:
+			if n != null and not (n is String):
+				return "malformed trigger name"
 	if _count_cards(main) > UnitData.MAX_MAIN_SLOTS or _count_cards(sub) > UnitData.MAX_SUB_SLOTS:
 		return "too many triggers"
 	var total := 0
@@ -169,6 +238,15 @@ static func _is_number(v: Variant) -> bool:
 	return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
 
 
+## A finite whole number within [lo, hi].
+static func _in_range(v: Variant, lo: int, hi: int) -> bool:
+	if typeof(v) == TYPE_INT:
+		return v >= lo and v <= hi
+	if typeof(v) == TYPE_FLOAT:
+		return is_finite(v) and v >= lo and v <= hi and v == floorf(v)
+	return false
+
+
 static func _count_cards(names: Array) -> int:
 	var n := 0
 	for c in names:
@@ -178,44 +256,79 @@ static func _count_cards(names: Array) -> int:
 
 
 ## Strict plan decode for the server. Returns {"plan": TurnPlan, "error": ""}.
-## Rejects unknown cards, cards the unit has not equipped, slot-rule or AT
-## overruns, and malformed targets (unlike decode_plan, which drops them).
-static func decode_plan_checked(d: Dictionary, units: Array[UnitData]) -> Dictionary:
+## Checks every value a client could tamper with: only cards the character
+## has (plus Move / Look / Wait), each in its own lane, sane numbers, targets
+## on the map and in range, attack targets that exist, and both lanes inside
+## the turn (timed against `ms` from where `states` stand right now).
+static func decode_plan_checked(d: Dictionary, units: Array[UnitData], ms: MatchState = null, states: Array = []) -> Dictionary:
 	var plan := TurnPlan.new(units)
 	var rows: Variant = d.get("units", [])
 	if not (rows is Array) or rows.size() != units.size():
-		return { "plan": null, "error": "plan must have one row per unit" }
+		return _bad("plan must have one row per unit")
+	var bounds := ms.bounds() if ms != null else Rect2(-MAX_TARGET_COORD, -MAX_TARGET_COORD, 2 * MAX_TARGET_COORD, 2 * MAX_TARGET_COORD)
+	var enemies := PlanCodec.SQUAD_SIZE
 	for u in units.size():
 		var allowed := {}
 		for card in plan.get_available_actions(u):
 			allowed[card.card_name] = true
 		var row: Variant = rows[u]
-		if not (row is Array) or row.size() > TurnPlan.TICKS_PER_TURN:
-			return { "plan": null, "error": "unit %d: malformed timeline" % u }
-		for t in row.size():
-			if not (row[t] is Dictionary):
-				return { "plan": null, "error": "unit %d tick %d: malformed" % [u, t] }
-			var tdata: Dictionary = row[t]
-			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
-				var card_name: Variant = tdata.get("main" if slot == TurnPlan.MAIN_SLOT else "sub")
-				if card_name == null:
-					continue
-				if not allowed.has(str(card_name)):
-					return { "plan": null, "error": "unit %d tick %d: '%s' not equipped" % [u, t, str(card_name)] }
-				if not plan.assign(u, t, slot, TriggerLibrary.get_card(str(card_name))):
-					return { "plan": null, "error": "unit %d tick %d: '%s' breaks slot or AT rules" % [u, t, str(card_name)] }
-			for slot in [TurnPlan.MAIN_SLOT, TurnPlan.SUB_SLOT]:
-				var prefix := "sub_" if slot == TurnPlan.SUB_SLOT else ""
-				var target: Variant = tdata.get(prefix + "target")
-				if target == null:
-					continue
-				if not (target is Array) or target.size() != 2 or not _is_number(target[0]) or not _is_number(target[1]):
-					return { "plan": null, "error": "unit %d tick %d: malformed target" % [u, t] }
-				var target_floor: Variant = tdata.get(prefix + "target_floor", 0)
-				if not _is_number(target_floor) or int(target_floor) < 0:
-					return { "plan": null, "error": "unit %d tick %d: malformed target floor" % [u, t] }
-				plan.set_target(u, t, Vector2i(int(target[0]), int(target[1])), int(target_floor), slot)
+		if not (row is Dictionary):
+			return _bad("unit %d: malformed" % u)
+		for lane_id in [TurnPlan.MOVE_LANE, TurnPlan.ACT_LANE]:
+			var key := "move" if lane_id == TurnPlan.MOVE_LANE else "act"
+			var list: Variant = row.get(key, [])
+			if not (list is Array) or (list as Array).size() > TurnPlan.MAX_ACTIONS:
+				return _bad("unit %d: malformed %s lane" % [u, key])
+			for i in (list as Array).size():
+				var item: Variant = list[i]
+				var where := "unit %d %s %d" % [u, key, i]
+				if not (item is Dictionary):
+					return _bad("%s: malformed" % where)
+				var name: Variant = item.get("card")
+				if not (name is String) or not allowed.has(name):
+					return _bad("%s: '%s' not equipped" % [where, str(name)])
+				var card := TriggerLibrary.get_card(name)
+				if not TurnPlan.fits_lane(card, lane_id):
+					return _bad("%s: %s doesn't go in this lane" % [where, card.card_name])
+				var a := PlanAction.new(card)
+				if item.has("to"):
+					var to: Variant = item["to"]
+					if not (to is Array) or to.size() != 2 or not _finite_number(to[0]) or not _finite_number(to[1]):
+						return _bad("%s: malformed target" % where)
+					var pt := Vector2(float(to[0]), float(to[1]))
+					if not bounds.grow(1.0).has_point(pt):
+						return _bad("%s: target off the map" % where)
+					var lvl: Variant = item.get("level", 0)
+					if not _in_range(lvl, 0, MAX_TARGET_FLOOR):
+						return _bad("%s: malformed level" % where)
+					a.set_point(pt, int(lvl))
+				if item.has("unit"):
+					if not _in_range(item["unit"], 0, enemies - 1):
+						return _bad("%s: malformed target unit" % where)
+					a.target_unit = int(item["unit"])
+				if a.uses_hold():
+					var hold: Variant = item.get("hold", a.hold)
+					if not _finite_number(hold) or float(hold) < TurnPlan.MIN_HOLD - 0.001 or float(hold) > TurnPlan.TURN_SECONDS + 0.001:
+						return _bad("%s: malformed hold time" % where)
+					a.hold = float(hold)
+				if a.needs_target():
+					return _bad("%s: %s has no target" % [where, card.card_name])
+				plan.add(u, a, lane_id)
+		if ms != null and u < states.size():
+			var us: UnitState = states[u]
+			if not us.is_bailed:
+				var err := plan.unit_error(ms, us, u)
+				if err != "":
+					return _bad("unit %d: %s" % [u, err])
 	return { "plan": plan, "error": "" }
+
+
+static func _bad(msg: String) -> Dictionary:
+	return { "plan": null, "error": msg }
+
+
+static func _finite_number(v: Variant) -> bool:
+	return (typeof(v) == TYPE_INT) or (typeof(v) == TYPE_FLOAT and is_finite(v) and absf(v) < 1.0e6)
 
 
 # --- Match State Snapshots ------------------------------------------------
@@ -226,17 +339,17 @@ static func encode_state(ms: MatchState) -> Dictionary:
 	var units: Array = []
 	for u in ms.all_units():
 		units.append({
-			"hex": [u.hex.x, u.hex.y],
-			"floor": u.floor,
+			"pos": [u.pos.x, u.pos.y],
+			"level": u.level,
 			"facing": u.facing,
 			"hp": u.trion_hp,
 			"bailed": u.is_bailed,
 			"stealth": u.stealth_active,
-			"weight": u.weight_ticks,
+			"weight": u.weight_time,
 		})
 	var wires: Array = []
-	for hex in ms.wires:
-		wires.append([hex.x, hex.y, int(ms.wires[hex])])
+	for w in ms.wires:
+		wires.append([(w["pos"] as Vector2).x, (w["pos"] as Vector2).y, int(w["team"])])
 	# RNG state is a 64-bit int; send it as a string so JSON doubles can't round it.
 	return { "units": units, "wires": wires, "rng_state": str(ms.rng.state) }
 
@@ -247,17 +360,18 @@ static func apply_state(ms: MatchState, d: Dictionary) -> void:
 	for i in mini(units.size(), rows.size()):
 		var u: UnitState = units[i]
 		var row: Dictionary = rows[i]
-		var hex: Array = row.get("hex", [u.hex.x, u.hex.y])
-		u.hex = Vector2i(int(hex[0]), int(hex[1]))
-		u.floor = int(row.get("floor", u.floor))
-		u.facing = int(row.get("facing", u.facing))
+		var pos: Array = row.get("pos", [u.pos.x, u.pos.y])
+		u.pos = Vector2(float(pos[0]), float(pos[1]))
+		u.level = int(row.get("level", u.level))
+		u.facing = float(row.get("facing", u.facing))
 		u.trion_hp = int(row.get("hp", u.trion_hp))
 		u.is_bailed = bool(row.get("bailed", u.is_bailed))
 		u.stealth_active = bool(row.get("stealth", u.stealth_active))
-		u.weight_ticks = int(row.get("weight", 0))
+		u.weight_time = float(row.get("weight", 0.0))
 	ms.wires.clear()
 	for w in d.get("wires", []):
-		ms.wires[Vector2i(int(w[0]), int(w[1]))] = int(w[2]) if w.size() > 2 else -1
+		if w is Array and w.size() >= 3:
+			ms.wires.append({ "pos": Vector2(float(w[0]), float(w[1])), "team": int(w[2]) })
 	if d.has("rng_state"):
 		ms.rng.state = str(d["rng_state"]).to_int()
 
@@ -275,7 +389,7 @@ static func encode_events(events: Array[CombatEvent]) -> Array:
 	var out: Array = []
 	for ev in events:
 		out.append({
-			"tick": ev.tick,
+			"time": snappedf(ev.time, 0.01),
 			"phase": ev.phase,
 			"message": ev.message,
 			"actor": ev.actor.display_name() if ev.actor != null else null,

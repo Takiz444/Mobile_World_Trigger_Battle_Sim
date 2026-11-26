@@ -8,7 +8,7 @@ extends RefCounted
 ## Two numbers per player:
 ##   trophies — visible progress. Moves +/- per live ranked match, never drops
 ##              below the floor of the highest arena the player has reached.
-##   rating   — hidden MMR (Elo, MatchServer.elo_deltas). Used for pairing, so
+##   rating   — hidden skill (Glicko-2, Matchmaker). Used for pairing, so
 ##              trophy floors and season resets never distort match quality.
 
 ## Arenas by trophy threshold (ascending). Reaching an arena's threshold
@@ -38,21 +38,14 @@ const TROPHY_GAP_STEP := 12
 
 const LIVE_FIRST_TURN_SEC := 60      # extra time to read the board on turn 1
 const LIVE_TURN_SEC := 40
-const LIVE_REPLAY_SEC := 6           # clients animate the 6-tick replay
-const LIVE_LOAD_GRACE_SEC := 15      # both clients load the battle scene
+const LIVE_REPLAY_SEC := 7           # clients play the 6-second turn back (+ slack)
+const LIVE_LOAD_GRACE_SEC := 30      # both clients load the battle scene (web: compiles shaders)
 const LIVE_MAX_TURNS := 8
 ## A live player auto-filled this many turns in a row forfeits (AFK).
 const LIVE_AFK_FORFEIT_TURNS := 2
 ## Seconds a disconnected live player has to come back before AFK rules apply
 ## (they are already covered by the turn clock; this is for the UI).
 const LIVE_RECONNECT_SEC := 45
-
-# --- Matchmaking --------------------------------------------------------------
-
-const MM_WINDOW_START := 100     # MMR distance accepted immediately
-const MM_WINDOW_GROWTH := 20     # widened per second of waiting
-const MM_WINDOW_MAX := 800
-
 
 ## Arena index for a trophy count.
 static func arena_index(trophies: int) -> int:
@@ -99,17 +92,6 @@ static func season_reset(trophies: int) -> int:
 	if trophies <= SEASON_RESET_ABOVE:
 		return trophies
 	return SEASON_RESET_ABOVE + (trophies - SEASON_RESET_ABOVE) / 2
-
-
-## MMR distance a ticket accepts after waiting `wait_sec` seconds.
-static func search_window(wait_sec: float) -> int:
-	return mini(MM_WINDOW_MAX, MM_WINDOW_START + int(wait_sec * MM_WINDOW_GROWTH))
-
-
-## Whether two waiting tickets may be paired: both must accept the distance.
-static func can_pair(rating_a: int, wait_a: float, rating_b: int, wait_b: float) -> bool:
-	var gap := absi(rating_a - rating_b)
-	return gap <= search_window(wait_a) and gap <= search_window(wait_b)
 
 
 ## Planning time for `turn` of a live match.

@@ -1,14 +1,29 @@
 class_name MatchState
 extends RefCounted
-## Holds the full runtime match: two squads, board cover, spider wires, and a
-## seeded RNG so resolution is deterministic (replayable).
+## The whole runtime match: two squads, the city, Spider wires, and a seeded
+## RNG so resolution is deterministic (replayable).
+##
+## The city is either a section of Tokyo (`layout`, see TokyoMap) or, for
+## test arenas and the old map sheet, building heights per map hex
+## (`tiles` / `buildings`), turned into the same boxes (BuildingRects).
+
+const WIRE_RADIUS := 1.5
 
 var teams: Array = []            # teams[team] -> Array[UnitState]
-var wires: Dictionary = {}       # Vector2i -> true
-var cover: Dictionary = {}       # Vector2i -> int (0 none, 1 half, 2 full)
-var buildings: Dictionary = {}   # Vector2i -> int floors (1..4)
-var tiles: Dictionary = {}       # Vector2i -> true (board extent; empty = unbounded)
+## Spider wires: [{pos: Vector2, team: int}], each a circle of WIRE_RADIUS.
+var wires: Array = []
+var buildings: Dictionary = {}   # hex maps: map hex (Vector2i) -> floors (1..4)
+var tiles: Dictionary = {}       # hex maps: map hexes of the play area (bounds)
+## Tokyo: the section's city (null on hex maps), and the section itself
+## ({district, rect}; see TokyoMap).
+var layout: CityLayout
+var section: Dictionary = {}
 var rng: RandomNumberGenerator
+
+var _geometry: CityGeometry
+var _geometry_key := ""
+var _rects: Array = []
+var _rects_for_size := -1
 
 
 func _init(seed: int = 0) -> void:
@@ -29,80 +44,79 @@ func all_units() -> Array[UnitState]:
 	return result
 
 
-## First non-bailed unit at `hex` and `floor` (optionally filtered by team).
-func get_unit_at(hex: Vector2i, floor: int = 0, team: int = -1) -> UnitState:
-	for squad_index in teams.size():
-		if team != -1 and squad_index != team:
-			continue
-		for u in teams[squad_index]:
-			if not u.is_bailed and u.hex == hex and u.floor == floor:
-				return u
-	return null
-
-
-## First non-bailed unit at `hex` regardless of floor (used for combat
-## targeting, where ranged/melee acquire by hex rather than by elevation).
-func get_unit_at_any_floor(hex: Vector2i, team: int = -1) -> UnitState:
-	for squad_index in teams.size():
-		if team != -1 and squad_index != team:
-			continue
-		for u in teams[squad_index]:
-			if not u.is_bailed and u.hex == hex:
-				return u
-	return null
-
-
-## Building geometry (BuildingRects) used for 3D line of sight, cached and
-## rebuilt whenever the set of building hexes changes size (or after
-## invalidate_buildings()).
-var _rects: Array = []
-var _rect_of: Dictionary = {}   # building hex -> index into _rects
-var _rects_for_size := -1
-
-
+## The enterable buildings (CityBox boxes). On hex maps they are rebuilt
+## when the set of building hexes changes (or after invalidate_buildings()).
 func building_rects() -> Array:
-	_ensure_rects()
+	if layout != null:
+		return layout.buildings
+	if _rects_for_size != buildings.size():
+		_rects = []
+		for r in BuildingRects.compute(buildings):
+			_rects.append(CityBox.from_rect(BuildingRects.bounds(r), int(r["floors"])))
+		_rects_for_size = buildings.size()
 	return _rects
 
 
-## Index (into building_rects()) of the building segment covering `hex`, or -1.
-func building_rect_index(hex: Vector2i) -> int:
-	_ensure_rects()
-	return int(_rect_of.get(hex, -1))
+## Sealed solids and elevated decks (Tokyo only).
+func solid_boxes() -> Array:
+	return layout.solids if layout != null else []
+
+
+func deck_boxes() -> Array:
+	return layout.decks if layout != null else []
 
 
 ## Call after changing building heights in place (same set of hexes).
 func invalidate_buildings() -> void:
 	_rects_for_size = -1
+	_geometry = null
 
 
-func _ensure_rects() -> void:
-	if _rects_for_size == buildings.size():
-		return
-	_rects = BuildingRects.compute(buildings)
-	_rect_of.clear()
-	for i in _rects.size():
-		for hex in _rects[i]["hexes"]:
-			_rect_of[hex] = i
-	_rects_for_size = buildings.size()
+## The play area in world units (X, Z): the section, or the map hexes' cells.
+func bounds() -> Rect2:
+	if layout != null:
+		return layout.bounds
+	if tiles.is_empty():
+		return Rect2(-500, -500, 1000, 1000)
+	var first := true
+	var box := Rect2()
+	for hex in tiles:
+		var p3 := HexCoord.axial_to_world(hex, 1.0)
+		var cell := Rect2(Vector2(p3.x, p3.z) - Vector2(1.0, HexCoord.SQRT3 / 2.0), Vector2(2.0, HexCoord.SQRT3))
+		box = cell if first else box.merge(cell)
+		first = false
+	return box
 
 
-## Whether `hex` is on the board. An empty tile set means "no bounds" (used
-## by small unit-test boards).
-func has_tile(hex: Vector2i) -> bool:
-	return tiles.is_empty() or tiles.has(hex)
+## Continuous geometry of this match's city (walkability, routes).
+func geometry() -> CityGeometry:
+	var key := "%d|%d|%d" % [buildings.size(), tiles.size(), layout.get_instance_id() if layout != null else 0]
+	if _geometry == null or _geometry_key != key:
+		_geometry = CityGeometry.new(bounds(), building_rects(), solid_boxes(), deck_boxes(),
+			layout.blocked if layout != null else null)
+		_geometry_key = key
+	return _geometry
 
 
-## Number of elevated floors of the building at `hex` (0 = no building).
-func building_floors(hex: Vector2i) -> int:
-	return int(buildings.get(hex, 0))
+## The living unit standing nearest `p` on `level` within `radius`, or null.
+func unit_near(p: Vector2, level: int, radius: float, team: int = -1) -> UnitState:
+	var best: UnitState = null
+	var best_d := radius
+	for u in all_units():
+		if u.is_bailed or u.level != level or (team != -1 and u.team != team):
+			continue
+		var d := u.pos.distance_to(p)
+		if d <= best_d:
+			best_d = d
+			best = u
+	return best
 
 
-## Whether a unit may stand at `floor` of `hex`. Floor 0 (ground) is only
-## legal on open hexes; floors > 0 require a building tall enough.
-func floor_legal(hex: Vector2i, floor: int) -> bool:
-	if not has_tile(hex):
+## The Spider wire of `team` under a character at `p` / `level`, if any.
+func on_team_wire(p: Vector2, level: int, team: int) -> bool:
+	if level != 0:
 		return false
-	if floor == 0:
-		return building_floors(hex) == 0
-	return building_floors(hex) >= floor
+	for w in wires:
+		if int(w["team"]) == team and (w["pos"] as Vector2).distance_to(p) <= WIRE_RADIUS:
+			return true
+	return false

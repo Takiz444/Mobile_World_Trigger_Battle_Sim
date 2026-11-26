@@ -103,8 +103,12 @@ static func compute(buildings: Dictionary) -> Array:
 	return out
 
 
-## World-space footprint of a rectangle (scaled by `size`).
+## World-space footprint of a rectangle (scaled by `size`). Also takes a
+## CityBox (its world bounds).
 static func bounds(r: Dictionary, size: float = 1.0) -> Rect2:
+	if r.has("aabb"):
+		var a: Rect2 = r["aabb"]
+		return Rect2(a.position * size, a.size * size)
 	var x0 := (1.5 * int(r["c0"]) - 0.75) * size
 	var x1 := (1.5 * int(r["c1"]) + 0.75) * size
 	var z0 := float(r["top"]) * size

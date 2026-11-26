@@ -44,9 +44,11 @@ void fragment() {
 	col += vec3(0.025) * step(0.975, hash(floor(wp * 38.0)));
 	float rough = 0.72;
 
-	// Avenue markings (road only, never on sidewalks).
-	float dash_h = step(abs(wp.y - avenue_z), 0.045) * step(fract(wp.x / 1.3), 0.55);
-	float dash_v = step(abs(wp.x - avenue_x), 0.045) * step(fract(wp.y / 1.3), 0.55);
+	// Avenue markings (road only, never on sidewalks). Edges are softened by
+	// the pixel footprint so paint stays crisp but never shimmers.
+	float px = max(fwidth(wp.x), fwidth(wp.y));
+	float dash_h = (1.0 - smoothstep(0.045 - px, 0.045 + px, abs(wp.y - avenue_z))) * step(fract(wp.x / 1.3), 0.55);
+	float dash_v = (1.0 - smoothstep(0.045 - px, 0.045 + px, abs(wp.x - avenue_x))) * step(fract(wp.y / 1.3), 0.55);
 	// Keep center lines out of the intersection box.
 	float in_v = step(avenue_x_span.x, wp.x) * step(wp.x, avenue_x_span.y);
 	float in_h = step(avenue_z_span.x, wp.y) * step(wp.y, avenue_z_span.y);
@@ -56,27 +58,32 @@ void fragment() {
 	// just north/south of the crossing street, and across the horizontal one
 	// just west/east of it. Bars run along the traffic direction.
 	float band = 0.36;
-	float zebra_v = in_v * step(fract(wp.x / 0.3), 0.5) * max(
-		step(abs(wp.y - (avenue_z_span.x - band - 0.12)), band),
-		step(abs(wp.y - (avenue_z_span.y + band + 0.12)), band));
-	float zebra_h = in_h * step(fract(wp.y / 0.3), 0.5) * max(
-		step(abs(wp.x - (avenue_x_span.x - band - 0.12)), band),
-		step(abs(wp.x - (avenue_x_span.y + band + 0.12)), band));
+	float bar_x = smoothstep(0.25 - px / 0.3, 0.25 + px / 0.3, abs(fract(wp.x / 0.3) - 0.5));
+	float bar_y = smoothstep(0.25 - px / 0.3, 0.25 + px / 0.3, abs(fract(wp.y / 0.3) - 0.5));
+	float zebra_v = in_v * bar_x * max(
+		1.0 - smoothstep(band - px, band + px, abs(wp.y - (avenue_z_span.x - band - 0.12))),
+		1.0 - smoothstep(band - px, band + px, abs(wp.y - (avenue_z_span.y + band + 0.12))));
+	float zebra_h = in_h * bar_y * max(
+		1.0 - smoothstep(band - px, band + px, abs(wp.x - (avenue_x_span.x - band - 0.12))),
+		1.0 - smoothstep(band - px, band + px, abs(wp.x - (avenue_x_span.y + band + 0.12))));
 	float road = 1.0 - sidewalk - curb;
-	col = mix(col, vec3(0.85, 0.72, 0.3), clamp(dash_h + dash_v, 0.0, 1.0) * road);
-	col = mix(col, vec3(0.8, 0.81, 0.83), clamp(zebra_v + zebra_h, 0.0, 1.0) * road);
+	// Worn paint: markings fade a little where the asphalt grain is rough.
+	float wear = mix(0.75, 1.0, noise(wp * 5.0));
+	col = mix(col, vec3(0.85, 0.72, 0.3), clamp(dash_h + dash_v, 0.0, 1.0) * road * wear);
+	col = mix(col, vec3(0.8, 0.81, 0.83), clamp(zebra_v + zebra_h, 0.0, 1.0) * road * wear);
 
 	// Manhole covers on a sparse grid (roads only).
 	vec2 cell = floor(wp / 3.0);
 	vec2 c = (cell + 0.25 + 0.5 * vec2(hash(cell), hash(cell + 7.0))) * 3.0;
 	float d = length(wp - c);
 	float has_hole = step(0.8, hash(cell + 3.1)) * road;
-	col = mix(col, vec3(0.09, 0.09, 0.1), has_hole * step(d, 0.17) * (1.0 - step(d, 0.14)));
-	col = mix(col, vec3(0.24, 0.24, 0.26), has_hole * step(d, 0.14));
+	col = mix(col, vec3(0.09, 0.09, 0.1), has_hole * (1.0 - smoothstep(0.17 - px, 0.17 + px, d)));
+	col = mix(col, vec3(0.24, 0.24, 0.26), has_hole * (1.0 - smoothstep(0.14 - px, 0.14 + px, d)));
 
 	// Sidewalk pavers and curb.
-	vec2 pg = fract(wp / 0.4);
-	float grout = max(step(pg.x, 0.06), step(pg.y, 0.06));
+	vec2 pg = abs(fract(wp / 0.4) - 0.5);
+	float gw = px / 0.4;
+	float grout = max(smoothstep(0.44 - gw, 0.44 + gw, pg.x), smoothstep(0.44 - gw, 0.44 + gw, pg.y));
 	vec3 paver = vec3(0.5, 0.49, 0.47) * (0.9 + 0.12 * hash(floor(wp / 0.4))) * (1.0 - 0.28 * grout);
 	col = mix(col, paver, sidewalk);
 	col = mix(col, vec3(0.66, 0.66, 0.64), curb);
@@ -87,5 +94,6 @@ void fragment() {
 	col *= mix(1.0, 0.45, outside);
 
 	ALBEDO = col;
-	ROUGHNESS = rough;
+	// Slightly damp asphalt: low spots catch the street lamps and the sky.
+	ROUGHNESS = mix(rough, rough - 0.22 * smoothstep(0.45, 0.8, noise(wp * 0.9)), road);
 }
