@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: xcode-27
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -58,6 +58,14 @@ jobs:
           mkdir -p ios_build
           ./Godot.app/Contents/MacOS/Godot --headless --export-release "iOS" ios_build/GameSense.xcodeproj || true
           test -d ios_build/GameSense.xcodeproj
+
+      - name: Select Xcode 27
+        run: |
+          XCODE_27=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$XCODE_27" ]; then
+            sudo xcode-select -s "$XCODE_27/Contents/Developer"
+          fi
+          xcodebuild -version
 
       - name: Build and Archive
         run: |
