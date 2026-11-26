@@ -895,7 +895,47 @@ def build(d, osm, out_dir):
                 if not inside(q, 2) or near_junction(q, 0.6) or in_water(q) and not rec["bridge"]:
                     continue
                 markings.append([r2(q[0]), r2(q[1]), r2(ln / 2), 0.05, r3(ang), kind])
-    # Zebra crossings at OSM crossing nodes.
+    # Shibuya-style scramble: diagonal crossings over the whole junction.
+    # Painted first; the ordinary crossings around it keep off its stripes.
+    zebra_taken = {}
+    for lm in landmarks:
+        if lm["type"] != "scramble":
+            continue
+        c = (lm["x"], lm["z"])
+        best = {}
+        for rec in road_recs:
+            pts = rec["pts"]
+            for i in range(len(pts) - 1):
+                m = ((pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2)
+                if math.hypot(m[0] - c[0], m[1] - c[1]) < 14:
+                    ang = math.atan2(pts[i + 1][1] - pts[i][1], pts[i + 1][0] - pts[i][0]) % (math.pi / 2)
+                    k = round(ang / (math.pi / 36))
+                    best[k] = best.get(k, 0) + math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+        base = (max(best, key=best.get) * math.pi / 36) if best else 0.0
+        lm["rot"] = r3(base)
+        for diag in (base + math.pi / 4, base - math.pi / 4):
+            # Walking direction `diag`: stripes across it, up to 15 units
+            # long, painted only where the whole stripe is on the carriageway
+            # (the junction's corners are plaza and sidewalk).
+            ux, uz = math.cos(diag), math.sin(diag)
+            vx, vz = -uz, ux        # along each stripe
+            s = -7.5
+            while s <= 7.5:
+                q = (c[0] + ux * s, c[1] + uz * s)
+                on_carriageway = all(grid_at(road_core, (q[0] + vx * h, q[1] + vz * h)) for h in (-1.5, -0.75, 0.0, 0.75, 1.5))
+                # The diagonals cross at the centre: each stripe is 3 long, so
+                # leave that square clear rather than paint them over each other.
+                if abs(s) > 1.75 and on_carriageway:
+                    markings.append([r2(q[0]), r2(q[1]), 0.13, 1.5, r3(diag), 0])
+                    for h in (-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5):
+                        e = (q[0] + vx * h, q[1] + vz * h)
+                        zebra_taken.setdefault((int(e[0] // 2), int(e[1] // 2)), []).append(e)
+                s += 0.5
+
+    # Zebra crossings at OSM crossing nodes. Divided roads often map one
+    # crossing per carriageway a step apart; `zebra_taken` keeps a stripe from
+    # being painted over another crossing's or the scramble's (which reads as
+    # a hatched smear).
     for n in nodes:
         t = n.get("tags", {})
         if t.get("highway") != "crossing" and not (t.get("highway") == "traffic_signals" and t.get("crossing")):
@@ -915,33 +955,7 @@ def build(d, osm, out_dir):
         a = pts[max(0, i - 1)] if i > 0 else pts[i]
         b = pts[min(len(pts) - 1, i + 1)]
         ang = math.atan2(b[1] - a[1], b[0] - a[0])
-        _zebra(markings, p, ang, rec["w"], depth=1.6)
-
-    # Shibuya-style scramble: diagonal crossings over the whole junction.
-    for lm in landmarks:
-        if lm["type"] != "scramble":
-            continue
-        c = (lm["x"], lm["z"])
-        best = {}
-        for rec in road_recs:
-            pts = rec["pts"]
-            for i in range(len(pts) - 1):
-                m = ((pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2)
-                if math.hypot(m[0] - c[0], m[1] - c[1]) < 14:
-                    ang = math.atan2(pts[i + 1][1] - pts[i][1], pts[i + 1][0] - pts[i][0]) % (math.pi / 2)
-                    k = round(ang / (math.pi / 36))
-                    best[k] = best.get(k, 0) + math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
-        base = (max(best, key=best.get) * math.pi / 36) if best else 0.0
-        lm["rot"] = r3(base)
-        for diag in (base + math.pi / 4, base - math.pi / 4):
-            # Walking direction `diag`: stripes across it, 15 units long.
-            ux, uz = math.cos(diag), math.sin(diag)
-            s = -7.5
-            while s <= 7.5:
-                q = (c[0] + ux * s, c[1] + uz * s)
-                if not (abs(s) < 1.0):
-                    markings.append([r2(q[0]), r2(q[1]), 0.13, 1.5, r3(diag), 0])
-                s += 0.5
+        _zebra(markings, p, ang, rec["w"], depth=1.6, taken=zebra_taken)
 
     # --- Props -----------------------------------------------------------------------
     def blocked(p, grow=0.35):
@@ -1030,23 +1044,61 @@ def build(d, osm, out_dir):
                         off = (k - (n_m - 1) / 2) * 0.32
                         vending.append([r2(q[0] + math.cos(ang) * off), r2(q[1] + math.sin(ang) * off), r3(face), rng.randrange(4)])
                 s += rng.uniform(10, 22)
-    # Signal heads at signalised junction nodes.
+    # Signal heads at signalised junction nodes: the pole stands on the
+    # sidewalk just past the curb of every road there (at a junction, on a
+    # corner), with its arm reaching out over the carriageway to the node.
+    def seg_dist(p, a, b):
+        dx, dz = b[0] - a[0], b[1] - a[1]
+        ln2 = dx * dx + dz * dz
+        t = 0.0 if ln2 < 1e-12 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / ln2))
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dz)
+
+    def strips_near(p, reach):
+        """(a, b, half width) of road and at-grade rail segments near p."""
+        out = []
+        for rec in road_recs:
+            pts = rec["pts"]
+            for i in range(len(pts) - 1):
+                if seg_dist(p, pts[i], pts[i + 1]) < reach + rec["w"] / 2:
+                    out.append((pts[i], pts[i + 1], rec["w"] / 2))
+        for pts in rail_lines:
+            for i in range(len(pts) - 1):
+                if seg_dist(p, pts[i], pts[i + 1]) < reach + RAIL_TRACK_W / 2:
+                    out.append((pts[i], pts[i + 1], RAIL_TRACK_W / 2))
+        return out
+
+    SIGNAL_REACH = 6.0
     for n in nodes:
         t = n.get("tags", {})
         if t.get("highway") != "traffic_signals":
             continue
-        refs = way_nodes.get(n["id"], [])
-        if not refs:
+        if not way_nodes.get(n["id"]):
             continue
-        rec, i = max(refs, key=lambda ri: ri[0]["w"])
         p = proj(n["lat"], n["lon"])
-        pts = rec["pts"]
-        a = pts[max(0, i - 1)]
-        b = pts[min(len(pts) - 1, i + 1)]
-        ang = math.atan2(b[1] - a[1], b[0] - a[0])
-        q = (p[0] - math.sin(ang) * (rec["w"] / 2 + 0.35), p[1] + math.cos(ang) * (rec["w"] / 2 + 0.35))
-        if inside(q, -1) and not blocked(q, 0.1):
-            signals.append([r2(q[0]), r2(q[1]), r3(ang)])
+        near = strips_near(p, SIGNAL_REACH)
+        best = None
+        for step in range(2, int(SIGNAL_REACH / 0.25) + 1):
+            r = step * 0.25
+            for k in range(24):
+                a = math.tau * k / 24
+                q = (p[0] + math.cos(a) * r, p[1] + math.sin(a) * r)
+                # Clear of every carriageway (0.3 past its curb), but standing
+                # at a curb, not out in a plaza.
+                gaps = [seg_dist(q, sa, sb) - hw for sa, sb, hw in near]
+                if not gaps or min(gaps) < 0.3 or min(gaps) > 0.9:
+                    continue
+                if not inside(q, -1) or blocked(q, 0.15):
+                    continue
+                best = q
+                break
+            if best is not None:
+                break
+        if best is None:
+            continue
+        # The mesh's arm runs along local +z; the renderer turns it by
+        # -angle about up, so this angle aims the arm back at the node.
+        ang = -math.atan2(p[0] - best[0], p[1] - best[1])
+        signals.append([r2(best[0]), r2(best[1]), r3(ang)])
     # Shop signs: blade signs on facades that face a street, and big screens
     # on tall buildings over main roads.
     neon = d.get("neon", 0.5)
@@ -1290,14 +1342,28 @@ def _resize(a, shape):
     return out
 
 
-def _zebra(markings, p, road_ang, width, depth=1.6):
-    """Stripes across a road of `width` at p (stripes run along the road)."""
+def _zebra(markings, p, road_ang, width, depth=1.6, taken=None):
+    """Stripes across a road of `width` at p (stripes run along the road).
+
+    `taken` (cell -> stripe centres) holds earlier crossings' stripes; a
+    stripe that would overlap one of them is left out."""
     nx, nz = -math.sin(road_ang), math.cos(road_ang)
+    clear = depth * 0.75
+    mine = []
     k = -width / 2 + 0.3
     while k <= width / 2 - 0.3:
         q = (p[0] + nx * k, p[1] + nz * k)
-        markings.append([r2(q[0]), r2(q[1]), r2(depth / 2), 0.11, r3(road_ang), 0])
         k += 0.48
+        if taken is not None:
+            cx, cz = int(q[0] // 2), int(q[1] // 2)
+            if any(math.hypot(q[0] - o[0], q[1] - o[1]) < clear
+                   for dx in (-1, 0, 1) for dz in (-1, 0, 1) for o in taken.get((cx + dx, cz + dz), ())):
+                continue
+        mine.append(q)
+        markings.append([r2(q[0]), r2(q[1]), r2(depth / 2), 0.11, r3(road_ang), 0])
+    if taken is not None:
+        for q in mine:
+            taken.setdefault((int(q[0] // 2), int(q[1] // 2)), []).append(q)
 
 
 def _along(pts, s):
