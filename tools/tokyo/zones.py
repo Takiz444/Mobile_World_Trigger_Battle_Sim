@@ -538,6 +538,7 @@ def build_zones(W, H, separator, walkable, noplay, margin, target_area, chunks, 
             continue
         ring = [(x + c0 * RES, z + r0 * RES) for x, z in ring]
         ring = straighten(ring, [zone_angle] + street_angles(chunks, (bx0 + bx1) / 2, (bz0 + bz1) / 2, reach=60.0))
+        ring = despike(ring)
         zc = geom.centroid(ring)
         _, _, hx, hz, _ = geom.min_area_rect(ring)
         if max(hx, hz) > aspect_max * min(hx, hz):
@@ -659,6 +660,38 @@ def _fill(regions, chosen, x0, x1, z0, z1, angle=0.0):
 
 
 STRAIGHTEN_LOG = {}
+
+
+def despike(ring, max_angle=75.0, max_leg=4.0):
+    """Drops spikes from a zone outline: a corner sharper than `max_angle`
+    with a side shorter than `max_leg` is a jog into a junction (where two
+    border lines meet at a slant), not a corner of the zone, so its
+    neighbours are joined by a straight line instead. Repeats until none is
+    left; keeps the input if that would leave under 4 corners or make the
+    outline cross itself."""
+    out = list(ring)
+    cos_max = math.cos(math.radians(max_angle))
+    changed = True
+    while changed and len(out) > 4:
+        changed = False
+        for i in range(len(out)):
+            a, b, c = out[i - 1], out[i], out[(i + 1) % len(out)]
+            v1 = (a[0] - b[0], a[1] - b[1])
+            v2 = (c[0] - b[0], c[1] - b[1])
+            l1, l2 = math.hypot(*v1), math.hypot(*v2)
+            if l1 < 1e-6 or l2 < 1e-6:
+                del out[i]
+                changed = True
+                break
+            # Interior or exterior: a sharp spike either way.
+            if (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2) > cos_max and min(l1, l2) < max_leg:
+                del out[i]
+                changed = True
+                break
+    out = [q for k, q in enumerate(out) if _turns(out[k - 1], q, out[(k + 1) % len(out)])]
+    if len(out) < 4 or _self_intersects(out):
+        return ring
+    return out
 
 
 def straighten(ring, angles, snap_deg=15.0, jog=1.6, max_move=1.6):
