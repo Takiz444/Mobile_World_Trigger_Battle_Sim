@@ -671,6 +671,7 @@ def despike(ring, max_angle=75.0, max_leg=4.0):
     outline cross itself."""
     out = list(ring)
     cos_max = math.cos(math.radians(max_angle))
+    cos_needle = math.cos(math.radians(30.0))
     changed = True
     while changed and len(out) > 4:
         changed = False
@@ -684,7 +685,9 @@ def despike(ring, max_angle=75.0, max_leg=4.0):
                 changed = True
                 break
             # Interior or exterior: a sharp spike either way.
-            if (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2) > cos_max and min(l1, l2) < max_leg:
+            # (A needle under 30 degrees goes even with longer sides.)
+            cos_ab = (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)
+            if cos_ab > cos_max and min(l1, l2) < max_leg or cos_ab > cos_needle and min(l1, l2) < 2.5 * max_leg:
                 del out[i]
                 changed = True
                 break
