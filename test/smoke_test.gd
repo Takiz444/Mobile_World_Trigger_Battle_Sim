@@ -145,17 +145,13 @@ func _check_submit_feedback() -> void:
 	_check(tl.squad_problem().is_empty() and not tl._submit_button.disabled, "round 2: the reported plan can be submitted")
 	var submitted := [0]
 	tl.plan_submitted.connect(func() -> void: submitted[0] += 1)
-	# A forgotten unaimed attack on another character.
-	var weapon: TriggerCard = null
-	for c in plan.get_available_actions(other):
-		if c.card_type == TriggerCard.CardType.RANGED or c.card_type == TriggerCard.CardType.MELEE:
-			weapon = c
-			break
-	plan.add(other, PlanAction.new(weapon))
+	# A forgotten Look (no spot picked) on another character. (Attacks
+	# never need aiming: left alone they auto-target.)
+	plan.add(other, PlanAction.new(TriggerLibrary.get_look_card()))
 	tl.plan_edited()
 	var problem := tl.squad_problem()
 	_check(int(problem.get("unit", -1)) == other and str(problem.get("text", "")).contains("no target"),
-		"an unaimed attack on another character is found (%s)" % str(problem))
+		"an unaimed Look on another character is found (%s)" % str(problem))
 	_check(not tl._submit_button.disabled and tl._submit_button.tooltip_text.contains(units[other].unit_name),
 		"Submit stays pressable and its tooltip names the character")
 	_check(tl._guide.text.contains(units[other].unit_name), "the guide line names the character to fix")
@@ -274,6 +270,25 @@ func _check_tap_enemy_label() -> void:
 		_board.last_tap_screen = Vector2.INF
 		_check(a != null and a.is_attack() and a.target_unit == ei,
 			"tapping an enemy's %s targets it (ground point %.1f m from its feet)" % [spot[0], ground.distance_to(enemy.pos)])
+	# A new attack starts on auto (nothing to tap); tapping an enemy locks
+	# on, tapping it again goes back to auto.
+	_timeline.begin_new_turn()
+	var gun: TriggerCard = null
+	for c in _controller._player_states[0].unit_data.main_trigger_slots:
+		if c != null and (c as TriggerCard).card_type in [TriggerCard.CardType.MELEE, TriggerCard.CardType.RANGED]:
+			gun = c
+			break
+	_timeline._on_card_tapped(gun)
+	var auto_a := _timeline.get_selected_action()
+	_check(auto_a != null and auto_a.is_auto() and not auto_a.needs_target() and _timeline._missing_targets() == 0,
+		"a new attack auto-targets: nothing left to aim")
+	var chest := cam.unproject_position(foot + Vector3(0, 0.95, 0))
+	_board.last_tap_screen = chest
+	_controller._on_point_selected(enemy.pos, enemy.level, -1)
+	var locked := auto_a.target_unit == ei
+	_controller._on_point_selected(enemy.pos, enemy.level, -1)
+	_board.last_tap_screen = Vector2.INF
+	_check(locked and auto_a.is_auto(), "tapping an enemy locks on; tapping it again goes back to auto")
 	enemy.fog = saved_fog
 	enemy.pos = saved_pos
 	enemy.level = saved_level

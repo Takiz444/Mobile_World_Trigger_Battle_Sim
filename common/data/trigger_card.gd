@@ -27,19 +27,22 @@ enum CardType { MOVE, MELEE, RANGED, SHIELD, UTILITY, STEALTH }
 # --- Trigger traits -----------------------------------------------------------
 ## Attack reach in metres (melee strikes at MELEE_RANGE).
 @export var attack_range: float = 1.8
-## Homing bullets (Hound): accuracy bonus, ignore a moving target's dodge.
+## Homing bullets (Hound).
 @export var homing: bool = false
 ## Curved trajectories (Viper): shoot around buildings at a target the team sees.
 @export var curved: bool = false
 ## Piercing (Ibis, Lead Bullet): ignores Shields; Full Guard only halves it.
 @export var piercing: bool = false
+## Demolishing (Ibis): a shot blocked by buildings blasts through them and
+## brings each one down entirely (towers and other sealed solids still block).
+@export var demolish: bool = false
 ## Flexible blade (Scorpion): strikes around shields (only Full Guard holds).
 @export var flexible: bool = false
 ## Blade-shield (Raygust): a front shield is up while swinging.
 @export var guard: bool = false
 ## Jump (Grasshopper): a fast leap onto the street or a roof.
 @export var jump: bool = false
-## Bonus hit chance (Egret precision, Hound homing).
+## Bonus hit chance (unused: attacks never miss).
 @export var accuracy_bonus: float = 0.0
 ## Special on-hit effect: "weight" (Lead Bullet) roots the target.
 @export var effect: String = ""
@@ -68,11 +71,13 @@ func describe() -> String:
 func trait_text() -> String:
 	var parts: Array[String] = []
 	if homing:
-		parts.append("homing: +hit, beats a moving target's dodge")
+		parts.append("homing bullets")
 	if curved:
 		parts.append("curved: shoots around buildings at targets your team sees")
 	if piercing:
 		parts.append("pierces shields")
+	if demolish:
+		parts.append("blasts through buildings and brings them down")
 	if flexible:
 		parts.append("strikes around shields")
 	if guard:
@@ -80,14 +85,14 @@ func trait_text() -> String:
 	if jump:
 		parts.append("jump up to %.1f m, onto rooftops" % CityGeometry.JUMP_RANGE)
 	if effect == "weight":
-		parts.append("weighs the target down: no moving or dodging for %.0f s" % TurnEngine.WEIGHT_SECONDS)
+		parts.append("weighs the target down: no moving for %.0f s" % TurnEngine.WEIGHT_SECONDS)
 	match card_name:
 		"Shield":
 			parts.append("hold as long as you like; standing still = Full Guard all round")
 		"Bagworm":
 			parts.append("hidden from radar until you attack (this turn)")
 		"Spider":
-			parts.append("string a wire up to %.0f m away: your team gets +defense and +dodge on it" % TurnEngine.SPIDER_RANGE)
+			parts.append("string a wire up to %.0f m away: your team gets +defense on it" % TurnEngine.SPIDER_RANGE)
 		"Look":
 			parts.append("keep watching a point, even while moving")
 		"Wait":

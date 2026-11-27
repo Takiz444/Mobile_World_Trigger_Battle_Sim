@@ -19,11 +19,18 @@ var tiles: Dictionary = {}       # hex maps: map hexes of the play area (bounds)
 var layout: CityLayout
 var section: Dictionary = {}
 var rng: RandomNumberGenerator
+## Buildings brought down (Ibis): indices into all_building_rects() -> true.
+## Gone for good: nobody walks, stands or is hidden there any more.
+var destroyed: Dictionary = {}
 
 var _geometry: CityGeometry
 var _geometry_key := ""
 var _rects: Array = []
 var _rects_for_size := -1
+var _standing: Array = []
+var _standing_index := PackedInt32Array()   # standing list index -> all_building_rects() index
+var _standing_key := ""
+var _destroyed_rev := 0
 
 
 func _init(seed: int = 0) -> void:
@@ -44,17 +51,116 @@ func all_units() -> Array[UnitState]:
 	return result
 
 
-## The enterable buildings (CityBox boxes). On hex maps they are rebuilt
-## when the set of building hexes changes (or after invalidate_buildings()).
-func building_rects() -> Array:
+## Every enterable building of the city (CityBox boxes), standing or not.
+## On hex maps they are rebuilt when the set of building hexes changes (or
+## after invalidate_buildings()).
+func all_building_rects() -> Array:
 	if layout != null:
 		return layout.buildings
 	if _rects_for_size != buildings.size():
 		_rects = []
 		for r in BuildingRects.compute(buildings):
 			_rects.append(CityBox.from_rect(BuildingRects.bounds(r), int(r["floors"])))
+		_group_blocks(_rects)
 		_rects_for_size = buildings.size()
 	return _rects
+
+
+## The enterable buildings still standing (what the rules and geometry use).
+func building_rects() -> Array:
+	var all := all_building_rects()
+	if destroyed.is_empty():
+		return all
+	var key := "%d|%d|%d" % [all.size(), _rects_for_size, _destroyed_rev]
+	if key != _standing_key:
+		_standing = []
+		_standing_index = PackedInt32Array()
+		for i in all.size():
+			if not destroyed.has(i):
+				_standing.append(all[i])
+				_standing_index.append(i)
+		_standing_key = key
+	return _standing
+
+
+## The all_building_rects() index of building_rects()[i].
+func building_id(i: int) -> int:
+	if destroyed.is_empty():
+		return i
+	building_rects()
+	return _standing_index[i] if i >= 0 and i < _standing_index.size() else -1
+
+
+## Hex maps: the rects of one connected block of building hexes are one
+## building (they share a "group"), like a Tokyo building split into boxes.
+static func _group_blocks(rects: Array) -> void:
+	var group := range(rects.size())
+	var find := func(i: int) -> int:
+		while group[i] != i:
+			i = group[i]
+		return i
+	for i in rects.size():
+		for j in range(i + 1, rects.size()):
+			var a: Rect2 = (rects[i]["aabb"] as Rect2).grow(0.02)
+			if a.intersects(rects[j]["aabb"]):
+				group[find.call(j)] = find.call(i)
+	for i in rects.size():
+		rects[i]["group"] = find.call(i)
+
+
+## Brings down building `id` (an all_building_rects() index) for good, with
+## every other box of the same building (its "group"). Returns the
+## indices that came down now.
+func destroy_building(id: int) -> Array:
+	var all := all_building_rects()
+	if id < 0 or id >= all.size() or destroyed.has(id):
+		return []
+	var gone: Array = [id]
+	var group := int(all[id].get("group", -1))
+	if group >= 0:
+		for i in all.size():
+			if i != id and int(all[i].get("group", -1)) == group and not destroyed.has(i):
+				gone.append(i)
+	for i in gone:
+		destroyed[i] = true
+	_destroyed_rev += 1
+	_geometry = null
+	return gone
+
+
+## The destroyed buildings' indices, ascending (for views and snapshots).
+func destroyed_list() -> Array:
+	var out: Array = destroyed.keys()
+	out.sort()
+	return out
+
+
+## Replaces the destroyed set (from a view or snapshot).
+func set_destroyed(ids: Array) -> void:
+	var next := {}
+	var count := all_building_rects().size()
+	for v in ids:
+		var id := int(v)
+		if id >= 0 and id < count:
+			next[id] = true
+	if next.keys().size() == destroyed.size() and next.keys().all(func(k: int) -> bool: return destroyed.has(k)):
+		return
+	destroyed = next
+	_destroyed_rev += 1
+	_geometry = null
+
+
+## Hex maps: the building hexes of the buildings still standing.
+func standing_hexes() -> Dictionary:
+	if destroyed.is_empty():
+		return buildings
+	var out := buildings.duplicate()
+	var rects := BuildingRects.compute(buildings)
+	for id in destroyed:
+		if int(id) < rects.size():
+			for hex in rects[int(id)]["hexes"]:
+				out.erase(hex)
+	return out
 
 
 ## Sealed solids and elevated decks (Tokyo only).
@@ -90,7 +196,7 @@ func bounds() -> Rect2:
 
 ## Continuous geometry of this match's city (walkability, routes).
 func geometry() -> CityGeometry:
-	var key := "%d|%d|%d" % [buildings.size(), tiles.size(), layout.get_instance_id() if layout != null else 0]
+	var key := "%d|%d|%d|%d" % [buildings.size(), tiles.size(), layout.get_instance_id() if layout != null else 0, _destroyed_rev]
 	if _geometry == null or _geometry_key != key:
 		_geometry = CityGeometry.new(bounds(), building_rects(), solid_boxes(), deck_boxes(),
 			layout.blocked if layout != null else null)

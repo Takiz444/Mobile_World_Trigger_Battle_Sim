@@ -239,7 +239,8 @@ static func encode_view(ms: MatchState, team: int, salt: int, fog_wires: bool = 
 		if fog_wires and owner != team and not team_sees_point(ms, team, w["pos"]):
 			continue
 		wires.append([snappedf((w["pos"] as Vector2).x, 0.001), snappedf((w["pos"] as Vector2).y, 0.001), owner])
-	return { "units": units, "wires": wires }
+	# Collapsed buildings are public: everyone sees a building come down.
+	return { "units": units, "wires": wires, "destroyed": ms.destroyed_list() }
 
 
 ## Whether `team` may see a combat event: anything its own units do or

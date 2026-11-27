@@ -22,6 +22,7 @@ var _tiles: Dictionary = {}        # map hexes of the play area (street dressing
 var _bounds := Rect2()
 var _city: CityBuildings
 var _tokyo: TokyoCity
+var _shown_destroyed: Array = []
 var _ground: MeshInstance3D
 var _decor: Node3D
 var _roofs: Node3D
@@ -123,6 +124,7 @@ func pick(screen: Vector2) -> Dictionary:
 ## Builds the board for a match: its Tokyo section (TokyoCity), or on the
 ## old hex map sheet, the hex city (set_map + set_buildings).
 func set_city(ms: MatchState) -> void:
+	_shown_destroyed = []
 	if ms.layout != null:
 		for n in [_city, _ground, _decor, _roofs]:
 			if n != null:
@@ -143,6 +145,16 @@ func set_city(ms: MatchState) -> void:
 		_tokyo = null
 	set_map(ms.tiles, ms.bounds())
 	set_buildings(ms.buildings)
+
+
+## Shows the buildings `ms` has lost (Ibis) as rubble. Cheap when nothing
+## changed.
+func set_destroyed(ms: MatchState) -> void:
+	if _tokyo != null:
+		_tokyo.set_destroyed(ms.destroyed)
+	elif _city != null and _shown_destroyed != ms.destroyed_list():
+		set_buildings(ms.standing_hexes())
+	_shown_destroyed = ms.destroyed_list()
 
 
 ## The Tokyo district on the board (null on the hex sheet).

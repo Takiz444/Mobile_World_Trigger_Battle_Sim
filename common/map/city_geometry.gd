@@ -429,7 +429,31 @@ func jump_route(a: Vector2, la: int, b: Vector2, lb: int) -> Dictionary:
 		return fail   # no jumping through ceilings
 	if a.distance_to(b) < 0.001 and la == lb:
 		return fail
-	return { "ok": true, "segments": [{ "from": a, "to": b, "l0": la, "l1": lb, "fixed": JUMP_TIME }] }
+	return { "ok": true, "segments": [{ "from": a, "to": b, "l0": la, "l1": lb, "fixed": JUMP_TIME,
+		"apex": jump_apex(a, la, b, lb) }] }
+
+
+## The level a jump flies at: high enough to clear everything under its
+## path (the start, the landing, and any building in between), so a
+## character in the air is never drawn, seen or shot at inside a wall.
+func jump_apex(a: Vector2, la: int, b: Vector2, lb: int) -> int:
+	var top := maxi(la, lb)
+	var steps := maxi(1, int(ceil(a.distance_to(b) / 0.1)))
+	for i in steps + 1:
+		top = maxi(top, floors_at(a.lerp(b, float(i) / steps)))
+	return top
+
+
+## The level of a character `f` (0..1) of the way through segment `s`: the
+## start level, then the landing level once it's done. A jump is in the air
+## (at its apex) from take-off to landing; other timed steps (doors,
+## stairs) change level when they finish.
+static func segment_level(s: Dictionary, f: float) -> int:
+	if f >= 1.0 - 1e-9:
+		return int(s["l1"])
+	if s.has("apex") and f > 1e-9:
+		return int(s["apex"])
+	return int(s["l0"])
 
 
 ## Total walking distance and fixed time of a route.

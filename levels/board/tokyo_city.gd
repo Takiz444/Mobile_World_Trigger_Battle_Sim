@@ -57,6 +57,15 @@ var _mat: ShaderMaterial
 var _lit: ShaderMaterial
 var _glow: ShaderMaterial
 var _water: ShaderMaterial
+## Collapse bookkeeping (set_destroyed): the box MultiMesh (building i of
+## the layout is instance i), each building's vision-ray shape and roof pick
+## by layout index, the rooftop clutter's inputs, and what's down already.
+var _boxes: MultiMesh
+var _shapes: Array = []
+var _picks: Array = []
+var _roof_inst: Array = []
+var _roof_props: MeshInstance3D
+var _down := {}
 
 
 func _ready() -> void:
@@ -69,6 +78,11 @@ func build(layout: CityLayout) -> void:
 		c.queue_free()
 	district = layout.district
 	play = layout.bounds
+	_shapes = []
+	_picks = []
+	_roof_inst = []
+	_roof_props = null
+	_down = {}
 	zone = layout.zone
 	_make_materials()
 	var pts := shader_polygon(zone)
@@ -208,6 +222,7 @@ func _build_boxes(layout: CityLayout) -> void:
 			b = b.duplicate()
 			b["y1"] = float(b["y1"]) * TEMPLE_EAVE
 		_set_box(mm, i, b, e[1], e[2])
+	_boxes = mm
 	var mmi := MultiMeshInstance3D.new()
 	mmi.name = "Boxes"
 	mmi.multimesh = mm
@@ -215,6 +230,7 @@ func _build_boxes(layout: CityLayout) -> void:
 	add_child(mmi)
 	_build_solids_physics(layout)
 	_build_picks(layout)
+	_roof_inst = inst
 	_build_roof_props(inst)
 
 
@@ -274,6 +290,8 @@ func _build_solids_physics(layout: CityLayout) -> void:
 	for list in [layout.buildings, layout.solids, layout.decks]:
 		for b in list:
 			var shape := CollisionShape3D.new()
+			if list == layout.buildings:
+				_shapes.append(shape)
 			var box := BoxShape3D.new()
 			var h: Vector2 = b["h"]
 			box.size = Vector3(2.0 * h.x, float(b["y1"]) - float(b["y0"]), 2.0 * h.y)
@@ -294,12 +312,12 @@ func _build_picks(layout: CityLayout) -> void:
 	add_child(root)
 	for i in layout.buildings.size():
 		var b: Dictionary = layout.buildings[i]
-		_pick_body(root, b, int(b["floors"]), i, float(b["floors"]) - 0.025, float(b["floors"]) + 0.025)
+		_picks.append(_pick_body(root, b, int(b["floors"]), i, float(b["floors"]) - 0.025, float(b["floors"]) + 0.025))
 	for b in layout.solids:
 		_pick_body(root, b, -1, -1, 0.0, float(b["y1"]))
 
 
-func _pick_body(root: Node3D, b: Dictionary, floors: int, index: int, y0: float, y1: float) -> void:
+func _pick_body(root: Node3D, b: Dictionary, floors: int, index: int, y0: float, y1: float) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.collision_layer = PICK_LAYER
 	body.collision_mask = 0
@@ -314,6 +332,7 @@ func _pick_body(root: Node3D, b: Dictionary, floors: int, index: int, y0: float,
 	var c: Vector2 = b["c"]
 	body.transform = Transform3D(Basis(Vector3.UP, -float(b["a"])), Vector3(c.x, HexCoord.GROUND_Y + (y0 + y1) * 0.5, c.y))
 	root.add_child(body)
+	return body
 
 
 ## Rooftop clutter (AC units, water tanks, stair housings), kept to the
@@ -321,8 +340,10 @@ func _pick_body(root: Node3D, b: Dictionary, floors: int, index: int, y0: float,
 func _build_roof_props(inst: Array) -> void:
 	var st := LowPoly.begin()
 	var grey := Color(0.55, 0.56, 0.58)
-	for e in inst:
-		var b: Dictionary = e[0]
+	for k in inst.size():
+		if _down.has(k):
+			continue   # collapsed (instance k is layout building k)
+		var b: Dictionary = inst[k][0]
 		if int(b["kind"]) != CityBox.Kind.BUILDING or int(b["floors"]) < 2:
 			continue
 		var h: Vector2 = b["h"]
@@ -343,11 +364,62 @@ func _build_roof_props(inst: Array) -> void:
 		if h.x * h.y > 9.0:
 			var q := CityBox.to_world(b, -corner * 0.55)
 			LowPoly.box(st, Vector3(q.x, roof + 0.1, q.y), Vector3(0.2, 0.1, 0.16), grey, basis)
+	if _roof_props != null:
+		_roof_props.queue_free()
 	var mi := MeshInstance3D.new()
 	mi.name = "RoofProps"
 	mi.mesh = st.commit()
 	mi.material_override = _lit
 	add_child(mi)
+	_roof_props = mi
+
+
+# --- Collapsed buildings --------------------------------------------------------
+
+## Rubble height (floors) of a collapsed building.
+const RUBBLE_HEIGHT := 0.12
+const RUBBLE_COLOR := Color(0.42, 0.41, 0.39)
+
+
+## Shows layout buildings `ids` (index -> true) as collapsed: a low pile of
+## rubble on the footprint, no vision-ray solid, no roof to tap, no rooftop
+## clutter. Collapses are for good, so only new ones are applied.
+func set_destroyed(ids: Dictionary) -> void:
+	var changed := false
+	for k in ids:
+		var i := int(k)
+		if _down.has(i) or _boxes == null or i < 0 or i >= _shapes.size():
+			continue
+		_down[i] = true
+		changed = true
+		var b: Dictionary = (_roof_inst[i][0] as Dictionary).duplicate()
+		b["y0"] = 0.0
+		b["y1"] = RUBBLE_HEIGHT
+		_boxes.set_instance_transform(i, box_transform(b))
+		_boxes.set_instance_color(i, RUBBLE_COLOR)
+		# Plain concrete (the solid style), no windows.
+		var data := _boxes.get_instance_custom_data(i)
+		data.r = float(SOLID_BASE + TokyoDistrict.SolidStyle.PILLAR)
+		data.a = 1.0
+		_boxes.set_instance_custom_data(i, data)
+		(_shapes[i] as Node).queue_free()
+		(_picks[i] as Node).queue_free()
+		_hide_signs(_roof_inst[i][0])
+	if changed:
+		_build_roof_props(_roof_inst)
+
+
+## Shop signs and screens hang on facades: those of a collapsed building go
+## with it.
+func _hide_signs(b: Dictionary) -> void:
+	var signs := find_child("Signs", true, false) as MultiMeshInstance3D
+	if signs == null or signs.multimesh == null:
+		return
+	var mm := signs.multimesh
+	for k in mm.instance_count:
+		var xf := mm.get_instance_transform(k)
+		if CityBox.has_point(b, Vector2(xf.origin.x, xf.origin.z), 0.6):
+			mm.set_instance_transform(k, Transform3D(Basis.from_scale(Vector3.ONE * 0.0001), xf.origin))
 
 
 # --- Boundary -------------------------------------------------------------------

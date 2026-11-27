@@ -372,7 +372,6 @@ func _attack(ms: MatchState, card_name: String, p1: TurnPlan = null) -> Array[Co
 	p0.add(0, PlanAction.new(TriggerLibrary.get_wait_card()))
 	p0.add(0, a)
 	var engine := TurnEngine.new()
-	engine.always_hit = true
 	return engine.resolve(ms, p0, p1 if p1 != null else _plan(ms, 1))
 
 

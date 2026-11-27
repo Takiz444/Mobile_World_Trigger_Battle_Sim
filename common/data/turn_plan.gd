@@ -200,7 +200,7 @@ static func position_at(schedule: Array, us: UnitState, t: float, data: UnitData
 				var f := local / maxf(dur, 0.0001)
 				var at: Vector2 = (s["from"] as Vector2).lerp(s["to"], f)
 				var dir: Vector2 = (s["to"] as Vector2) - (s["from"] as Vector2)
-				return { "pos": at, "level": int(s["l0"]) if f < 1.0 else int(s["l1"]),
+				return { "pos": at, "level": CityGeometry.segment_level(s, f),
 					"moving_dir": dir.normalized() if dir.length() > 0.001 else Vector2.ZERO }
 			local -= dur
 		p = e["to_pos"]

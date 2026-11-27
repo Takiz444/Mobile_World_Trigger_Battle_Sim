@@ -17,6 +17,9 @@ func _ready() -> void:
 	_test_timing()
 	_test_movement()
 	_test_building_levels()
+	_test_jump_flight()
+	_test_ibis_demolition()
+	_test_auto_target()
 	_test_collisions()
 	_test_attacks()
 	_test_shields()
@@ -109,7 +112,7 @@ func _test_timing() -> void:
 	_check(lost.unit_error(ms, us, 0) != "", "an unreachable move makes the plan invalid")
 	var untargeted := TurnPlan.new([plain])
 	untargeted.add(0, PlanAction.new(TriggerLibrary.get_card("Asteroid")))
-	_check(untargeted.unit_error(ms, us, 0).contains("no target"), "an attack needs a target")
+	_check(untargeted.unit_error(ms, us, 0) == "", "an attack with no target is fine: it auto-targets")
 	_check(TurnPlan.fits_lane(TriggerLibrary.get_wait_card(), TurnPlan.MOVE_LANE)
 		and TurnPlan.fits_lane(TriggerLibrary.get_wait_card(), TurnPlan.ACT_LANE)
 		and not TurnPlan.fits_lane(TriggerLibrary.get_card("Asteroid"), TurnPlan.MOVE_LANE), "lanes accept only their actions (Wait fits both)")
@@ -165,6 +168,147 @@ func _test_movement() -> void:
 	p0.add(0, _point("Move", box.get_center(), 2))
 	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
 	_check(a.level == 2 and a.pos.distance_to(box.get_center()) < 0.01, "a character can walk in and climb to the roof")
+
+
+## A Grasshopper jump is in the air from take-off to landing, at the height
+## of what it clears: never at street level inside a building's walls.
+func _test_jump_flight() -> void:
+	for up in [true, false]:
+		var ms := _arena(_block(6, 7, 6, 9, 3))
+		var geo := ms.geometry()
+		var box := _box(ms)
+		var mid := box.get_center()
+		var near := Vector2(box.position.x - 0.8, mid.y)
+		var on_roof := Vector2(box.position.x + 1.5, mid.y)
+		_duel(ms, near if up else on_roof, Vector2(1, 1), 1, 1)
+		var a: UnitState = ms.teams[0][0]
+		a.level = 0 if up else 3
+		var p0 := _plan_for(ms, 0)
+		p0.add(0, _point("Grasshopper", on_roof if up else near, 3 if up else 0))
+		# The plan preview, a moment into the jump, already shows it in the air.
+		var sched := p0.move_schedule(ms, a, 0)
+		var preview_level := int(TurnPlan.position_at(sched, a, 0.1, a.unit_data)["level"])
+		var engine := TurnEngine.new()
+		engine.begin(ms, p0, _plan_for(ms, 1))
+		var in_wall := false
+		var airborne := false
+		while not engine.done():
+			engine.step()
+			in_wall = in_wall or (geo.floors_at(a.pos) > 0 and a.level < geo.floors_at(a.pos))
+			airborne = airborne or (a.moving and a.level == 3 and geo.floors_at(a.pos) == 0)
+		var way := "up" if up else "down"
+		_check(not in_wall, "a jump %s never passes through the building's walls" % way)
+		_check(airborne, "a jump %s flies at roof height over the street" % way)
+		_check(a.level == (3 if up else 0) and a.pos.distance_to(on_roof if up else near) < 0.01, "the jump %s lands where planned" % way)
+		_check(preview_level == 3, "the plan preview shows the jump %s in the air" % way)
+
+
+## Ibis blasts through buildings in its way and brings each one down for
+## good; everyone on it drops to the street, and the target is hit.
+func _test_ibis_demolition() -> void:
+	var build := func(spotter: bool) -> MatchState:
+		var m := _arena(_block(6, 7, 6, 9, 2))
+		var b := _box(m)
+		var y := b.get_center().y
+		var sniper := UnitState.new(TestUnits.legacy()[2], 0, Vector2(b.position.x - 3.0, y), 0.0)
+		var target := UnitState.new(TestUnits.legacy()[1], 1, Vector2(b.end.x + 3.0, y), PI)
+		var on_roof := UnitState.new(TestUnits.legacy()[1], 1, b.get_center() + Vector2(0, 1.0), PI)
+		on_roof.level = 2
+		var team0 := [sniper]
+		if spotter:
+			team0.append(UnitState.new(TestUnits.legacy()[1], 0, target.pos + Vector2(0, 2.5), -PI / 2))
+		m.setup_team(0, _typed(team0))
+		m.setup_team(1, _typed([target, on_roof]))
+		return m
+	var fire := func(m: MatchState) -> void:
+		var p0 := _plan_for(m, 0)
+		var shot := PlanAction.new(TriggerLibrary.get_card("Ibis"))
+		shot.target_unit = 0
+		p0.add(0, shot)
+		TurnEngine.new().resolve(m, p0, _plan_for(m, 1))
+
+	var ms: MatchState = build.call(true)
+	var sniper: UnitState = ms.teams[0][0]
+	var target: UnitState = ms.teams[1][0]
+	_check(not Visibility.has_los(ms, sniper.pos, 0, target.pos, 0), "the building blocks the Ibis line at first")
+	var standing := ms.building_rects().size()
+	fire.call(ms)
+	_check(not ms.destroyed.is_empty() and ms.building_rects().size() < standing, "Ibis brings down the building in its way")
+	_check(ms.geometry().floors_at(_box(_arena(_block(6, 7, 6, 9, 2))).get_center()) == 0, "nothing is left standing on the footprint")
+	_check(target.trion_hp < 100, "the Ibis shot goes on through and hits the target (Trion %d)" % target.trion_hp)
+	var fallen: UnitState = ms.teams[1][1]
+	_check(fallen.level == 0 and ms.geometry().level_ok(fallen.pos, 0), "someone on the roof drops to the street")
+	_check(Visibility.has_los(ms, sniper.pos, 0, target.pos, 0), "the line stays open afterwards")
+	var copy := _arena(_block(6, 7, 6, 9, 2))
+	PlanCodec.apply_state(copy, PlanCodec.encode_state(ms))
+	_check(copy.destroyed_list() == ms.destroyed_list(), "collapsed buildings are in the state snapshot")
+	_check(Visibility.encode_view(ms, 1, 0)["destroyed"] == ms.destroyed_list(), "both sides' views show the collapse")
+
+	# A target nobody on the team sees: no collapse (it would give it away).
+	ms = build.call(false)
+	fire.call(ms)
+	_check(ms.destroyed.is_empty() and ms.teams[1][0].trion_hp == 100, "Ibis at an unseen target brings nothing down")
+	# Egret (no demolish) is still stopped by the building.
+	ms = build.call(true)
+	var p0 := _plan_for(ms, 0)
+	var egret := PlanAction.new(TriggerLibrary.get_card("Egret"))
+	egret.target_unit = 0
+	p0.add(0, egret)
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(ms.destroyed.is_empty() and ms.teams[1][0].trion_hp == 100, "other snipers can't shoot through buildings")
+
+	# Ibis aimed at a building: down it comes, with nobody seen at all.
+	ms = build.call(false)
+	var box := _box(ms)
+	p0 = _plan_for(ms, 0)
+	var blast := PlanAction.new(TriggerLibrary.get_card("Ibis"))
+	blast.set_point(box.get_center(), 0)
+	p0.add(0, blast)
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(not ms.destroyed.is_empty() and ms.geometry().floors_at(box.get_center()) == 0, "Ibis aimed at a building brings it down without a target")
+	_check(ms.teams[1][1].level == 0 and ms.teams[1][0].trion_hp == 100, "aiming at a building drops whoever is on it and hits nobody")
+	# Out of reach: nothing happens.
+	ms = build.call(false)
+	ms.teams[0][0].pos = Vector2(0.5, 1.0)
+	p0 = _plan_for(ms, 0)
+	var far := PlanAction.new(TriggerLibrary.get_card("Ibis"))
+	far.set_point(Vector2(box.end.x - 0.3, box.end.y - 0.3), 0)
+	p0.add(0, far)
+	var far_d: float = (ms.teams[0][0] as UnitState).pos.distance_to(far.point)
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(far_d <= TriggerLibrary.get_card("Ibis").attack_range or ms.destroyed.is_empty(), "a building out of Ibis reach stays up")
+
+
+## Attacks left without a target hit the nearest enemy they can when they
+## fire; a locked-on target overrides that.
+func _test_auto_target() -> void:
+	var setup := func() -> MatchState:
+		var m := _arena()
+		var shooter := UnitState.new(TestUnits.legacy()[1], 0, Vector2(5, 10), 0.0)
+		var far := UnitState.new(TestUnits.legacy()[1], 1, Vector2(12, 10), PI)
+		var near := UnitState.new(TestUnits.legacy()[1], 1, Vector2(9, 11), PI)
+		m.setup_team(0, _typed([shooter]))
+		m.setup_team(1, _typed([far, near]))
+		return m
+	var ms: MatchState = setup.call()
+	var p0 := _plan_for(ms, 0)
+	p0.add(0, PlanAction.new(TriggerLibrary.get_card("Asteroid")))
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(ms.teams[1][1].trion_hp == 70 and ms.teams[1][0].trion_hp == 100, "auto-target hits the nearest enemy in reach")
+	ms = setup.call()
+	p0 = _plan_for(ms, 0)
+	var locked := PlanAction.new(TriggerLibrary.get_card("Asteroid"))
+	locked.target_unit = 0
+	p0.add(0, locked)
+	TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	_check(ms.teams[1][0].trion_hp == 70 and ms.teams[1][1].trion_hp == 100, "a locked-on target overrides auto")
+	ms = setup.call()
+	ms.teams[0][0].pos = Vector2(1, 25)
+	p0 = _plan_for(ms, 0)
+	p0.add(0, PlanAction.new(TriggerLibrary.get_card("Asteroid")))
+	var events := TurnEngine.new().resolve(ms, p0, _plan_for(ms, 1))
+	var said := events.any(func(e: CombatEvent) -> bool: return e.message.contains("no enemy in reach"))
+	_check(said and ms.teams[1][0].trion_hp == 100 and ms.teams[1][1].trion_hp == 100, "auto with nobody in reach does nothing")
 
 
 ## Buildings have a ground floor and a roof only, and a Grasshopper jump the
@@ -247,10 +391,10 @@ func _test_collisions() -> void:
 # --- Attacks --------------------------------------------------------------------
 
 func _test_attacks() -> void:
-	# Asteroid (5 + 5 power) into an unshielded target: 10 damage.
-	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10)) == 90, "a ranged hit in range deals attack + power")
+	# Asteroid (5 + 5 power) x3 into an unshielded target: 30 damage.
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10)) == 70, "a ranged hit in range deals (attack + power) x3")
 	_check(_shot("Asteroid", Vector2(5, 10), Vector2(15, 10)) == 100, "out of range: no shot")
-	_check(_shot("Kogetsu", Vector2(5, 10), Vector2(6.5, 10)) == 89, "melee hits within reach (5 + 6)")
+	_check(_shot("Kogetsu", Vector2(5, 10), Vector2(6.5, 10)) == 67, "melee hits within reach ((5 + 6) x3)")
 	_check(_shot("Kogetsu", Vector2(5, 10), Vector2(8, 10)) == 100, "melee can't reach 3 m")
 
 	# A building between shooter and target blocks the shot; Viper curves
@@ -270,7 +414,6 @@ func _test_attacks() -> void:
 		shot.target_unit = 0
 		p0.add(0, shot)
 		var engine := TurnEngine.new()
-		engine.always_hit = true
 		engine.resolve(copy, p0, _plan_for(copy, 1))
 		var hp: int = copy.teams[1][0].trion_hp
 		if card_name == "Asteroid":
@@ -287,11 +430,11 @@ func _test_attacks() -> void:
 
 func _test_shields() -> void:
 	# Standing still behind a shield: Full Guard (defense x1.5 all round).
-	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), PI, "shield_still") == 97, "a standing shield is a Full Guard (10 - 7.5)")
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), PI, "shield_still") == 92, "a standing shield is a Full Guard ((10 - 7.5) x3)")
 	# Walking away with the shield up: hit from behind, no protection.
-	_check(_shot("Asteroid", Vector2(5, 10), Vector2(7, 10), 0.0, "shield_away") == 90, "a shield doesn't cover your back")
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(7, 10), 0.0, "shield_away") == 70, "a shield doesn't cover your back")
 	# Walking but watching the shooter: the front shield holds.
-	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), 0.0, "shield_watch") == 95, "a front shield on the move stops 5")
+	_check(_shot("Asteroid", Vector2(5, 10), Vector2(10, 10), 0.0, "shield_watch") == 85, "a front shield on the move stops 5 (x3)")
 	# A raised front shield (not a Full Guard) against a blade that bends around it.
 	var ms := _arena()
 	_duel(ms, Vector2(5, 10), Vector2(6.5, 10), 3, 1)
@@ -304,7 +447,7 @@ func _test_shields() -> void:
 	_check(is_equal_approx(engine._mitigation(guard, Vector2(5, 10), TriggerLibrary.get_card("Asteroid")), 5.0)
 		and is_equal_approx(engine._mitigation(guard, Vector2(5, 10), TriggerLibrary.get_card("Scorpion")), 0.0),
 		"Scorpion strikes around a front shield")
-	_check(_shot("Ibis", Vector2(2, 10), Vector2(10, 10), PI, "shield_still") == 91, "Ibis pierces: Full Guard only halves (13 - 3.75)")
+	_check(_shot("Ibis", Vector2(2, 10), Vector2(10, 10), PI, "shield_still") == 72, "Ibis pierces: Full Guard only halves ((13 - 3.75) x3)")
 	var u := UnitState.new(TestUnits.legacy()[0], 0, Vector2.ZERO, 0.0)
 	_check(TurnEngine.in_shield_arc(u, Vector2(3, 1)) and not TurnEngine.in_shield_arc(u, Vector2(-3, 0.5)), "a shield covers the front half")
 
@@ -323,7 +466,6 @@ func _test_triggers() -> void:
 	p1.add(0, _hold("Wait", 1.5), TurnPlan.MOVE_LANE)
 	p1.add(0, _point("Move", Vector2(10, 20)))
 	var engine := TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, p0, p1)
 	var b: UnitState = ms.teams[1][0]
 	_check(b.trion_hp == 100 and b.pos.distance_to(Vector2(10, 10)) < 6.0, "Lead Bullet roots the target (moved %.1f m)" % b.pos.distance_to(Vector2(10, 10)))
@@ -341,31 +483,25 @@ func _test_triggers() -> void:
 	p0b.add(0, _hold("Wait", 1.0))
 	p0b.add(0, shot)
 	engine = TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, p0b, p1)
 	_check(ms.teams[1][0].trion_hp == 100 and ms.teams[1][0].stealth_active, "Bagworm hides a character beyond the reveal range")
 	_check(Visibility.enemy_states(ms, 0)[ms.teams[1][0]] == Visibility.State.HIDDEN, "a Bagworm user is off radar")
 
-	# Spider wire: the deploying team gets defense and dodge on it.
+	# Attacks never miss: whoever moves, stands on a wire, or fires what,
+	# a shot that can be taken lands.
 	ms = _arena()
 	_duel(ms, Vector2(5, 10), Vector2(12, 10), 3, 1)
 	var scout: UnitState = ms.teams[0][0]
 	var enemy: UnitState = ms.teams[1][0]
 	var e2 := TurnEngine.new()
 	e2.begin(ms, _plan_for(ms, 0), _plan_for(ms, 1))
-	var before := e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid"))
 	ms.wires.append({ "pos": scout.pos, "team": 0 })
-	var after := e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid"))
-	_check(after < before, "standing on your own Spider wire makes you harder to hit")
-	ms.wires[0]["team"] = 1
-	_check(is_equal_approx(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")), before), "the enemy's wire gives no bonus")
 	enemy.moving = true
-	_check(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")) < before, "shooting on the move is less accurate")
-	enemy.moving = false
 	scout.moving = true
-	_check(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Asteroid")) < before
-		and is_equal_approx(e2.hit_chance(enemy, scout, TriggerLibrary.get_card("Hound")), before + 0.15),
-		"a moving target dodges straight shots, but not Hound")
+	var sure := true
+	for card_name in ["Asteroid", "Hound", "Egret", "Scorpion", "Kogetsu"]:
+		sure = sure and is_equal_approx(e2.hit_chance(enemy, scout, TriggerLibrary.get_card(card_name)), 1.0)
+	_check(sure, "every attack hits 100% (moving shooter, moving target on its own Spider wire)")
 
 	# Spider placement range.
 	ms = _arena()
@@ -389,7 +525,6 @@ func _test_simultaneity() -> void:
 		hit.target_unit = 0
 		plans[team].add(0, hit)
 	var engine := TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, plans[0], plans[1])
 	_check(ms.teams[0][0].is_bailed and ms.teams[1][0].is_bailed and MatchRunner.winner(ms) == MatchRunner.DRAW,
 		"blows landing at the same moment knock both out (draw)")
@@ -406,7 +541,6 @@ func _test_simultaneity() -> void:
 		hit.target_unit = 0
 		plans[team].add(0, hit)
 	engine = TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, plans[0], plans[1])
 	_check(not ms.teams[0][0].is_bailed and ms.teams[1][0].is_bailed, "with more Stamina your blow lands first")
 
@@ -572,7 +706,7 @@ func _test_plan_codec() -> void:
 		"rejects a target off the map": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = [5000, 10],
 		"rejects a non-number target": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = ["5", 10],
 		"rejects an infinite target": func(d: Dictionary) -> void: d["units"][0]["move"][0]["to"] = [1e300, 10],
-		"rejects a missing target": func(d: Dictionary) -> void: d["units"][0]["act"][0].erase("unit"),
+		"rejects a gun aimed at a spot": func(d: Dictionary) -> void: d["units"][0]["act"][0]["to"] = [6, 10],
 		"rejects a bad enemy index": func(d: Dictionary) -> void: d["units"][0]["act"][0]["unit"] = 7,
 		"rejects a negative hold": func(d: Dictionary) -> void: d["units"][0]["act"][1]["hold"] = -3,
 		"rejects a lane longer than the turn": func(d: Dictionary) -> void: d["units"][0]["act"][1]["hold"] = 6.0,
@@ -586,6 +720,11 @@ func _test_plan_codec() -> void:
 		var d: Dictionary = base.duplicate(true)
 		(cases[label] as Callable).call(d)
 		_check(str(PlanCodec.decode_plan_checked(d, units, ms, ms.teams[0])["error"]) != "", label)
+	var auto: Dictionary = base.duplicate(true)
+	auto["units"][0]["act"][0].erase("unit")
+	var auto_round := PlanCodec.decode_plan_checked(auto, units, ms, ms.teams[0])
+	_check(str(auto_round["error"]) == "" and (auto_round["plan"] as TurnPlan).lane(0, TurnPlan.ACT_LANE)[0].is_auto(),
+		"an attack without a target unit is accepted as auto-targeting")
 
 	var fallback := MatchRunner.build_fallback_plan(TriggerLibrary.sample_units())
 	_check(is_equal_approx(fallback.act_used(0), TurnPlan.TURN_SECONDS), "the AFK fallback holds a shield all turn")
@@ -773,7 +912,6 @@ func _fire(ms: MatchState, card_name: String) -> int:
 	a.target_unit = 0
 	p0.add(0, a)
 	var engine := TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, p0, _plan_for(ms, 1))
 	return ms.teams[1][0].trion_hp
 
@@ -808,7 +946,6 @@ func _shot(card_name: String, from: Vector2, to: Vector2, target_facing: float =
 	a.target_unit = 0
 	p0.add(0, a)
 	var engine := TurnEngine.new()
-	engine.always_hit = true
 	engine.resolve(ms, p0, p1)
 	return ms.teams[1][0].trion_hp
 

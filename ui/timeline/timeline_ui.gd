@@ -336,6 +336,15 @@ func _refresh_guide(error: String = "") -> void:
 				text = "Tap a street spot within %.0f m to string the wire." % TurnEngine.SPIDER_RANGE
 			_:
 				text = "Tap an enemy to target with %s." % sel.card.card_name
+	elif sel.is_attack():
+		color = READY_COLOR
+		if sel.card.demolish and sel.has_point and sel.target_unit < 0:
+			text = "%s aimed at a building: it comes down. Tap it again for auto, or tap an enemy." % sel.card.card_name
+		elif sel.target_unit >= 0:
+			text = "%s locked on. Tap that enemy again for auto." % sel.card.card_name
+		else:
+			text = "%s on auto: hits the nearest enemy in reach. Tap an enemy to lock on%s." % [sel.card.card_name,
+				", or a building to bring it down" if sel.card.demolish else ""]
 	else:
 		color = READY_COLOR
 		text = "%s set. Add more, pick another character, or Submit Turn." % sel.card.card_name

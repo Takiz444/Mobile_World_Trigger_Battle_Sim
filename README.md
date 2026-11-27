@@ -155,17 +155,22 @@ Naming: `snake_case` for files/folders, `PascalCase` for node names.
 - `unit_state.gd` (position, level, facing angle), `match_state.gd` (squads,
   city, Spider wires), `combat_event.gd` (timestamped).
 - `turn_engine.gd` — the deterministic continuous-time turn (see above).
-  An attack targets an enemy character and only goes off if the attacker's
-  team sees the target at that moment and has a clear line (Viper curves
-  around buildings); melee needs the target within reach on the same level.
+  An attack auto-targets the nearest enemy it can hit when it fires, unless
+  the player locks it on an enemy (tap the enemy; tap again for auto). It
+  only goes off if the attacker's team sees the target at that moment and
+  has a clear line (Viper curves around buildings); melee needs the target
+  within reach on the same level. Damage is (attack + power - shields) x3.
   Failed shots read the same whatever the reason, so they reveal nothing.
 - Triggers: Scorpion strikes around shields, Raygust shields while swinging,
-  Viper curves, Hound homes (+hit, beats a moving target's dodge), Egret /
-  Ibis are long-range snipers (Ibis pierces shields), Lead Bullet roots the
+  Viper curves, Hound homes, Egret /
+  Ibis are long-range snipers (Ibis pierces shields, blasts through
+  buildings in its way and brings them down, and can be aimed at a building
+  to bring it down with no target), Lead Bullet roots the
   target for 3 s, Grasshopper jumps onto roofs, Spider strings a wire your
-  team gets +defense / +dodge on. A **Shield** is held for as long as you
+  team gets +defense on. A **Shield** is held for as long as you
   choose; standing still behind it is a **Full Guard** (all round, x1.5).
-  Shooting on the move is less accurate; moving targets dodge straight shots.
+  Attacks never miss: a shot that can be taken (reach, sight, clear line)
+  always lands.
 - `visibility.gd` — per-character vision and fog of war (GDD 4.3): a short
   all-round **detection radius** (3.5 m) and a long **sight cone** (15.6 m,
   ±45°) in the facing direction. Scopes and height extend the sight range.

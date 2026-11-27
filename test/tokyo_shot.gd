@@ -3,6 +3,7 @@ extends Node3D
 ## QA of the map; needs a window, so do NOT pass --headless).
 ##
 ##   godot --path . res://test/tokyo_shot.tscn -- <out.png> [district|seed] [ortho] [pitch] [yaw] [dx] [dz]
+##   (TT_DESTROY=<n> shows the n buildings nearest the centre collapsed)
 ##
 ## The second argument is a district id (a section near its middle) or a
 ## number (TokyoMap.random_section of that seed). dx / dz shift the camera
@@ -47,6 +48,16 @@ func _ready() -> void:
 	var board := CityBoard.new()
 	add_child(board)
 	board.set_city(ms)
+	# TT_DESTROY=<n>: collapse the n buildings nearest the section's centre
+	# (Ibis), to check the rubble.
+	if OS.get_environment("TT_DESTROY") != "":
+		var rects := ms.all_building_rects()
+		var mid := ms.bounds().get_center()
+		var order := range(rects.size())
+		order.sort_custom(func(x: int, y: int) -> bool:
+			return (rects[x]["c"] as Vector2).distance_to(mid) < (rects[y]["c"] as Vector2).distance_to(mid))
+		ms.set_destroyed(order.slice(0, OS.get_environment("TT_DESTROY").to_int()))
+		board.set_destroyed(ms)
 	for n in hide:
 		for node in board.find_children(n, "", true, false):
 			(node as Node3D).visible = false

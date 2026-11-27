@@ -306,6 +306,10 @@ static func decode_plan_checked(d: Dictionary, units: Array[UnitData], ms: Match
 					if not _in_range(item["unit"], 0, enemies - 1):
 						return _bad("%s: malformed target unit" % where)
 					a.target_unit = int(item["unit"])
+				# Attacks aim at an enemy (or auto-target); only a demolishing
+				# trigger (Ibis) may aim at a spot instead, and not at both.
+				if a.is_attack() and a.has_point and (not card.demolish or a.target_unit >= 0):
+					return _bad("%s: %s can't aim at a spot" % [where, card.card_name])
 				if a.uses_hold():
 					var hold: Variant = item.get("hold", a.hold)
 					if not _finite_number(hold) or float(hold) < TurnPlan.MIN_HOLD - 0.001 or float(hold) > TurnPlan.TURN_SECONDS + 0.001:
@@ -351,7 +355,7 @@ static func encode_state(ms: MatchState) -> Dictionary:
 	for w in ms.wires:
 		wires.append([(w["pos"] as Vector2).x, (w["pos"] as Vector2).y, int(w["team"])])
 	# RNG state is a 64-bit int; send it as a string so JSON doubles can't round it.
-	return { "units": units, "wires": wires, "rng_state": str(ms.rng.state) }
+	return { "units": units, "wires": wires, "destroyed": ms.destroyed_list(), "rng_state": str(ms.rng.state) }
 
 
 static func apply_state(ms: MatchState, d: Dictionary) -> void:
@@ -372,6 +376,7 @@ static func apply_state(ms: MatchState, d: Dictionary) -> void:
 	for w in d.get("wires", []):
 		if w is Array and w.size() >= 3:
 			ms.wires.append({ "pos": Vector2(float(w[0]), float(w[1])), "team": int(w[2]) })
+	ms.set_destroyed(d.get("destroyed", []))
 	if d.has("rng_state"):
 		ms.rng.state = str(d["rng_state"]).to_int()
 

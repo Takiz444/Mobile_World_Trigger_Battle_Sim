@@ -4,7 +4,10 @@ extends RefCounted
 ##
 ##   Move / Grasshopper   point + level: where to go (Movement lane)
 ##   Look / Spider        point: where to watch / string the wire
-##   Melee / Ranged       target_unit: which enemy (index in their squad)
+##   Melee / Ranged       target_unit: which enemy (index in their squad), or
+##                        -1 = auto: the nearest enemy it can hit when it
+##                        fires. Ibis may instead aim at a point (a building
+##                        to bring down).
 ##   Shield / Wait        hold: how many seconds
 ##   Bagworm              nothing
 
@@ -41,12 +44,19 @@ func uses_hold() -> bool:
 	return card != null and (card.card_name == "Wait" or card.card_type == TriggerCard.CardType.SHIELD)
 
 
-## Whether this action still needs a target picked on the board.
+## Whether this attack picks its own target when it fires (no enemy locked
+## on, no building aimed at).
+func is_auto() -> bool:
+	return is_attack() and target_unit < 0 and not has_point
+
+
+## Whether this action still needs a target picked on the board. Attacks
+## never do: left alone they auto-target.
 func needs_target() -> bool:
 	if card == null:
 		return false
 	if is_attack():
-		return target_unit < 0
+		return false
 	if TurnPlan.is_move_card(card) or card.card_name == "Look" or card.card_name == "Spider":
 		return not has_point
 	return false

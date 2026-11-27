@@ -32,8 +32,12 @@ extends RefCounted
 ##     plan routes on it, so they must update.
 ## 12: battle zones follow the streets: "map" is ["asakusa", zone index];
 ##     district data rebuilt (grid-aligned, lower buildings, zones).
-const VERSION := 12
-const MIN_SUPPORTED := 12
+## 13: attacks never miss and hit x3 harder; attacks with no target unit
+##     auto-target; Ibis can aim at a building ("to") and brings buildings
+##     down (views and state snapshots carry "destroyed"); jumps fly at
+##     their apex. Rules differ, so older clients must update.
+const VERSION := 13
+const MIN_SUPPORTED := 13
 
 
 static func is_supported(client_version: int, min_supported: int = MIN_SUPPORTED) -> bool:

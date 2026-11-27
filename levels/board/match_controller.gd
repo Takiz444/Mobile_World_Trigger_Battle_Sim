@@ -299,18 +299,37 @@ func _on_point_selected(p: Vector2, level: int, building: int) -> void:
 		return
 	var sel := _timeline.get_selection()
 	var a: PlanAction = sel.get("action")
-	# Attacks: tap an enemy (one we know about).
+	# Attacks auto-target the nearest enemy in reach when they fire. Tapping
+	# an enemy locks on to it; tapping it again goes back to auto. Ibis can
+	# also be aimed at a building to bring it down.
 	if a != null and a.is_attack():
 		var enemy := _enemy_at_screen(_board.last_tap_screen)
 		if enemy == -1:
 			enemy = _enemy_near(p)
 		if enemy != -1:
-			a.target_unit = enemy
+			if a.target_unit == enemy:
+				a.target_unit = -1
+				_timeline.flash("%s back on auto: it hits the nearest enemy in reach." % a.card.card_name)
+			else:
+				a.target_unit = enemy
+				a.has_point = false
+				_timeline.flash("%s locked on %s. Tap them again for auto." % [a.card.card_name, _enemy_states[enemy].unit_data.unit_name])
+			_timeline.plan_edited()
+			return
+		if a.card.demolish and building >= 0 and p != CityBoard.OFF_BOARD:
+			var geo := _ms.geometry()
+			if a.has_point and geo.rect_at(a.point) != -1 and geo.rect_at(a.point) == geo.rect_at(p):
+				a.has_point = false
+				_timeline.flash("%s back on auto: it hits the nearest enemy in reach." % a.card.card_name)
+			else:
+				a.set_point(p, 0)
+				a.target_unit = -1
+				_timeline.flash("%s will bring that building down. Tap it again for auto." % a.card.card_name)
 			_timeline.plan_edited()
 			return
 	if p == CityBoard.OFF_BOARD:
 		if a != null and a.is_attack():
-			_timeline.flash("Tap an enemy you can see (or a radar ping) to target it.")
+			_timeline.flash(_auto_hint(a))
 		return
 	# Tapping one of your characters commands it (unless placing a point).
 	var own := _own_near(p)
@@ -322,7 +341,7 @@ func _on_point_selected(p: Vector2, level: int, building: int) -> void:
 		return
 	if a == null or not _wants_point(a):
 		if a != null and a.is_attack():
-			_timeline.flash("Tap an enemy you can see (or a radar ping) to target it.")
+			_timeline.flash(_auto_hint(a))
 		return
 	_place_point(a, p, level, building)
 
@@ -395,6 +414,40 @@ func _restore(a: PlanAction, old: PlanAction) -> void:
 	a.point = old.point
 	a.level = old.level
 	a.has_point = old.has_point
+
+
+## What tapping can do with attack `a`.
+static func _auto_hint(a: PlanAction) -> String:
+	var extra := ", or a building to bring it down" if a.card.demolish else ""
+	return "%s auto-targets the nearest enemy in reach. Tap an enemy to lock on%s." % [a.card.card_name, extra]
+
+
+## The enemy an auto-targeting attack `a` fired from (pos, lvl) would pick,
+## going by what we know now (enemies in sight, radar pings): the nearest in
+## reach with a shot at it. -1 when none.
+func _predict_auto(a: PlanAction, pos: Vector2, lvl: int) -> int:
+	var melee := a.card.card_type == TriggerCard.CardType.MELEE
+	var reach := TurnEngine.MELEE_RANGE if melee else a.card.attack_range
+	var best := -1
+	var best_d := INF
+	for i in _enemy_states.size():
+		var e := _enemy_states[i]
+		if e.is_bailed:
+			continue
+		var tp := _known_pos(e)
+		if tp == OFFBOARD:
+			continue
+		var d := pos.distance_to(tp)
+		if d > reach or d >= best_d:
+			continue
+		var tl := e.level if e.fog == Visibility.State.SIGHT else 0
+		if melee and tl != lvl:
+			continue
+		if not melee and not a.card.curved and not a.card.demolish and not Visibility.has_los(_ms, pos, lvl, tp, tl):
+			continue
+		best = i
+		best_d = d
+	return best
 
 
 static func _wants_point(a: PlanAction) -> bool:
@@ -541,6 +594,10 @@ func _update_targeting() -> void:
 		var pts: Array = []
 		for s in e["segments"]:
 			pts.append(_board.world_at(s["from"], int(s["l0"])))
+			if s.has("apex"):
+				# A jump's line goes up to its apex, over whatever it clears.
+				pts.append(_board.world_at(s["from"], int(s["apex"])))
+				pts.append(_board.world_at(s["to"], int(s["apex"])))
 			pts.append(_board.world_at(s["to"], int(s["l1"])))
 		_board.add_path(pts, Color(color, 0.75))
 		_board.add_marker(e["to_pos"], int(e["to_level"]), Color(color, 0.8), 0.3)
@@ -631,6 +688,12 @@ func _draw_reach(a: PlanAction, pos: Vector2, lvl: int, color: Color) -> void:
 		var tp := _known_pos(_enemy_states[a.target_unit])
 		if tp != OFFBOARD:
 			_board.add_marker(tp, _enemy_states[a.target_unit].level, Color(1.0, 0.4, 0.3, 0.9), 0.55)
+	elif a.is_auto():
+		# Who auto-targeting would hit, as things stand (a softer marker).
+		var ai := _predict_auto(a, pos, lvl)
+		if ai != -1:
+			var e := _enemy_states[ai]
+			_board.add_marker(_known_pos(e), e.level if e.fog == Visibility.State.SIGHT else 0, Color(1.0, 0.7, 0.35, 0.7), 0.5)
 	if a.has_point and not TurnPlan.is_move_card(a.card):
 		_board.add_marker(a.point, 0, Color(color, 0.9), 0.4)
 
@@ -659,30 +722,42 @@ func _update_prediction(a: PlanAction, u: UnitState, pos: Vector2, lvl: int) -> 
 	_prediction_label.visible = false
 	if a == null or not a.is_attack():
 		return
+	var melee := a.card.card_type == TriggerCard.CardType.MELEE
+	var reach := TurnEngine.MELEE_RANGE if melee else a.card.attack_range
+	var damage := TurnEngine.hit_damage(u.unit_data.attack_rating + a.card.power, 0.0)
+	var text := ""
+	# Ibis aimed at a building.
+	if a.card.demolish and a.has_point and a.target_unit < 0:
+		var bd := pos.distance_to(a.point)
+		text = "%s » building: %.1f m (reach %.1f m)" % [a.card.card_name, bd, reach]
+		text += "  ·  out of reach from there" if bd > reach else "  ·  brings it (and anything in the way) down"
+		_prediction_label.text = text
+		_prediction_label.visible = true
+		return
 	var ti := a.target_unit
-	if ti < 0 and _hover_point != Vector2.INF:
-		ti = _hover_enemy if _hover_enemy != -1 else _enemy_near(_hover_point)
-	if ti < 0 or ti >= _enemy_states.size():
+	var auto := ti < 0
+	if auto:
+		ti = _predict_auto(a, pos, lvl)
+		if ti < 0:
+			_prediction_label.text = "%s (auto): no enemy in reach from there yet. It hits the nearest enemy in reach when it fires." % a.card.card_name
+			_prediction_label.visible = true
+			return
+	if ti >= _enemy_states.size():
 		return
 	var target := _enemy_states[ti]
 	var tp := _known_pos(target)
 	if tp == OFFBOARD:
 		return
 	var dist := pos.distance_to(tp)
-	var melee := a.card.card_type == TriggerCard.CardType.MELEE
-	var reach := TurnEngine.MELEE_RANGE if melee else a.card.attack_range
-	var text := "%s » %s: %.1f m (reach %.1f m)" % [a.card.card_name, target.unit_data.unit_name, dist, reach]
+	text = "%s » %s%s: %.1f m (reach %.1f m)" % [a.card.card_name, target.unit_data.unit_name, " (auto)" if auto else "", dist, reach]
 	if dist > reach:
 		text += "  ·  out of reach from there"
-	elif not melee and not a.card.curved and not Visibility.has_los(_ms, pos, lvl, tp, target.level):
+	elif not melee and not a.card.curved and not a.card.demolish and not Visibility.has_los(_ms, pos, lvl, tp, target.level):
 		text += "  ·  no clear line"
 	else:
-		var probe := TurnEngine.new()
-		probe._ms = _ms
-		var ghost := UnitState.new(u.unit_data, u.team, pos, (tp - pos).angle())
-		ghost.level = lvl
-		var chance := probe.hit_chance(ghost, target, a.card)
-		text += "  ·  %d%% to hit, %d damage before shields" % [roundi(chance * 100.0), u.unit_data.attack_rating + a.card.power]
+		text += "  ·  always hits, %d damage before shields" % damage
+		if a.card.demolish and not melee and not Visibility.has_los(_ms, pos, lvl, tp, target.level):
+			text += " (blasts through the buildings in the way)"
 	if target.fog != Visibility.State.SIGHT:
 		text += "  ·  (radar only: must be seen when it fires)"
 	_prediction_label.text = text
@@ -879,6 +954,9 @@ func _apply_view(view: Dictionary) -> void:
 	for w in view.get("wires", []):
 		if w is Array and w.size() >= 3:
 			_ms.wires.append({ "pos": Vector2(float(w[0]), float(w[1])), "team": int(w[2]) })
+	if view.has("destroyed"):
+		_ms.set_destroyed(view["destroyed"])
+		_board.set_destroyed(_ms)
 
 
 ## Combat effects for one frame's events (cosmetic).
@@ -1014,7 +1092,7 @@ func _present_combat(events: Array) -> void:
 			impact_delay = maxf(impact_delay, fx.tracer(from, aim, color, arc, heavy))
 		if missed:
 			fx.popup(_units_view.head_pos(target), "MISS", MISS_COLOR)
-		elif message.contains("mitigated") and not message.contains("mitigated 0.0"):
+		elif message.contains("shields stopped") and not message.contains("shields stopped 0)"):
 			fx.shield_flash(to, from - to, GUARD_COLOR)
 	if results.is_empty():
 		return

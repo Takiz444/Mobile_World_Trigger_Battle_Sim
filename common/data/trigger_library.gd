@@ -70,7 +70,7 @@ static func sample_cards() -> Dictionary:
 			"Lead Bullet": _traits(make_card("Lead Bullet", 1.2, 10, ranged, true, 0), { "attack_range": 5 * HEX, "piercing": true, "effect": "weight" }),
 			# Sniper rifles.
 			"Egret": _traits(make_card("Egret", 1.8, 20, ranged, false, 5), { "attack_range": 10 * HEX, "accuracy_bonus": 0.05 }),
-			"Ibis": _traits(make_card("Ibis", 2.4, 25, ranged, false, 8), { "attack_range": 9 * HEX, "piercing": true }),
+			"Ibis": _traits(make_card("Ibis", 2.4, 25, ranged, false, 8), { "attack_range": 9 * HEX, "piercing": true, "demolish": true }),
 			# Defense / utility.
 			"Shield": make_card("Shield", 0.0, 10, TriggerCard.CardType.SHIELD, true, 0),
 			"Bagworm": make_card("Bagworm", 0.6, 10, TriggerCard.CardType.STEALTH, true, 0),

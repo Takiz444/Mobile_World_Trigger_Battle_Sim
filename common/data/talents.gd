@@ -24,7 +24,7 @@ const LABELS := { "stamina": "Stamina", "hp": "HP", "atk": "ATK" }
 const HINTS := {
 	"stamina": "+%d%% speed: every action and move takes less time" % roundi(TEMPO_PER_POINT * 100.0),
 	"hp": "+%d Trion: survive more hits" % HP_PER_POINT,
-	"atk": "+%d damage on every hit" % ATK_PER_POINT,
+	"atk": "+%d damage on every hit" % roundi(ATK_PER_POINT * TurnEngine.DAMAGE_SCALE),
 }
 
 
